@@ -1,4 +1,5 @@
-import { calculateScore, validateTaskInput, validateDate, type Assessment, type Audit, type ChecklistItem, type CommandReceipt, type Completion, type Container, type LedgerEntry, type Routine, type Settings, type Task, type WorkSession } from './domain'
+import { calculateScore, validateTaskInput, validateDate, type Assessment, type Audit, type ChecklistItem, type CommandReceipt, type Completion, type Container, type LabelDefinition, type LabelGroup, type LedgerEntry, type Routine, type SavedTemplate, type Settings, type Task, type WorkSession } from './domain'
+import { validateLabelSelection } from './labels'
 
 export type Snapshot = {
   format: 'coachbundle'; version: 1; exportedAt: string
@@ -6,6 +7,9 @@ export type Snapshot = {
   routines: Routine[]; sessions: WorkSession[]; commands: CommandReceipt[]; audits: Audit[]; settings: Settings[]
   containers?: Container[]
   checklistItems?: ChecklistItem[]
+  labelGroups?: LabelGroup[]
+  labelDefinitions?: LabelDefinition[]
+  savedTemplates?: SavedTemplate[]
 }
 
 const tableNames = ['tasks', 'assessments', 'completions', 'ledger', 'routines', 'sessions', 'commands', 'audits', 'settings'] as const
@@ -149,6 +153,45 @@ export function validateSnapshot(input: unknown): asserts input is Snapshot {
     if ((audit.taskId !== null && !taskIds.has(audit.taskId)) || !filled(audit.operation) || !timestamp(audit.at) || typeof audit.detail !== 'string') throw new Error('監査履歴が不正です')
   }
   const settings = tables.settings[0] as Settings
+  if (input.labelGroups !== undefined && !Array.isArray(input.labelGroups)) throw new Error('labelGroupsが不正です')
+  if (input.labelDefinitions !== undefined && !Array.isArray(input.labelDefinitions)) throw new Error('labelDefinitionsが不正です')
+  const groups = (input.labelGroups ?? []) as LabelGroup[], definitions = (input.labelDefinitions ?? []) as LabelDefinition[]
+  const groupIds = unique(groups, 'labelGroups', 'id')
+  unique(definitions, 'labelDefinitions', 'id')
+  const names = new Set<string>(), groupNames = new Set<string>()
+  for (const group of groups) {
+    const key = group.name?.trim().normalize('NFKC').toLocaleLowerCase('ja-JP')
+    if (!key || key.length > 100 || groupNames.has(key) || !['single', 'multi'].includes(group.selectionMode) || group.ownerId !== settings.profileId || !timestamp(group.createdAt)) throw new Error('ラベルグループが不正です')
+    groupNames.add(key)
+  }
+  for (const label of definitions) {
+    const key = label.name?.trim().normalize('NFKC').toLocaleLowerCase('ja-JP')
+    if (!key || key.length > 100 || names.has(key) || !nullableString(label.groupId) || (label.groupId !== null && !groupIds.has(label.groupId)) || label.ownerId !== settings.profileId || !timestamp(label.createdAt)) throw new Error('ラベル定義が不正です')
+    names.add(key)
+  }
+  for (const task of tables.tasks as Task[]) validateLabelSelection(task.labels, groups, definitions)
+  if (input.savedTemplates !== undefined && !Array.isArray(input.savedTemplates)) throw new Error('savedTemplatesが不正です')
+  const templates = (input.savedTemplates ?? []) as SavedTemplate[]
+  unique(templates, 'savedTemplates', 'id')
+  const familyVersions = new Set<string>()
+  for (const template of templates) {
+    if (!filled(template.familyId) || !filled(template.name) || template.name.length > 100 || template.ownerId !== settings.profileId || !Number.isInteger(template.version) || template.version < 1 || !['task', 'project'].includes(template.kind) || !timestamp(template.createdAt) || !Array.isArray(template.containers) || !Array.isArray(template.tasks) || template.containers.length > 100 || template.tasks.length > 200) throw new Error('テンプレートが不正です')
+    const versionKey = `${template.familyId}:${template.version}`
+    if (familyVersions.has(versionKey)) throw new Error('テンプレートの版が重複しています')
+    familyVersions.add(versionKey)
+    if (template.kind === 'task' && (template.containers.length !== 0 || template.tasks.length !== 1)) throw new Error('タスクテンプレートが不正です')
+    if (template.kind === 'project' && (!template.containers.length || template.containers[0].parentKey !== null || template.containers[0].kind !== 'project')) throw new Error('プロジェクトテンプレートが不正です')
+    const known = new Set<string>()
+    for (const [index, item] of template.containers.entries()) {
+      if (!filled(item.key) || known.has(item.key) || !filled(item.name) || item.name.length > 100 || !['category', 'project'].includes(item.kind) || (index > 0 && (!filled(item.parentKey) || !known.has(item.parentKey)))) throw new Error('テンプレートの階層が不正です')
+      known.add(item.key)
+    }
+    for (const task of template.tasks) {
+      if (!filled(task.title) || task.title.length > 300 || typeof task.notes !== 'string' || !Number.isInteger(task.importance) || task.importance < 0 || task.importance > 3 || !record(task.score) || !Array.isArray(task.checklistTexts) || task.checklistTexts.length > 100 || task.checklistTexts.some(value => !filled(value) || value.length > 300) || !nullableString(task.containerKey) || (task.containerKey !== null && !known.has(task.containerKey))) throw new Error('テンプレートのタスクが不正です')
+      calculateScore(task.score)
+      validateLabelSelection(task.labels, groups, definitions)
+    }
+  }
   if (containers.some(raw => (raw as Container).ownerId !== settings.profileId)) throw new Error('カテゴリ・プロジェクトの所有者が不正です')
   const allowedSettings = new Set(['id', 'profileId', 'datasetId', 'createdAt', 'coachName', 'dailyMinutes', 'dailyPoints', 'notifications', 'aiEnabled', 'aiModel', 'automation', 'lastBackupAt'])
   if (Object.keys(settings).some(key => !allowedSettings.has(key))) throw new Error('設定に未対応の項目があります')

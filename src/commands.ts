@@ -1,10 +1,11 @@
 import { db } from './db'
 import { addDays, calculateScore, emptyScore, today, uid, validateDate, validateTaskInput, type Assessment, type Routine, type Task } from './domain'
 import { containerPath } from './containers'
+import { validateLabelsForOwner } from './labels'
 
 export class ConflictError extends Error { constructor() { super('別の画面で更新されました。再読み込みして差分を確認してください。') } }
 const now = () => new Date().toISOString()
-const tables = [db.tasks, db.assessments, db.completions, db.ledger, db.routines, db.sessions, db.commands, db.audits, db.containers, db.settings]
+const tables = [db.tasks, db.assessments, db.completions, db.ledger, db.routines, db.sessions, db.commands, db.audits, db.containers, db.settings, db.labelGroups, db.labelDefinitions]
 async function receipt<T>(key: string, payload: unknown, run: () => Promise<T>): Promise<T> {
   const hash = JSON.stringify(payload)
   return db.transaction('rw', tables, async () => {
@@ -29,8 +30,9 @@ async function resolvedProject(input: TaskInput): Promise<string> {
   return containerPath(item.id, containers)
 }
 
-async function addTask(input: TaskInput, generationKey: string, routineId: string | null): Promise<string> {
+export async function addTask(input: TaskInput, generationKey: string, routineId: string | null): Promise<string> {
   validateTaskInput(input)
+  await validateLabelsForOwner(input.labels)
   for (const [name, value] of [['予定日', input.scheduledDate], ['締め切り', input.dueDate], ['目標日', input.targetDate], ['見直し日', input.reviewDate], ['開始可能日', input.availableFrom]] as const) validateDate(value, name)
   const result = calculateScore(input.score)
   const project = await resolvedProject(input)
@@ -47,7 +49,7 @@ export async function createTask(input: TaskInput, key: string = uid()) {
 export async function createTasksAtomic(inputs: TaskInput[], key: string = uid()): Promise<string[]> {
   if (inputs.length < 1 || inputs.length > 100) throw new Error('一括登録は1〜100件で指定してください')
   const hash = JSON.stringify({ operation: 'bulk_create', inputs })
-  return db.transaction('rw', [db.tasks, db.assessments, db.commands, db.audits, db.containers, db.settings], async () => {
+  return db.transaction('rw', [db.tasks, db.assessments, db.commands, db.audits, db.containers, db.settings, db.labelGroups, db.labelDefinitions], async () => {
     const prior = await db.commands.get(key)
     if (prior) {
       if (prior.hash !== hash) throw new Error('IDEMPOTENCY_MISMATCH')
@@ -96,6 +98,7 @@ export async function bulkUpdateTasksAtomic(items: { id: string; revision: numbe
 export async function updateTask(id: string, expectedRevision: number, input: TaskInput, key: string = uid()) {
   return receipt(key, { operation: 'update', id, expectedRevision, input }, async () => {
     validateTaskInput(input)
+    await validateLabelsForOwner(input.labels)
     for (const [name, value] of [['予定日', input.scheduledDate], ['締め切り', input.dueDate], ['目標日', input.targetDate], ['見直し日', input.reviewDate], ['開始可能日', input.availableFrom]] as const) validateDate(value, name)
     const old = await db.tasks.get(id)
     if (!old || old.deletedAt) throw new Error('タスクが見つかりません')
@@ -216,13 +219,13 @@ export async function expandRoutines(from = addDays(today(), -30), days = 120) {
       const occurrences = await db.tasks.where('routineId').equals(r.id).toArray()
       if (occurrences.length === 0) {
         const key = `${r.id}:${r.startDate}`
-        if (!r.excludedDates?.includes(r.startDate)) await db.transaction('rw', db.tasks, db.assessments, db.audits, async () => { if (!(await db.tasks.where('generationKey').equals(key).first())) { await addTask({ ...newTaskInput(), title: r.title, project: r.project, scheduledDate: r.startDate, score: r.score }, key, r.id); count++ } })
+        if (!r.excludedDates?.includes(r.startDate)) await db.transaction('rw', [db.tasks, db.assessments, db.audits, db.containers, db.settings, db.labelGroups, db.labelDefinitions], async () => { if (!(await db.tasks.where('generationKey').equals(key).first())) { await addTask({ ...newTaskInput(), title: r.title, project: r.project, scheduledDate: r.startDate, score: r.score }, key, r.id); count++ } })
       } else {
         const latest = occurrences.sort((a, b) => (b.scheduledDate ?? '').localeCompare(a.scheduledDate ?? ''))[0]
         const completed = await db.completions.where('taskId').equals(latest.id).first()
         if (completed?.currentAt) {
           const date = addDays(today(new Date(completed.currentAt)), r.interval), key = `${r.id}:${date}`
-          if (!r.excludedDates?.includes(date)) await db.transaction('rw', db.tasks, db.assessments, db.audits, async () => { if (!(await db.tasks.where('generationKey').equals(key).first())) { await addTask({ ...newTaskInput(), title: r.title, project: r.project, scheduledDate: date, score: r.score }, key, r.id); count++ } })
+          if (!r.excludedDates?.includes(date)) await db.transaction('rw', [db.tasks, db.assessments, db.audits, db.containers, db.settings, db.labelGroups, db.labelDefinitions], async () => { if (!(await db.tasks.where('generationKey').equals(key).first())) { await addTask({ ...newTaskInput(), title: r.title, project: r.project, scheduledDate: date, score: r.score }, key, r.id); count++ } })
         }
       }
       continue
@@ -231,7 +234,7 @@ export async function expandRoutines(from = addDays(today(), -30), days = 120) {
       const date = addDays(from, i)
       if (!matchesRoutine(r, date)) continue
       const key = `${r.id}:${date}`
-      await db.transaction('rw', db.tasks, db.assessments, db.audits, async () => {
+      await db.transaction('rw', [db.tasks, db.assessments, db.audits, db.containers, db.settings, db.labelGroups, db.labelDefinitions], async () => {
         if (!(await db.tasks.where('generationKey').equals(key).first())) { await addTask({ ...newTaskInput(), title: r.title, project: r.project, scheduledDate: date, score: r.score }, key, r.id); count++ }
       })
     }

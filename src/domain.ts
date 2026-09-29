@@ -21,6 +21,11 @@ export type Task = {
 }
 export type Container = { id: string; parentId: string | null; kind: 'category' | 'project'; name: string; ownerId: string; revision: number; createdAt: string; updatedAt: string; deletedAt: string | null }
 export type ChecklistItem = { id: string; taskId: string; text: string; done: boolean; convertedTaskId: string | null; createdAt: string; updatedAt: string }
+export type LabelGroup = { id: string; ownerId: string; name: string; selectionMode: 'single' | 'multi'; createdAt: string }
+export type LabelDefinition = { id: string; groupId: string | null; ownerId: string; name: string; createdAt: string }
+export type TemplateTask = { title: string; notes: string; labels: string[]; importance: number; score: ScoreInput; checklistTexts: string[]; containerKey: string | null }
+export type TemplateContainer = { key: string; parentKey: string | null; kind: Container['kind']; name: string }
+export type SavedTemplate = { id: string; familyId: string; ownerId: string; name: string; version: number; kind: 'task' | 'project'; containers: TemplateContainer[]; tasks: TemplateTask[]; createdAt: string }
 export type Assessment = { id: string; taskId: string; score: ScoreInput; result: ScoreResult; createdAt: string; origin: 'human' | 'routine'; ruleVersion: 'v1' }
 export type Completion = { id: string; taskId: string; originalAt: string; currentAt: string | null; originalPoints: number | null; netPoints: number | null; lastConfirmedPoints?: number | null; scoreState: 'pending' | 'confirmed'; title: string; project: string }
 export type LedgerEntry = { id: string; completionId: string; taskId: string; kind: 'award' | 'adjust' | 'reverse' | 'restore'; delta: number; at: string; reason: string }

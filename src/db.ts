@@ -1,5 +1,5 @@
 import Dexie, { type EntityTable } from 'dexie'
-import type { Assessment, Audit, ChecklistItem, CommandReceipt, Completion, Container, LedgerEntry, Routine, Settings, Task, WorkSession } from './domain'
+import type { Assessment, Audit, ChecklistItem, CommandReceipt, Completion, Container, LabelDefinition, LabelGroup, LedgerEntry, Routine, SavedTemplate, Settings, Task, WorkSession } from './domain'
 
 export const db = new Dexie('character-coach-v1') as Dexie & {
   tasks: EntityTable<Task, 'id'>
@@ -13,6 +13,9 @@ export const db = new Dexie('character-coach-v1') as Dexie & {
   settings: EntityTable<Settings, 'id'>
   containers: EntityTable<Container, 'id'>
   checklistItems: EntityTable<ChecklistItem, 'id'>
+  labelGroups: EntityTable<LabelGroup, 'id'>
+  labelDefinitions: EntityTable<LabelDefinition, 'id'>
+  savedTemplates: EntityTable<SavedTemplate, 'id'>
 }
 db.version(1).stores({
   tasks: 'id, &generationKey, status, scheduledDate, dueDate, project, routineId, deletedAt, updatedAt',
@@ -36,6 +39,23 @@ db.version(2).stores({
   const byName = new Map(containers.map(container => [container.name, container.id]))
   if (containers.length) await transaction.table('containers').bulkAdd(containers)
   for (const task of tasks) if (task.project.trim()) await transaction.table('tasks').update(task.id, { containerId: byName.get(task.project.trim()) })
+})
+db.version(3).stores({
+  tasks: 'id, &generationKey, status, scheduledDate, dueDate, project, containerId, routineId, deletedAt, updatedAt',
+  assessments: 'id, taskId, createdAt', completions: 'id, &taskId, currentAt',
+  ledger: 'id, completionId, taskId, at', routines: 'id, active', sessions: 'id, taskId, startedAt',
+  commands: 'key', audits: 'id, taskId, at', settings: 'id',
+  containers: 'id, parentId, kind, ownerId, deletedAt', checklistItems: 'id, taskId, convertedTaskId',
+  labelGroups: 'id, ownerId', labelDefinitions: 'id, groupId, ownerId, name'
+})
+db.version(4).stores({
+  tasks: 'id, &generationKey, status, scheduledDate, dueDate, project, containerId, routineId, deletedAt, updatedAt',
+  assessments: 'id, taskId, createdAt', completions: 'id, &taskId, currentAt',
+  ledger: 'id, completionId, taskId, at', routines: 'id, active', sessions: 'id, taskId, startedAt',
+  commands: 'key', audits: 'id, taskId, at', settings: 'id',
+  containers: 'id, parentId, kind, ownerId, deletedAt', checklistItems: 'id, taskId, convertedTaskId',
+  labelGroups: 'id, ownerId', labelDefinitions: 'id, groupId, ownerId, name',
+  savedTemplates: 'id, familyId, ownerId, kind, name, version'
 })
 
 export async function ensureSettings() {

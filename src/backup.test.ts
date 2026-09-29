@@ -5,6 +5,8 @@ import { createTask, newTaskInput, completeTask, correctCompletion, undoCompleti
 import { emptyScore } from './domain'
 import { createContainer } from './containers'
 import { addChecklistItem, convertChecklistItem } from './checklist'
+import { createLabelDefinition, createLabelGroup } from './labels'
+import { instantiateTemplate, saveTaskTemplate } from './templates'
 import { inspectBackup, restoreBackup } from './backup'
 import { validateSnapshot, type Snapshot } from './backup-validation'
 
@@ -17,7 +19,7 @@ async function snapshot(): Promise<Snapshot> {
     completions: await db.completions.toArray(), ledger: await db.ledger.toArray(),
     routines: await db.routines.toArray(), sessions: await db.sessions.toArray(),
     commands: await db.commands.toArray(), audits: await db.audits.toArray(),
-    settings: await db.settings.toArray(), containers: await db.containers.toArray(), checklistItems: await db.checklistItems.toArray()
+    settings: await db.settings.toArray(), containers: await db.containers.toArray(), checklistItems: await db.checklistItems.toArray(), labelGroups: await db.labelGroups.toArray(), labelDefinitions: await db.labelDefinitions.toArray(), savedTemplates: await db.savedTemplates.toArray()
   }
 }
 
@@ -93,5 +95,29 @@ describe('バックアップの復元前検証', () => {
     expect((await db.checklistItems.get(item))?.convertedTaskId).toBe(child)
     expect((await db.tasks.get(parent))?.effectivePoints).toBe(30)
     expect((await db.tasks.get(child))?.effectivePoints).toBe(10)
+  })
+  it('singleグループを保持して復元し、二値指定の破損を拒否する', async () => {
+    const group = await createLabelGroup('場所', 'single')
+    await createLabelDefinition('家', group); await createLabelDefinition('外', group)
+    const id = await createTask({ ...newTaskInput(), title: '準備', labels: ['家'] })
+    const saved = await snapshot()
+    const corrupt = structuredClone(saved)
+    corrupt.tasks[0].labels = ['家', '外']
+    await expect(restoreBackup(corrupt)).rejects.toThrow('1つだけ')
+    await db.labelGroups.clear(); await db.labelDefinitions.clear(); await db.tasks.clear()
+    await restoreBackup(saved)
+    expect((await db.labelGroups.get(group))?.selectionMode).toBe('single')
+    expect((await db.tasks.get(id))?.labels).toEqual(['家'])
+  })
+  it('保存済みテンプレートを復元して新しい発生回を作る', async () => {
+    const source = await createTask({ ...newTaskInput(), title: '準備' })
+    await addChecklistItem(source, '持ち物')
+    const template = await saveTaskTemplate(source, '準備')
+    const saved = await snapshot()
+    await db.savedTemplates.clear()
+    await restoreBackup(saved)
+    expect((await db.savedTemplates.get(template))?.version).toBe(1)
+    const created = await instantiateTemplate(template)
+    expect((await db.checklistItems.where('taskId').equals(created.taskIds[0]).first())?.done).toBe(false)
   })
 })

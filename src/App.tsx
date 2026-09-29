@@ -1,22 +1,24 @@
 import { useEffect, useState } from 'react'
 import { useLiveQuery } from 'dexie-react-hooks'
-import { ArchiveRestore, CalendarDays, Check, CheckCircle2, ChevronDown, Clock3, CloudOff, Database, Download, Flame, Focus, FolderTree, History, Inbox, LayoutDashboard, ListTodo, LockKeyhole, Menu, MessageCircle, Moon, MoreHorizontal, Plus, Repeat2, Search, Settings2, ShieldCheck, Sparkles, Trash2, Upload, X } from 'lucide-react'
+import { ArchiveRestore, CalendarDays, Check, CheckCircle2, ChevronDown, Clock3, CloudOff, Database, Download, Flame, Focus, FolderTree, History, Inbox, LayoutDashboard, ListTodo, LockKeyhole, Menu, MessageCircle, Moon, MoreHorizontal, Plus, Repeat2, Search, Settings2, ShieldCheck, Sparkles, Tags, Trash2, Upload, X } from 'lucide-react'
 import { db, ensureSettings } from './db'
 import { bulkUpdateTasksAtomic, createRoutine, createTask, correctCompletion, expandRoutines, logSession, newTaskInput, restoreTask, trashTask, undoCompletion, updateTask, completeTask, type BulkTaskPatch, type TaskInput } from './commands'
-import { addDays, calculateScore, emptyScore, scoreText, today, type ChecklistItem, type Completion, type Container, type Routine, type ScoreInput, type Settings, type Task, type WorkSession } from './domain'
+import { addDays, calculateScore, emptyScore, scoreText, today, type ChecklistItem, type Completion, type Container, type LabelDefinition, type LabelGroup, type Routine, type SavedTemplate, type ScoreInput, type Settings, type Task, type WorkSession } from './domain'
 import { exportBackup, exportPortableJson, exportTasksCsv, exportTasksIcs, inspectBackup, restoreBackup } from './backup'
 import { unionSessionMinutes } from './time-tracking'
 import { reviewDueTasks, suggestedTasks } from './planning'
 import { containerPath, containerPointTotals, createContainer, moveContainer, renameContainer } from './containers'
 import { addChecklistItem, checklistProgress, convertChecklistItem, toggleChecklistItem } from './checklist'
+import { createLabelDefinition, createLabelGroup } from './labels'
+import { instantiateTemplate, saveProjectTemplate, saveTaskTemplate } from './templates'
 import { selectedTaskContext, type AIStatus } from './ai'
 import Braindump from './Braindump'
 import './App.css'
 
-type View = 'today' | 'tasks' | 'projects' | 'plan' | 'coach' | 'focus' | 'history' | 'routines' | 'settings'
+type View = 'today' | 'tasks' | 'projects' | 'labels' | 'saved' | 'plan' | 'coach' | 'focus' | 'history' | 'routines' | 'settings'
 const INITIAL_NOW = new Date()
 const nav: { view: View; label: string; icon: typeof Inbox }[] = [
-  { view: 'today', label: '今日', icon: LayoutDashboard }, { view: 'tasks', label: 'すべてのタスク', icon: ListTodo }, { view: 'projects', label: 'カテゴリとプロジェクト', icon: FolderTree }, { view: 'plan', label: '計画', icon: CalendarDays },
+  { view: 'today', label: '今日', icon: LayoutDashboard }, { view: 'tasks', label: 'すべてのタスク', icon: ListTodo }, { view: 'projects', label: 'カテゴリとプロジェクト', icon: FolderTree }, { view: 'labels', label: 'ラベル', icon: Tags }, { view: 'saved', label: 'テンプレート', icon: ArchiveRestore }, { view: 'plan', label: '計画', icon: CalendarDays },
   { view: 'coach', label: 'コーチ', icon: MessageCircle }, { view: 'focus', label: '集中', icon: Focus }, { view: 'history', label: '実績', icon: History }, { view: 'routines', label: 'ルーティン', icon: Repeat2 }, { view: 'settings', label: '設定とデータ', icon: Settings2 }
 ]
 function dateLabel(date: string | null) { if (!date) return '日付なし'; const d = new Date(`${date}T12:00:00`); return `${d.getMonth() + 1}/${d.getDate()}` }
@@ -33,6 +35,9 @@ function App() {
   const sessions = useLiveQuery(() => db.sessions.toArray(), []) ?? []
   const routines = useLiveQuery(() => db.routines.toArray(), []) ?? []
   const containers = useLiveQuery(() => db.containers.toArray(), []) ?? []
+  const labelGroups = useLiveQuery(() => db.labelGroups.toArray(), []) ?? []
+  const labelDefinitions = useLiveQuery(() => db.labelDefinitions.toArray(), []) ?? []
+  const savedTemplates = useLiveQuery(() => db.savedTemplates.toArray(), []) ?? []
   const settings = useLiveQuery(() => db.settings.get('main'), [])
   const active = tasks.filter(t => !t.deletedAt)
   const open = active.filter(t => t.status === 'open')
@@ -78,6 +83,8 @@ function App() {
         </>}
         {view === 'tasks' && <TasksView tasks={tasks} onEdit={setEditor} onToggle={toggleTask} onNew={() => setEditor('new')} run={run} />}
         {view === 'projects' && <ContainersView containers={containers} tasks={tasks} completions={completions} ownerId={settings.profileId} run={run} />}
+        {view === 'labels' && <LabelsView groups={labelGroups} definitions={labelDefinitions} ownerId={settings.profileId} run={run} />}
+        {view === 'saved' && <SavedItemsView templates={savedTemplates} containers={containers} tasks={active} ownerId={settings.profileId} run={run} />}
         {view === 'plan' && <PlanView tasks={open} settings={settings} onEdit={setEditor} />}
         {view === 'coach' && <CoachView tasks={open} settings={settings} onEdit={setEditor} onNew={() => setEditor('new')} />}
         {view === 'focus' && <FocusView tasks={open} sessions={sessions} onEdit={setEditor} run={run} />}
@@ -176,6 +183,34 @@ function ContainersView({ containers, tasks, completions, ownerId, run }: { cont
     </div>) : <Empty title="階層はまだありません" detail="カテゴリやプロジェクトを作成すると、タスクの編集画面から選べます。" />}</section>
   </>
 }
+function SavedItemsView({ templates, containers, tasks, ownerId, run }: { templates: SavedTemplate[]; containers: Container[]; tasks: Task[]; ownerId: string; run: (fn: () => Promise<unknown>, success?: string) => Promise<boolean> }) {
+  const [kind, setKind] = useState<SavedTemplate['kind']>('task'), [sourceId, setSourceId] = useState(''), [name, setName] = useState('')
+  const sources = kind === 'task' ? tasks.map(task => ({ id: task.id, name: task.title })) : containers.filter(item => item.kind === 'project' && !item.deletedAt && item.ownerId === ownerId).map(item => ({ id: item.id, name: containerPath(item.id, containers) }))
+  const own = templates.filter(template => template.ownerId === ownerId).sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+  async function save() {
+    const selected = sources.find(source => source.id === sourceId)
+    if (!selected) return
+    if (await run(() => kind === 'task' ? saveTaskTemplate(sourceId, name || selected.name) : saveProjectTemplate(sourceId, name || selected.name), 'テンプレートを保存しました')) { setSourceId(''); setName('') }
+  }
+  return <>
+    <div className="page-heading"><div><span className="eyebrow">SAVED ITEMS</span><h1>テンプレート</h1><p>保存した版から新しいタスクやプロジェクトを作れます。完了実績とチェック済み状態は複製しません。</p></div></div>
+    <section className="card list-card"><div className="card-heading"><h2>今の内容をテンプレートに保存</h2></div><div className="container-create"><select aria-label="テンプレートの種類" value={kind} onChange={event => { setKind(event.target.value as SavedTemplate['kind']); setSourceId('') }}><option value="task">タスク</option><option value="project">プロジェクト</option></select><select aria-label="保存する元" value={sourceId} onChange={event => setSourceId(event.target.value)}><option value="">選択してください</option>{sources.map(source => <option key={source.id} value={source.id}>{source.name}</option>)}</select><input aria-label="テンプレート名" value={name} maxLength={100} onChange={event => setName(event.target.value)} placeholder="名前（空欄なら元の名前）" /><button className="primary-button" disabled={!sourceId} onClick={save}>版として保存</button></div></section>
+    <section className="card list-card"><div className="card-heading"><h2>保存済み</h2><span className="subtle">{own.length}版</span></div>{own.length ? own.map(template => <div className="container-row" key={template.id}><div className="container-main"><span className="status-tag">{template.kind === 'task' ? 'タスク' : 'プロジェクト'}</span><strong>{template.name}</strong><span>v{template.version} · {template.tasks.length}タスク</span></div><button className="secondary-button" onClick={() => run(() => instantiateTemplate(template.id), 'テンプレートから作成しました')}>ここから作成</button></div>) : <p className="muted">保存したテンプレートはまだありません。</p>}</section>
+  </>
+}
+
+function LabelsView({ groups, definitions, ownerId, run }: { groups: LabelGroup[]; definitions: LabelDefinition[]; ownerId: string; run: (fn: () => Promise<unknown>, success?: string) => Promise<boolean> }) {
+  const [groupName, setGroupName] = useState(''), [mode, setMode] = useState<LabelGroup['selectionMode']>('single')
+  const [labelName, setLabelName] = useState(''), [groupId, setGroupId] = useState('')
+  const ownGroups = groups.filter(group => group.ownerId === ownerId), ownLabels = definitions.filter(label => label.ownerId === ownerId)
+  return <>
+    <div className="page-heading"><div><span className="eyebrow">LABELS</span><h1>ラベル</h1><p>singleグループからはタスクごとに1つだけ選べます。</p></div></div>
+    <section className="card list-card"><div className="card-heading"><h2>グループを作成</h2></div><div className="container-create"><input aria-label="新しいグループ名" value={groupName} maxLength={100} onChange={event => setGroupName(event.target.value)} placeholder="例：場所" /><select aria-label="選択方式" value={mode} onChange={event => setMode(event.target.value as LabelGroup['selectionMode'])}><option value="single">single：1つ</option><option value="multi">multi：複数</option></select><button className="primary-button" disabled={!groupName.trim()} onClick={async () => { if (await run(() => createLabelGroup(groupName, mode), 'グループを作成しました')) setGroupName('') }}>作成</button></div></section>
+    <section className="card list-card"><div className="card-heading"><h2>ラベルを作成</h2></div><div className="container-create"><input aria-label="新しいラベル名" value={labelName} maxLength={100} onChange={event => setLabelName(event.target.value)} placeholder="例：自宅" /><select aria-label="所属グループ" value={groupId} onChange={event => setGroupId(event.target.value)}><option value="">グループなし</option>{ownGroups.map(group => <option key={group.id} value={group.id}>{group.name} · {group.selectionMode}</option>)}</select><button className="primary-button" disabled={!labelName.trim()} onClick={async () => { if (await run(() => createLabelDefinition(labelName, groupId || null), 'ラベルを作成しました')) setLabelName('') }}>作成</button></div></section>
+    <section className="card list-card"><div className="card-heading"><h2>登録済みラベル</h2></div>{ownLabels.length ? ownLabels.map(label => <div className="container-row" key={label.id}><strong>{label.name}</strong><span>{ownGroups.find(group => group.id === label.groupId)?.name ?? 'グループなし'}</span></div>) : <p className="muted">ラベルはまだありません。</p>}<p className="muted">タスク編集画面の「ラベル」に、ここで作成した名前を入力できます。</p></section>
+  </>
+}
+
 function TaskChecklist({ task, onError, onClose }: { task: Task | null; onError: (error: unknown) => void; onClose: () => void }) {
   const [text, setText] = useState(''), [converting, setConverting] = useState<string | null>(null), [points, setPoints] = useState('')
   const items = useLiveQuery<ChecklistItem[]>(() => task ? db.checklistItems.where('taskId').equals(task.id).toArray() : [], [task?.id]) ?? []
