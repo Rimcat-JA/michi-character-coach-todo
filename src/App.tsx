@@ -15,13 +15,14 @@ import { selectedTaskContext, type AIStatus } from './ai'
 import Braindump from './Braindump'
 import TaskMaterials from './TaskMaterials'
 import TaskDependencies from './TaskDependencies'
+import PeriodPlanningView from './PeriodPlanningView'
 import { projectNextStepStatus } from './dependencies'
 import './App.css'
 
-type View = 'today' | 'tasks' | 'projects' | 'labels' | 'saved' | 'plan' | 'coach' | 'focus' | 'history' | 'routines' | 'settings'
+type View = 'today' | 'tasks' | 'projects' | 'labels' | 'saved' | 'plan' | 'periods' | 'coach' | 'focus' | 'history' | 'routines' | 'settings'
 const INITIAL_NOW = new Date()
 const nav: { view: View; label: string; icon: typeof Inbox }[] = [
-  { view: 'today', label: '今日', icon: LayoutDashboard }, { view: 'tasks', label: 'すべてのタスク', icon: ListTodo }, { view: 'projects', label: 'カテゴリとプロジェクト', icon: FolderTree }, { view: 'labels', label: 'ラベル', icon: Tags }, { view: 'saved', label: 'テンプレート', icon: ArchiveRestore }, { view: 'plan', label: '計画', icon: CalendarDays },
+  { view: 'today', label: '今日', icon: LayoutDashboard }, { view: 'tasks', label: 'すべてのタスク', icon: ListTodo }, { view: 'projects', label: 'カテゴリとプロジェクト', icon: FolderTree }, { view: 'labels', label: 'ラベル', icon: Tags }, { view: 'saved', label: 'テンプレート', icon: ArchiveRestore }, { view: 'plan', label: '計画', icon: CalendarDays }, { view: 'periods', label: '週・月・四半期', icon: CalendarDays },
   { view: 'coach', label: 'コーチ', icon: MessageCircle }, { view: 'focus', label: '集中', icon: Focus }, { view: 'history', label: '実績', icon: History }, { view: 'routines', label: 'ルーティン', icon: Repeat2 }, { view: 'settings', label: '設定とデータ', icon: Settings2 }
 ]
 function dateLabel(date: string | null) { if (!date) return '日付なし'; const d = new Date(`${date}T12:00:00`); return `${d.getMonth() + 1}/${d.getDate()}` }
@@ -42,6 +43,7 @@ function App() {
   const labelDefinitions = useLiveQuery(() => db.labelDefinitions.toArray(), []) ?? []
   const savedTemplates = useLiveQuery(() => db.savedTemplates.toArray(), []) ?? []
   const dependencies = useLiveQuery(() => db.taskDependencies.toArray(), []) ?? []
+  const planningBuckets = useLiveQuery(() => db.planningBuckets.toArray(), []) ?? []
   const settings = useLiveQuery(() => db.settings.get('main'), [])
   const active = tasks.filter(t => !t.deletedAt)
   const open = active.filter(t => t.status === 'open')
@@ -91,6 +93,7 @@ function App() {
         {view === 'labels' && <LabelsView groups={labelGroups} definitions={labelDefinitions} ownerId={settings.profileId} run={run} />}
         {view === 'saved' && <SavedItemsView templates={savedTemplates} containers={containers} tasks={active} ownerId={settings.profileId} run={run} />}
         {view === 'plan' && <PlanView tasks={open} settings={settings} onEdit={setEditor} />}
+        {view === 'periods' && <PeriodPlanningView buckets={planningBuckets} tasks={tasks} ownerId={settings.profileId} run={run} />}
         {view === 'coach' && <CoachView tasks={open} settings={settings} onEdit={setEditor} onNew={() => setEditor('new')} />}
         {view === 'focus' && <FocusView tasks={open} sessions={sessions} onEdit={setEditor} run={run} />}
         {view === 'history' && <HistoryView completions={completions} ledger={ledger} sessions={sessions} tasks={tasks} onEdit={id => { const t = tasks.find(x => x.id === id); if (t) setEditor(t) }} run={run} />}
