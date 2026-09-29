@@ -29,3 +29,6 @@
 .calendar-item { border: 1px solid #e9e6f2; background: #faf9ff; border-radius: 9px; padding: 10px; text-align: left; overflow-wrap: anywhere; }
 .calendar-item strong, .calendar-item small { display: block; }
 .calendar-item small { color: #79778c; font-size: 10px; margin-top: 4px; }
+.theme-weekdays, .context-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin: 12px 0; }
+.theme-weekdays label { display: inline-flex; align-items: center; gap: 4px; }
+.context-controls .field { min-width: 150px; }

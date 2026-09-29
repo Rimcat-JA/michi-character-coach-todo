@@ -19,8 +19,8 @@ async function receipt<T>(key: string, payload: unknown, run: () => Promise<T>):
     return result
   })
 }
-export type TaskInput = Pick<Task, 'title' | 'notes' | 'project' | 'labels' | 'scheduledDate' | 'dueDate' | 'targetDate' | 'reviewDate' | 'availableFrom' | 'importance' | 'score'> & { containerId?: string | null; deferredUntil?: string | null; frog?: number | null; weight?: number | null }
-export const newTaskInput = (): TaskInput => ({ title: '', notes: '', project: '', containerId: null, labels: [], scheduledDate: null, dueDate: null, targetDate: null, reviewDate: null, availableFrom: null, deferredUntil: null, importance: 1, frog: null, weight: null, score: emptyScore() })
+export type TaskInput = Pick<Task, 'title' | 'notes' | 'project' | 'labels' | 'scheduledDate' | 'dueDate' | 'targetDate' | 'reviewDate' | 'availableFrom' | 'importance' | 'score'> & { containerId?: string | null; deferredUntil?: string | null; frog?: number | null; weight?: number | null; energyNeed?: number | null; focusNeed?: number | null; positiveFeeling?: number | null }
+export const newTaskInput = (): TaskInput => ({ title: '', notes: '', project: '', containerId: null, labels: [], scheduledDate: null, dueDate: null, targetDate: null, reviewDate: null, availableFrom: null, deferredUntil: null, importance: 1, frog: null, weight: null, energyNeed: null, focusNeed: null, positiveFeeling: null, score: emptyScore() })
 
 async function resolvedProject(input: TaskInput): Promise<string> {
   if (!input.containerId) return input.project
