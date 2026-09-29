@@ -14,7 +14,7 @@ import { createCalendarEvent, createTimeBlock } from './calendar-planning'
 import { rolloverTask } from './rollover'
 import { createThemeRule } from './themes'
 import { assignDaySection, setDaySectionMode } from './day-sections'
-import { createSmartList } from './smart-lists'
+import { createSmartList, removeSmartList } from './smart-lists'
 import { setFocusProjects } from './focus-projects'
 import { setSpotlight } from './focus-tools'
 import { captureDayProgressBaseline, createTimeTarget } from './progress'
@@ -28,6 +28,7 @@ import { saveAppearance } from './appearance'
 import { createReminder, dispatchDueReminders } from './reminders'
 import { saveKeybinding } from './shortcuts'
 import { saveCharacterProfile } from './character'
+import { saveCustomScreen, saveDashboardWidgets } from './dashboard'
 import { inspectBackup, restoreBackup } from './backup'
 import { validateSnapshot, type Snapshot } from './backup-validation'
 
@@ -46,6 +47,29 @@ async function snapshot(): Promise<Snapshot> {
 }
 
 describe('バックアップの復元前検証', () => {
+  it('Smart List削除後も停止した毎日通知の履歴を安全に書き出せる', async () => {
+    const id = await createSmartList('消す一覧', { type: 'condition', field: 'status', operator: 'eq', value: 'open' })
+    await createReminder('smart-daily', id, '09:00')
+    await saveCustomScreen({ leftListId: id })
+    await removeSmartList(id)
+    const saved = await snapshot()
+    expect(() => validateSnapshot(saved)).not.toThrow()
+    await restoreBackup(saved)
+    expect((await db.settings.get('main'))?.reminderState?.rules[0].enabled).toBe(false)
+  })
+  it('ダッシュボードと分割画面を復元し、未知の一覧参照を拒否する', async () => {
+    const listId = await createSmartList('画面用', { type: 'condition', field: 'status', operator: 'eq', value: 'open' })
+    await saveDashboardWidgets(['sync', 'today'])
+    await saveCustomScreen({ leftListId: listId })
+    const saved = await snapshot()
+    expect(() => validateSnapshot(saved)).not.toThrow()
+    const corrupt = structuredClone(saved)
+    corrupt.settings[0].customScreen!.leftListId = 'missing'
+    expect(() => validateSnapshot(corrupt)).toThrow('カスタム画面')
+    await db.settings.update('main', { dashboardWidgets: undefined, customScreen: undefined })
+    await restoreBackup(saved)
+    expect((await db.settings.get('main'))).toMatchObject({ dashboardWidgets: ['sync', 'today'], customScreen: { leftListId: listId } })
+  })
   it('キャラクター設定を復元し、権限項目の混入を拒否する', async () => {
     await saveCharacterProfile({ tone: 'direct', avoidPhrases: ['急いで'] })
     const saved = await snapshot()
