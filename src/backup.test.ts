@@ -13,6 +13,7 @@ import { assignTaskToBucket, createPlanningBucket } from './period-planning'
 import { createCalendarEvent, createTimeBlock } from './calendar-planning'
 import { rolloverTask } from './rollover'
 import { createThemeRule } from './themes'
+import { assignDaySection, setDaySectionMode } from './day-sections'
 import { inspectBackup, restoreBackup } from './backup'
 import { validateSnapshot, type Snapshot } from './backup-validation'
 
@@ -189,5 +190,15 @@ describe('バックアップの復元前検証', () => {
     await restoreBackup(saved)
     expect(await db.tasks.get(id)).toMatchObject({ energyNeed: 0, focusNeed: null, positiveFeeling: 3 })
     expect((await db.themeRules.get(rule))?.weekdays).toEqual([2])
+  })
+  it('今日の表示区分とタスクの割当を復元する', async () => {
+    const id = await createTask({ ...newTaskInput(), title: '午前の作業' })
+    await assignDaySection(id, 1, 'dayHalf', 'morning')
+    await setDaySectionMode('halfday')
+    const saved = await snapshot()
+    await db.tasks.clear()
+    await restoreBackup(saved)
+    expect((await db.tasks.get(id))?.dayHalf).toBe('morning')
+    expect((await db.settings.get('main'))?.daySectionMode).toBe('halfday')
   })
 })

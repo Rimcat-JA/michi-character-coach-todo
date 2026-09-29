@@ -15,7 +15,7 @@ export type Task = {
   id: string; generationKey: string; routineId: string | null; title: string; notes: string
   project: string; containerId?: string | null; planBucketId?: string | null; labels: string[]; scheduledDate: string | null; dueDate: string | null
   targetDate: string | null; reviewDate: string | null; availableFrom: string | null; deferredUntil?: string | null; firstScheduledDate?: string | null; snoozedUntil?: string | null
-  importance: number; frog?: number | null; weight?: number | null; energyNeed?: number | null; focusNeed?: number | null; positiveFeeling?: number | null; pinned?: boolean; backburner?: boolean; orbit?: boolean; score: ScoreInput; effectivePoints: number | null
+  importance: number; frog?: number | null; weight?: number | null; energyNeed?: number | null; focusNeed?: number | null; positiveFeeling?: number | null; dayHalf?: 'morning' | 'afternoon' | null; customSection?: string | null; pinned?: boolean; backburner?: boolean; orbit?: boolean; score: ScoreInput; effectivePoints: number | null
   assessmentId: string; status: 'open' | 'completed'; revision: number
   createdAt: string; updatedAt: string; deletedAt: string | null
 }
@@ -42,7 +42,7 @@ export type Routine = { id: string; title: string; cadence: 'daily' | 'weekly' |
 export type WorkSession = { id: string; taskId: string; startedAt: string; endedAt: string; minutes: number }
 export type CommandReceipt = { key: string; hash: string; resultId: string; at: string }
 export type Audit = { id: string; taskId: string | null; operation: string; at: string; detail: string }
-export type Settings = { id: 'main'; profileId: string; datasetId: string; createdAt: string; coachName: string; dailyMinutes: number; dailyPoints: number; notifications: boolean; aiEnabled: boolean; aiModel?: string; automation: 'A0' | 'A1' | 'A2'; lastBackupAt: string | null }
+export type Settings = { id: 'main'; profileId: string; datasetId: string; createdAt: string; coachName: string; dailyMinutes: number; dailyPoints: number; notifications: boolean; aiEnabled: boolean; aiModel?: string; daySectionMode?: 'halfday' | 'category' | 'timeblock' | 'custom'; automation: 'A0' | 'A1' | 'A2'; lastBackupAt: string | null }
 
 export const emptyScore = (): ScoreInput => ({ mode: 'unset', manualPoints: null, minutes: null, travelMinutes: null, difficulty: null, uncertainty: null, coordination: null, physical: null, outing: null })
 export const today = (d = new Date()) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`

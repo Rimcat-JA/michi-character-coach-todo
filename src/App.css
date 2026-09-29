@@ -32,3 +32,10 @@
 .theme-weekdays, .context-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin: 12px 0; }
 .theme-weekdays label { display: inline-flex; align-items: center; gap: 4px; }
 .context-controls .field { min-width: 150px; }
+.day-section-modes { flex-wrap: wrap; margin-bottom: 16px; }
+.day-section { margin-top: 12px; }
+.day-section-heading { display: flex; justify-content: space-between; align-items: center; padding: 8px 4px; border-bottom: 1px solid #ece9f3; }
+.day-section-heading small { color: #817b94; }
+.day-section-task { display: flex; align-items: center; gap: 8px; }
+.day-section-task .task-row { flex: 1; min-width: 0; }
+.day-section-task select, .day-section-task input { max-width: 120px; min-width: 0; }
