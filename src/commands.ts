@@ -259,5 +259,5 @@ export async function logSession(taskId: string, startedAt: string, endedAt: str
   if (!(await db.tasks.get(taskId))) throw new Error('作業対象のタスクがありません')
   const minutes = Math.round((end - start) / 60000)
   if (minutes > 10080) throw new Error('記録時間が長すぎます')
-  await db.sessions.add({ id: uid(), taskId, startedAt, endedAt, minutes })
+  await db.sessions.add({ id: uid(), taskId, startedAt, endedAt, minutes, revision: 1, corrections: [] })
 }

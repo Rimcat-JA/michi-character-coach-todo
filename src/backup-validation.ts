@@ -1,4 +1,4 @@
-import { calculateScore, validateTaskInput, validateDate, type Assessment, type Audit, type CalendarEvent, type ChecklistItem, type CommandReceipt, type Completion, type Container, type DayNote, type FocusProjectSelection, type Goal, type GoalCheckIn, type Habit, type HabitLog, type LabelDefinition, type LabelGroup, type LedgerEntry, type PlanningBucket, type RolloverEntry, type Routine, type SavedTemplate, type Settings, type SmartList, type Task, type TaskAttachment, type TaskComment, type TaskDependency, type TaskNote, type ThemeRule, type TimeBlock, type TrackerDefinition, type TrackerEntry, type WorkSession } from './domain'
+import { calculateScore, validateTaskInput, validateDate, type Assessment, type Audit, type CalendarEvent, type ChecklistItem, type CommandReceipt, type Completion, type Container, type DayNote, type FocusProjectSelection, type Goal, type GoalCheckIn, type Habit, type HabitLog, type LabelDefinition, type LabelGroup, type LedgerEntry, type PlanningBucket, type PomodoroCycle, type RolloverEntry, type Routine, type SavedTemplate, type Settings, type SmartList, type Task, type TaskAttachment, type TaskComment, type TaskDependency, type TaskNote, type ThemeRule, type TimeBlock, type TrackerDefinition, type TrackerEntry, type WorkSession } from './domain'
 import { validateLabelSelection } from './labels'
 import { validateDependencyGraph } from './dependencies'
 import { validatePlanningBuckets } from './period-planning'
@@ -32,6 +32,7 @@ export type Snapshot = {
   trackerDefinitions?: TrackerDefinition[]
   trackerEntries?: TrackerEntry[]
   dayNotes?: DayNote[]
+  pomodoroCycles?: PomodoroCycle[]
 }
 
 const tableNames = ['tasks', 'assessments', 'completions', 'ledger', 'routines', 'sessions', 'commands', 'audits', 'settings'] as const
@@ -197,7 +198,13 @@ export function validateSnapshot(input: unknown): asserts input is Snapshot {
   for (const raw of tables.sessions) {
     const session = raw as WorkSession
     if (!taskIds.has(session.taskId) || !timestamp(session.startedAt) || !timestamp(session.endedAt) || !Number.isInteger(session.minutes) || session.minutes < 0 || session.minutes > 10080 || session.endedAt < session.startedAt || Math.round((Date.parse(session.endedAt) - Date.parse(session.startedAt)) / 60000) !== session.minutes) throw new Error('作業時間が不正です')
+    if (session.revision !== undefined && (!Number.isInteger(session.revision) || session.revision < 1)) throw new Error('作業区間の版が不正です')
+    if (session.corrections !== undefined && (!Array.isArray(session.corrections) || session.corrections.length > 1000 || session.corrections.some(item => !timestamp(item.startedAt) || !timestamp(item.endedAt) || item.endedAt < item.startedAt || !Number.isInteger(item.minutes) || item.minutes !== Math.round((Date.parse(item.endedAt) - Date.parse(item.startedAt)) / 60000) || !filled(item.reason) || item.reason.length > 300 || !timestamp(item.at)))) throw new Error('作業区間の訂正履歴が不正です')
   }
+  if (input.pomodoroCycles !== undefined && !Array.isArray(input.pomodoroCycles)) throw new Error('ポモドーロ記録が不正です')
+  const cycles = (input.pomodoroCycles ?? []) as PomodoroCycle[]
+  unique(cycles, 'ポモドーロ', 'id')
+  for (const cycle of cycles) if (!taskIds.has(cycle.taskId) || !timestamp(cycle.startedAt) || !timestamp(cycle.finishedAt) || cycle.finishedAt < cycle.startedAt || !Number.isInteger(cycle.targetMinutes) || cycle.targetMinutes < 1 || cycle.targetMinutes > 120 || !Number.isInteger(cycle.elapsedMinutes) || cycle.elapsedMinutes < cycle.targetMinutes || cycle.elapsedMinutes > 1440) throw new Error('ポモドーロ記録が不正です')
   for (const raw of tables.commands) {
     const command = raw as CommandReceipt
     if (typeof command.hash !== 'string' || typeof command.resultId !== 'string' || !timestamp(command.at)) throw new Error('コマンド履歴が不正です')

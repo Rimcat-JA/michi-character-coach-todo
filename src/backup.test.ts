@@ -21,6 +21,7 @@ import { captureDayProgressBaseline, createTimeTarget } from './progress'
 import { createHabit, recordHabitLog } from './habits'
 import { createGoal, createGoalCheckIn } from './goals'
 import { createTracker, recordTrackerEntry, saveDayNote } from './journal'
+import { recordPomodoro, startPomodoro } from './pomodoro'
 import { inspectBackup, restoreBackup } from './backup'
 import { validateSnapshot, type Snapshot } from './backup-validation'
 
@@ -34,7 +35,7 @@ async function snapshot(): Promise<Snapshot> {
     completions: await db.completions.toArray(), ledger: await db.ledger.toArray(),
     routines: await db.routines.toArray(), sessions: await db.sessions.toArray(),
     commands: await db.commands.toArray(), audits: await db.audits.toArray(),
-    settings: await db.settings.toArray(), containers: await db.containers.toArray(), checklistItems: await db.checklistItems.toArray(), labelGroups: await db.labelGroups.toArray(), labelDefinitions: await db.labelDefinitions.toArray(), savedTemplates: await db.savedTemplates.toArray(), taskNotes: await db.taskNotes.toArray(), taskComments: await db.taskComments.toArray(), taskAttachments: attachments, taskDependencies: await db.taskDependencies.toArray(), planningBuckets: await db.planningBuckets.toArray(), timeBlocks: await db.timeBlocks.toArray(), calendarEvents: await db.calendarEvents.toArray(), rollovers: await db.rollovers.toArray(), themeRules: await db.themeRules.toArray(), smartLists: await db.smartLists.toArray(), focusSelections: await db.focusSelections.toArray(), habits: await db.habits.toArray(), habitLogs: await db.habitLogs.toArray(), goals: await db.goals.toArray(), goalCheckIns: await db.goalCheckIns.toArray(), trackerDefinitions: await db.trackerDefinitions.toArray(), trackerEntries: await db.trackerEntries.toArray(), dayNotes: await db.dayNotes.toArray()
+    settings: await db.settings.toArray(), containers: await db.containers.toArray(), checklistItems: await db.checklistItems.toArray(), labelGroups: await db.labelGroups.toArray(), labelDefinitions: await db.labelDefinitions.toArray(), savedTemplates: await db.savedTemplates.toArray(), taskNotes: await db.taskNotes.toArray(), taskComments: await db.taskComments.toArray(), taskAttachments: attachments, taskDependencies: await db.taskDependencies.toArray(), planningBuckets: await db.planningBuckets.toArray(), timeBlocks: await db.timeBlocks.toArray(), calendarEvents: await db.calendarEvents.toArray(), rollovers: await db.rollovers.toArray(), themeRules: await db.themeRules.toArray(), smartLists: await db.smartLists.toArray(), focusSelections: await db.focusSelections.toArray(), habits: await db.habits.toArray(), habitLogs: await db.habitLogs.toArray(), goals: await db.goals.toArray(), goalCheckIns: await db.goalCheckIns.toArray(), trackerDefinitions: await db.trackerDefinitions.toArray(), trackerEntries: await db.trackerEntries.toArray(), dayNotes: await db.dayNotes.toArray(), pomodoroCycles: await db.pomodoroCycles.toArray()
   }
 }
 
@@ -280,5 +281,14 @@ describe('バックアップの復元前検証', () => {
     await restoreBackup(saved)
     expect((await db.trackerEntries.where('trackerId').equals(trackerId).first())?.value).toBeNull()
     expect((await db.dayNotes.get(noteId))?.humanText).toBe('本人のメモ')
+  })
+  it('ポモドーロ回数をタスクや作業区間と別に復元する', async () => {
+    const taskId = await createTask({ ...newTaskInput(), title: '集中' })
+    const runtime = startPomodoro(taskId, 25, '2026-10-01T10:00:00.000Z')
+    await recordPomodoro(runtime, '2026-10-01T10:25:00.000Z')
+    const saved = await snapshot()
+    await db.pomodoroCycles.clear()
+    await restoreBackup(saved)
+    expect((await db.pomodoroCycles.toArray())[0]).toMatchObject({ taskId, targetMinutes: 25, elapsedMinutes: 25 })
   })
 })
