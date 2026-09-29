@@ -26,6 +26,7 @@ import { addWallTile } from './wall'
 import { saveWorkflowPreset } from './workflows'
 import { saveAppearance } from './appearance'
 import { createReminder, dispatchDueReminders } from './reminders'
+import { saveKeybinding } from './shortcuts'
 import { inspectBackup, restoreBackup } from './backup'
 import { validateSnapshot, type Snapshot } from './backup-validation'
 
@@ -44,6 +45,17 @@ async function snapshot(): Promise<Snapshot> {
 }
 
 describe('バックアップの復元前検証', () => {
+  it('キー設定を復元し、重複割り当てを拒否する', async () => {
+    await saveKeybinding('newTask', 'Ctrl+Shift+N')
+    const saved = await snapshot()
+    expect(() => validateSnapshot(saved)).not.toThrow()
+    const invalid = structuredClone(saved)
+    invalid.settings[0].keybindings!.quickJump = 'Ctrl+Shift+N'
+    expect(() => validateSnapshot(invalid)).toThrow('重複')
+    await db.settings.update('main', { keybindings: undefined })
+    await restoreBackup(saved)
+    expect((await db.settings.get('main'))?.keybindings?.newTask).toBe('Ctrl+Shift+N')
+  })
   it('通知予約と履歴を復元し、存在しない対象と不正な宛先を拒否する', async () => {
     const taskId = await createTask({ ...newTaskInput(), title: '通知対象' })
     const start = new Date(2026, 8, 29, 10)
