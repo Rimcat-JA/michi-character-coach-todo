@@ -1,5 +1,5 @@
 import Dexie, { type EntityTable } from 'dexie'
-import type { Assessment, Audit, CalendarEvent, ChecklistItem, CommandReceipt, Completion, Container, FocusProjectSelection, LabelDefinition, LabelGroup, LedgerEntry, PlanningBucket, RolloverEntry, Routine, SavedTemplate, Settings, SmartList, Task, TaskAttachment, TaskComment, TaskDependency, TaskNote, ThemeRule, TimeBlock, WorkSession } from './domain'
+import type { Assessment, Audit, CalendarEvent, ChecklistItem, CommandReceipt, Completion, Container, FocusProjectSelection, Habit, HabitLog, LabelDefinition, LabelGroup, LedgerEntry, PlanningBucket, RolloverEntry, Routine, SavedTemplate, Settings, SmartList, Task, TaskAttachment, TaskComment, TaskDependency, TaskNote, ThemeRule, TimeBlock, WorkSession } from './domain'
 
 export const db = new Dexie('character-coach-v1') as Dexie & {
   tasks: EntityTable<Task, 'id'>
@@ -27,6 +27,8 @@ export const db = new Dexie('character-coach-v1') as Dexie & {
   themeRules: EntityTable<ThemeRule, 'id'>
   smartLists: EntityTable<SmartList, 'id'>
   focusSelections: EntityTable<FocusProjectSelection, 'id'>
+  habits: EntityTable<Habit, 'id'>
+  habitLogs: EntityTable<HabitLog, 'id'>
 }
 db.version(1).stores({
   tasks: 'id, &generationKey, status, scheduledDate, dueDate, project, routineId, deletedAt, updatedAt',
@@ -146,6 +148,9 @@ db.version(12).stores({
   labelGroups: 'id, ownerId', labelDefinitions: 'id, groupId, ownerId, name', savedTemplates: 'id, familyId, ownerId, kind, name, version',
   taskNotes: 'id, taskId, ownerId', taskComments: 'id, taskId, ownerId', taskAttachments: 'id, taskId, ownerId', taskDependencies: 'id, taskId, dependsOnId',
   planningBuckets: 'id, ownerId, kind, startDate, parentId', timeBlocks: 'id, ownerId, date, projectId', calendarEvents: 'id, ownerId, startAt', rollovers: 'id, taskId, at', themeRules: 'id, ownerId, category', smartLists: 'id, ownerId, name', focusSelections: 'id, ownerId, date'
+})
+db.version(13).stores({
+  habits: 'id, ownerId, active, routineId', habitLogs: 'id, habitId, date, taskId'
 })
 
 export async function ensureSettings() {

@@ -18,6 +18,7 @@ import { createSmartList } from './smart-lists'
 import { setFocusProjects } from './focus-projects'
 import { setSpotlight } from './focus-tools'
 import { captureDayProgressBaseline, createTimeTarget } from './progress'
+import { createHabit, recordHabitLog } from './habits'
 import { inspectBackup, restoreBackup } from './backup'
 import { validateSnapshot, type Snapshot } from './backup-validation'
 
@@ -31,7 +32,7 @@ async function snapshot(): Promise<Snapshot> {
     completions: await db.completions.toArray(), ledger: await db.ledger.toArray(),
     routines: await db.routines.toArray(), sessions: await db.sessions.toArray(),
     commands: await db.commands.toArray(), audits: await db.audits.toArray(),
-    settings: await db.settings.toArray(), containers: await db.containers.toArray(), checklistItems: await db.checklistItems.toArray(), labelGroups: await db.labelGroups.toArray(), labelDefinitions: await db.labelDefinitions.toArray(), savedTemplates: await db.savedTemplates.toArray(), taskNotes: await db.taskNotes.toArray(), taskComments: await db.taskComments.toArray(), taskAttachments: attachments, taskDependencies: await db.taskDependencies.toArray(), planningBuckets: await db.planningBuckets.toArray(), timeBlocks: await db.timeBlocks.toArray(), calendarEvents: await db.calendarEvents.toArray(), rollovers: await db.rollovers.toArray(), themeRules: await db.themeRules.toArray(), smartLists: await db.smartLists.toArray(), focusSelections: await db.focusSelections.toArray()
+    settings: await db.settings.toArray(), containers: await db.containers.toArray(), checklistItems: await db.checklistItems.toArray(), labelGroups: await db.labelGroups.toArray(), labelDefinitions: await db.labelDefinitions.toArray(), savedTemplates: await db.savedTemplates.toArray(), taskNotes: await db.taskNotes.toArray(), taskComments: await db.taskComments.toArray(), taskAttachments: attachments, taskDependencies: await db.taskDependencies.toArray(), planningBuckets: await db.planningBuckets.toArray(), timeBlocks: await db.timeBlocks.toArray(), calendarEvents: await db.calendarEvents.toArray(), rollovers: await db.rollovers.toArray(), themeRules: await db.themeRules.toArray(), smartLists: await db.smartLists.toArray(), focusSelections: await db.focusSelections.toArray(), habits: await db.habits.toArray(), habitLogs: await db.habitLogs.toArray()
   }
 }
 
@@ -245,5 +246,17 @@ describe('バックアップの復元前検証', () => {
     const settings = await db.settings.get('main')
     expect(settings?.timeTargets?.[0].targetMinutes).toBe(180)
     expect(settings?.dayProgressBaseline?.entries[0].taskId).toBe(taskId)
+  })
+  it('習慣と訂正履歴を復元し、参照先のないログを拒否する', async () => {
+    const habitId = await createHabit({ title: '読書', direction: 'increase', unit: '分', targetAmount: 20, cadence: 'daily', weekdays: [0, 1, 2, 3, 4, 5, 6], timezone: 'Asia/Tokyo', routineId: null })
+    await recordHabitLog(habitId, '2026-10-01', 10)
+    await recordHabitLog(habitId, '2026-10-01', 20, '訂正')
+    const saved = await snapshot()
+    const invalid = structuredClone(saved)
+    invalid.habitLogs![0].habitId = 'missing'
+    expect(() => validateSnapshot(invalid)).toThrow('習慣ログ')
+    await db.habitLogs.clear(); await db.habits.clear()
+    await restoreBackup(saved)
+    expect((await db.habitLogs.get(`${habitId}:2026-10-01`))?.history).toHaveLength(1)
   })
 })

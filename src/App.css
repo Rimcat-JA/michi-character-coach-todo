@@ -78,3 +78,7 @@
 .day-progress progress, .time-target-row progress { display: block; width: 100%; height: 10px; accent-color: #8f77dd; }
 .time-target-row { padding: 12px 0; border-top: 1px solid var(--border, #e0e3e8); }
 .time-target-row strong, .time-target-row span { display: block; margin-bottom: 6px; }
+.habit-row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; padding: 12px 0; border-top: 1px solid var(--border, #e0e3e8); }
+.habit-row > div { flex: 1; min-width: 180px; }
+.habit-row strong, .habit-row small, .habit-row span { display: block; }
+.habit-row input { width: 90px; }

@@ -35,17 +35,18 @@ import DurationEstimate from './DurationEstimate'
 import DayProgressView from './DayProgressView'
 import TimeTargetsView from './TimeTargetsView'
 import { captureDayProgressBaseline } from './progress'
+import HabitsView from './HabitsView'
 import { FocusChoiceTools } from './FocusChoiceTools'
 import SuperFocusView from './SuperFocusView'
 import { setSpotlight } from './focus-tools'
 import { projectNextStepStatus } from './dependencies'
 import './App.css'
 
-type View = 'today' | 'tasks' | 'projects' | 'labels' | 'saved' | 'plan' | 'periods' | 'calendar' | 'coach' | 'focus' | 'history' | 'routines' | 'settings'
+type View = 'today' | 'tasks' | 'projects' | 'labels' | 'saved' | 'plan' | 'periods' | 'calendar' | 'coach' | 'focus' | 'history' | 'routines' | 'habits' | 'settings'
 const INITIAL_NOW = new Date()
 const nav: { view: View; label: string; icon: typeof Inbox }[] = [
   { view: 'today', label: '今日', icon: LayoutDashboard }, { view: 'tasks', label: 'すべてのタスク', icon: ListTodo }, { view: 'projects', label: 'カテゴリとプロジェクト', icon: FolderTree }, { view: 'labels', label: 'ラベル', icon: Tags }, { view: 'saved', label: 'テンプレート', icon: ArchiveRestore }, { view: 'plan', label: '計画', icon: CalendarDays }, { view: 'periods', label: '週・月・四半期', icon: CalendarDays }, { view: 'calendar', label: '時間枠と予定', icon: CalendarDays },
-  { view: 'coach', label: 'コーチ', icon: MessageCircle }, { view: 'focus', label: '集中', icon: Focus }, { view: 'history', label: '実績', icon: History }, { view: 'routines', label: 'ルーティン', icon: Repeat2 }, { view: 'settings', label: '設定とデータ', icon: Settings2 }
+  { view: 'coach', label: 'コーチ', icon: MessageCircle }, { view: 'focus', label: '集中', icon: Focus }, { view: 'history', label: '実績', icon: History }, { view: 'routines', label: 'ルーティン', icon: Repeat2 }, { view: 'habits', label: '習慣', icon: Repeat2 }, { view: 'settings', label: '設定とデータ', icon: Settings2 }
 ]
 function dateLabel(date: string | null) { if (!date) return '日付なし'; const d = new Date(`${date}T12:00:00`); return `${d.getMonth() + 1}/${d.getDate()}` }
 function dateLong(date: string) { const d = new Date(`${date}T12:00:00`); return new Intl.DateTimeFormat('ja-JP', { month: 'long', day: 'numeric', weekday: 'short' }).format(d) }
@@ -143,6 +144,7 @@ function App() {
         {view === 'focus' && <><SuperFocusView tasks={open} sessions={sessions} onEdit={setEditor} onBack={() => go('today')} run={run} /><FocusChoiceTools tasks={tasks} dependencies={dependencies} themes={themeRules.filter(rule => rule.ownerId === settings.profileId)} focusProjects={focusSelection?.projects ?? []} lists={smartLists} ownerId={settings.profileId} date={currentDate} now={nowIso} onEdit={setEditor} run={run} /></>}
         {view === 'history' && <><HistoryView completions={completions} ledger={ledger} sessions={sessions} tasks={tasks} onEdit={id => { const t = tasks.find(x => x.id === id); if (t) setEditor(t) }} run={run} /><TimeTargetsView settings={settings} containers={containers} tasks={tasks} sessions={sessions} run={run} /></>}
         {view === 'routines' && <RoutinesView routines={routines} run={run} />}
+        {view === 'habits' && <HabitsView run={run} />}
         {view === 'settings' && <SettingsView settings={settings} run={run} />}
       </div>
     </main>
