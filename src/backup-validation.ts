@@ -1,4 +1,4 @@
-import { calculateScore, validateTaskInput, validateDate, type Assessment, type Audit, type CalendarEvent, type ChecklistItem, type CommandReceipt, type Completion, type Container, type LabelDefinition, type LabelGroup, type LedgerEntry, type PlanningBucket, type Routine, type SavedTemplate, type Settings, type Task, type TaskAttachment, type TaskComment, type TaskDependency, type TaskNote, type TimeBlock, type WorkSession } from './domain'
+import { calculateScore, validateTaskInput, validateDate, type Assessment, type Audit, type CalendarEvent, type ChecklistItem, type CommandReceipt, type Completion, type Container, type LabelDefinition, type LabelGroup, type LedgerEntry, type PlanningBucket, type RolloverEntry, type Routine, type SavedTemplate, type Settings, type Task, type TaskAttachment, type TaskComment, type TaskDependency, type TaskNote, type TimeBlock, type WorkSession } from './domain'
 import { validateLabelSelection } from './labels'
 import { validateDependencyGraph } from './dependencies'
 import { validatePlanningBuckets } from './period-planning'
@@ -19,6 +19,7 @@ export type Snapshot = {
   planningBuckets?: PlanningBucket[]
   timeBlocks?: TimeBlock[]
   calendarEvents?: CalendarEvent[]
+  rollovers?: RolloverEntry[]
 }
 
 const tableNames = ['tasks', 'assessments', 'completions', 'ledger', 'routines', 'sessions', 'commands', 'audits', 'settings'] as const
@@ -71,6 +72,10 @@ export function validateSnapshot(input: unknown): asserts input is Snapshot {
     }
   }
   const taskIds = unique(tables.tasks, 'tasks', 'id')
+  if (input.rollovers !== undefined && !Array.isArray(input.rollovers)) throw new Error('rolloversが不正です')
+  const rollovers = (input.rollovers ?? []) as RolloverEntry[]
+  unique(rollovers, 'rollovers', 'id')
+  for (const entry of rollovers) { if (!taskIds.has(entry.taskId) || !timestamp(entry.at) || entry.fromDate >= entry.toDate) throw new Error('繰越履歴が不正です'); validateDate(entry.fromDate, '繰越元'); validateDate(entry.toDate, '繰越先') }
   if (input.taskDependencies !== undefined && !Array.isArray(input.taskDependencies)) throw new Error('taskDependenciesが不正です')
   const dependencies = (input.taskDependencies ?? []) as TaskDependency[]
   unique(dependencies, 'taskDependencies', 'id')
@@ -109,7 +114,8 @@ export function validateSnapshot(input: unknown): asserts input is Snapshot {
     if (!record(task.score) || !['unset', 'manual', 'formula', 'allocated'].includes(task.score.mode as string) || !['open', 'completed'].includes(task.status) || !Number.isInteger(task.revision) || task.revision < 1 || !points(task.effectivePoints)) throw new Error('タスクの状態が不正です')
     for (const flag of ['pinned', 'backburner', 'orbit'] as const) if (task[flag] !== undefined && typeof task[flag] !== 'boolean') throw new Error('タスクの分類が不正です')
     if (!nullableString(task.routineId) || (task.routineId !== null && !routineIds.has(task.routineId)) || (task.containerId !== undefined && (!nullableString(task.containerId) || (task.containerId !== null && !containerIds.has(task.containerId)))) || (task.planBucketId !== undefined && (!nullableString(task.planBucketId) || (task.planBucketId !== null && !planningBucketIds.has(task.planBucketId)))) || !nullableString(task.deletedAt) || !timestamp(task.createdAt) || !timestamp(task.updatedAt) || (task.deletedAt !== null && !timestamp(task.deletedAt))) throw new Error('タスクの履歴が不正です')
-    for (const [name, value] of [['予定日', task.scheduledDate], ['締め切り', task.dueDate], ['目標日', task.targetDate], ['見直し日', task.reviewDate], ['開始可能日', task.availableFrom], ['延期終了日', task.deferredUntil ?? null]] as const) dateOrNull(value, name)
+    for (const [name, value] of [['予定日', task.scheduledDate], ['締め切り', task.dueDate], ['目標日', task.targetDate], ['見直し日', task.reviewDate], ['開始可能日', task.availableFrom], ['延期終了日', task.deferredUntil ?? null], ['初回予定日', task.firstScheduledDate ?? null]] as const) dateOrNull(value, name)
+    if (task.snoozedUntil !== undefined && task.snoozedUntil !== null && !timestamp(task.snoozedUntil)) throw new Error('スヌーズ時刻が不正です')
     validateTaskInput(task)
     if (calculateScore(task.score).effective !== task.effectivePoints) throw new Error('タスクのポイントが評価と一致しません')
     const assessment = assessmentById.get(task.assessmentId)
