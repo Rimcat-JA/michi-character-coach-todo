@@ -1,9 +1,11 @@
-import { calculateScore, validateTaskInput, validateDate, type Assessment, type Audit, type CommandReceipt, type Completion, type LedgerEntry, type Routine, type Settings, type Task, type WorkSession } from './domain'
+import { calculateScore, validateTaskInput, validateDate, type Assessment, type Audit, type ChecklistItem, type CommandReceipt, type Completion, type Container, type LedgerEntry, type Routine, type Settings, type Task, type WorkSession } from './domain'
 
 export type Snapshot = {
   format: 'coachbundle'; version: 1; exportedAt: string
   tasks: Task[]; assessments: Assessment[]; completions: Completion[]; ledger: LedgerEntry[]
   routines: Routine[]; sessions: WorkSession[]; commands: CommandReceipt[]; audits: Audit[]; settings: Settings[]
+  containers?: Container[]
+  checklistItems?: ChecklistItem[]
 }
 
 const tableNames = ['tasks', 'assessments', 'completions', 'ledger', 'routines', 'sessions', 'commands', 'audits', 'settings'] as const
@@ -37,7 +39,34 @@ export function validateSnapshot(input: unknown): asserts input is Snapshot {
   if (!record(input) || input.format !== 'coachbundle' || input.version !== 1) throw new Error('対応していないバックアップ形式です')
   if (!timestamp(input.exportedAt)) throw new Error('書き出し日時が不正です')
   const tables = Object.fromEntries(tableNames.map(name => [name, requireRows(input, name)])) as Record<typeof tableNames[number], unknown[]>
+  if (input.containers !== undefined && !Array.isArray(input.containers)) throw new Error('containersが不正です')
+  const containers = (input.containers ?? []) as unknown[]
+  const containerIds = unique(containers, 'containers', 'id')
+  const byContainerId = new Map(containers.map(raw => [((raw as Container).id), raw as Container]))
+  for (const raw of containers) {
+    const container = raw as Container
+    if (!filled(container.name) || container.name.length > 100 || !['category', 'project'].includes(container.kind) || !nullableString(container.parentId) || !filled(container.ownerId) || !Number.isInteger(container.revision) || container.revision < 1 || !timestamp(container.createdAt) || !timestamp(container.updatedAt) || !nullableString(container.deletedAt) || (container.deletedAt !== null && !timestamp(container.deletedAt))) throw new Error('カテゴリ・プロジェクトが不正です')
+    const seen = new Set<string>(), ownerId = container.ownerId
+    let cursor: Container | undefined = container
+    while (cursor) {
+      if (seen.has(cursor.id) || seen.size >= 12 || cursor.ownerId !== ownerId) throw new Error('カテゴリ・プロジェクトの階層が不正です')
+      seen.add(cursor.id)
+      if (cursor.parentId === null) break
+      const parent: Container | undefined = byContainerId.get(cursor.parentId)
+      if (!parent || parent.deletedAt || (cursor.kind === 'category' && parent.kind === 'project')) throw new Error('カテゴリ・プロジェクトの親が不正です')
+      cursor = parent
+    }
+  }
   const taskIds = unique(tables.tasks, 'tasks', 'id')
+  if (input.checklistItems !== undefined && !Array.isArray(input.checklistItems)) throw new Error('checklistItemsが不正です')
+  const checklistItems = (input.checklistItems ?? []) as unknown[]
+  unique(checklistItems, 'checklistItems', 'id')
+  const convertedIds = new Set<string>()
+  for (const raw of checklistItems) {
+    const item = raw as ChecklistItem
+    if (!taskIds.has(item.taskId) || !filled(item.text) || item.text.length > 300 || typeof item.done !== 'boolean' || !nullableString(item.convertedTaskId) || (item.convertedTaskId !== null && !taskIds.has(item.convertedTaskId)) || !timestamp(item.createdAt) || !timestamp(item.updatedAt)) throw new Error('チェック項目が不正です')
+    if (item.convertedTaskId) { if (convertedIds.has(item.convertedTaskId)) throw new Error('子タスク参照が重複しています'); convertedIds.add(item.convertedTaskId) }
+  }
   unique(tables.tasks, 'tasks', 'generationKey')
   const assessmentIds = unique(tables.assessments, 'assessments', 'id')
   const completionIds = unique(tables.completions, 'completions', 'id')
@@ -55,7 +84,7 @@ export function validateSnapshot(input: unknown): asserts input is Snapshot {
     const task = raw as Task
     if (!filled(task.title) || typeof task.notes !== 'string' || typeof task.project !== 'string' || !Array.isArray(task.labels) || task.labels.some(label => typeof label !== 'string') || task.labels.length > 30) throw new Error('タスクの内容が不正です')
     if (!record(task.score) || !['unset', 'manual', 'formula', 'allocated'].includes(task.score.mode as string) || !['open', 'completed'].includes(task.status) || !Number.isInteger(task.revision) || task.revision < 1 || !points(task.effectivePoints)) throw new Error('タスクの状態が不正です')
-    if (!nullableString(task.routineId) || (task.routineId !== null && !routineIds.has(task.routineId)) || !nullableString(task.deletedAt) || !timestamp(task.createdAt) || !timestamp(task.updatedAt) || (task.deletedAt !== null && !timestamp(task.deletedAt))) throw new Error('タスクの履歴が不正です')
+    if (!nullableString(task.routineId) || (task.routineId !== null && !routineIds.has(task.routineId)) || (task.containerId !== undefined && (!nullableString(task.containerId) || (task.containerId !== null && !containerIds.has(task.containerId)))) || !nullableString(task.deletedAt) || !timestamp(task.createdAt) || !timestamp(task.updatedAt) || (task.deletedAt !== null && !timestamp(task.deletedAt))) throw new Error('タスクの履歴が不正です')
     for (const [name, value] of [['予定日', task.scheduledDate], ['締め切り', task.dueDate], ['目標日', task.targetDate], ['見直し日', task.reviewDate], ['開始可能日', task.availableFrom]] as const) dateOrNull(value, name)
     validateTaskInput(task)
     if (calculateScore(task.score).effective !== task.effectivePoints) throw new Error('タスクのポイントが評価と一致しません')
@@ -120,6 +149,7 @@ export function validateSnapshot(input: unknown): asserts input is Snapshot {
     if ((audit.taskId !== null && !taskIds.has(audit.taskId)) || !filled(audit.operation) || !timestamp(audit.at) || typeof audit.detail !== 'string') throw new Error('監査履歴が不正です')
   }
   const settings = tables.settings[0] as Settings
+  if (containers.some(raw => (raw as Container).ownerId !== settings.profileId)) throw new Error('カテゴリ・プロジェクトの所有者が不正です')
   const allowedSettings = new Set(['id', 'profileId', 'datasetId', 'createdAt', 'coachName', 'dailyMinutes', 'dailyPoints', 'notifications', 'aiEnabled', 'aiModel', 'automation', 'lastBackupAt'])
   if (Object.keys(settings).some(key => !allowedSettings.has(key))) throw new Error('設定に未対応の項目があります')
   if (!filled(settings.profileId) || !filled(settings.datasetId) || !timestamp(settings.createdAt) || typeof settings.coachName !== 'string' || !Number.isInteger(settings.dailyMinutes) || settings.dailyMinutes < 0 || !Number.isInteger(settings.dailyPoints) || settings.dailyPoints < 0 || typeof settings.aiEnabled !== 'boolean' || typeof settings.notifications !== 'boolean' || !['A0', 'A1', 'A2'].includes(settings.automation) || !nullableString(settings.lastBackupAt) || (settings.lastBackupAt !== null && !timestamp(settings.lastBackupAt))) throw new Error('設定が不正です')

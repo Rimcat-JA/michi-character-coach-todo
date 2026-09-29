@@ -1,9 +1,10 @@
 import { db } from './db'
 import { addDays, calculateScore, emptyScore, today, uid, validateDate, validateTaskInput, type Assessment, type Routine, type Task } from './domain'
+import { containerPath } from './containers'
 
 export class ConflictError extends Error { constructor() { super('別の画面で更新されました。再読み込みして差分を確認してください。') } }
 const now = () => new Date().toISOString()
-const tables = [db.tasks, db.assessments, db.completions, db.ledger, db.routines, db.sessions, db.commands, db.audits]
+const tables = [db.tasks, db.assessments, db.completions, db.ledger, db.routines, db.sessions, db.commands, db.audits, db.containers, db.settings]
 async function receipt<T>(key: string, payload: unknown, run: () => Promise<T>): Promise<T> {
   const hash = JSON.stringify(payload)
   return db.transaction('rw', tables, async () => {
@@ -17,15 +18,24 @@ async function receipt<T>(key: string, payload: unknown, run: () => Promise<T>):
     return result
   })
 }
-export type TaskInput = Pick<Task, 'title' | 'notes' | 'project' | 'labels' | 'scheduledDate' | 'dueDate' | 'targetDate' | 'reviewDate' | 'availableFrom' | 'importance' | 'score'>
-export const newTaskInput = (): TaskInput => ({ title: '', notes: '', project: '', labels: [], scheduledDate: null, dueDate: null, targetDate: null, reviewDate: null, availableFrom: null, importance: 1, score: emptyScore() })
+export type TaskInput = Pick<Task, 'title' | 'notes' | 'project' | 'labels' | 'scheduledDate' | 'dueDate' | 'targetDate' | 'reviewDate' | 'availableFrom' | 'importance' | 'score'> & { containerId?: string | null }
+export const newTaskInput = (): TaskInput => ({ title: '', notes: '', project: '', containerId: null, labels: [], scheduledDate: null, dueDate: null, targetDate: null, reviewDate: null, availableFrom: null, importance: 1, score: emptyScore() })
+
+async function resolvedProject(input: TaskInput): Promise<string> {
+  if (!input.containerId) return input.project
+  const containers = await db.containers.toArray(), item = containers.find(value => value.id === input.containerId)
+  const settings = await db.settings.get('main')
+  if (!item || item.deletedAt || item.ownerId !== settings?.profileId) throw new Error('カテゴリ・プロジェクトにアクセスできません')
+  return containerPath(item.id, containers)
+}
 
 async function addTask(input: TaskInput, generationKey: string, routineId: string | null): Promise<string> {
   validateTaskInput(input)
   for (const [name, value] of [['予定日', input.scheduledDate], ['締め切り', input.dueDate], ['目標日', input.targetDate], ['見直し日', input.reviewDate], ['開始可能日', input.availableFrom]] as const) validateDate(value, name)
   const result = calculateScore(input.score)
+  const project = await resolvedProject(input)
   const id = uid(), assessmentId = uid(), at = now()
-  const task: Task = { ...input, title: input.title.trim(), labels: [...input.labels], score: { ...input.score }, id, generationKey, routineId, effectivePoints: result.effective, assessmentId, status: 'open', revision: 1, createdAt: at, updatedAt: at, deletedAt: null }
+  const task: Task = { ...input, project, title: input.title.trim(), labels: [...input.labels], score: { ...input.score }, id, generationKey, routineId, effectivePoints: result.effective, assessmentId, status: 'open', revision: 1, createdAt: at, updatedAt: at, deletedAt: null }
   const assessment: Assessment = { id: assessmentId, taskId: id, score: { ...input.score }, result, createdAt: at, origin: routineId ? 'routine' : 'human', ruleVersion: 'v1' }
   await db.tasks.add(task); await db.assessments.add(assessment)
   await db.audits.add({ id: uid(), taskId: id, operation: 'create', at, detail: routineId ? 'ルーティンから作成' : '本人が作成' })
@@ -37,7 +47,7 @@ export async function createTask(input: TaskInput, key: string = uid()) {
 export async function createTasksAtomic(inputs: TaskInput[], key: string = uid()): Promise<string[]> {
   if (inputs.length < 1 || inputs.length > 100) throw new Error('一括登録は1〜100件で指定してください')
   const hash = JSON.stringify({ operation: 'bulk_create', inputs })
-  return db.transaction('rw', db.tasks, db.assessments, db.commands, db.audits, async () => {
+  return db.transaction('rw', [db.tasks, db.assessments, db.commands, db.audits, db.containers, db.settings], async () => {
     const prior = await db.commands.get(key)
     if (prior) {
       if (prior.hash !== hash) throw new Error('IDEMPOTENCY_MISMATCH')
@@ -92,9 +102,10 @@ export async function updateTask(id: string, expectedRevision: number, input: Ta
     if (old.revision !== expectedRevision) throw new ConflictError()
     const scoreChanged = JSON.stringify(old.score) !== JSON.stringify(input.score)
     const result = calculateScore(input.score)
+    const project = await resolvedProject(input)
     const assessmentId = scoreChanged ? uid() : old.assessmentId
     if (scoreChanged) await db.assessments.add({ id: assessmentId, taskId: id, score: { ...input.score }, result, createdAt: now(), origin: 'human', ruleVersion: 'v1' })
-    await db.tasks.put({ ...old, ...input, title: input.title.trim(), labels: [...input.labels], score: { ...input.score }, assessmentId, effectivePoints: result.effective, revision: old.revision + 1, updatedAt: now() })
+    await db.tasks.put({ ...old, ...input, project, title: input.title.trim(), labels: [...input.labels], score: { ...input.score }, assessmentId, effectivePoints: result.effective, revision: old.revision + 1, updatedAt: now() })
     await db.audits.add({ id: uid(), taskId: id, operation: 'update', at: now(), detail: '本人が編集' })
     return id
   })

@@ -13,12 +13,14 @@ export type ScoreInput = {
 export type ScoreResult = { effective: number | null; lower: number | null; upper: number | null; label: string }
 export type Task = {
   id: string; generationKey: string; routineId: string | null; title: string; notes: string
-  project: string; labels: string[]; scheduledDate: string | null; dueDate: string | null
+  project: string; containerId?: string | null; labels: string[]; scheduledDate: string | null; dueDate: string | null
   targetDate: string | null; reviewDate: string | null; availableFrom: string | null
   importance: number; score: ScoreInput; effectivePoints: number | null
   assessmentId: string; status: 'open' | 'completed'; revision: number
   createdAt: string; updatedAt: string; deletedAt: string | null
 }
+export type Container = { id: string; parentId: string | null; kind: 'category' | 'project'; name: string; ownerId: string; revision: number; createdAt: string; updatedAt: string; deletedAt: string | null }
+export type ChecklistItem = { id: string; taskId: string; text: string; done: boolean; convertedTaskId: string | null; createdAt: string; updatedAt: string }
 export type Assessment = { id: string; taskId: string; score: ScoreInput; result: ScoreResult; createdAt: string; origin: 'human' | 'routine'; ruleVersion: 'v1' }
 export type Completion = { id: string; taskId: string; originalAt: string; currentAt: string | null; originalPoints: number | null; netPoints: number | null; lastConfirmedPoints?: number | null; scoreState: 'pending' | 'confirmed'; title: string; project: string }
 export type LedgerEntry = { id: string; completionId: string; taskId: string; kind: 'award' | 'adjust' | 'reverse' | 'restore'; delta: number; at: string; reason: string }

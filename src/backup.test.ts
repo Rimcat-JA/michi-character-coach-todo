@@ -3,6 +3,8 @@ import { beforeEach, describe, expect, it } from 'vitest'
 import { db, ensureSettings } from './db'
 import { createTask, newTaskInput, completeTask, correctCompletion, undoCompletion } from './commands'
 import { emptyScore } from './domain'
+import { createContainer } from './containers'
+import { addChecklistItem, convertChecklistItem } from './checklist'
 import { inspectBackup, restoreBackup } from './backup'
 import { validateSnapshot, type Snapshot } from './backup-validation'
 
@@ -15,7 +17,7 @@ async function snapshot(): Promise<Snapshot> {
     completions: await db.completions.toArray(), ledger: await db.ledger.toArray(),
     routines: await db.routines.toArray(), sessions: await db.sessions.toArray(),
     commands: await db.commands.toArray(), audits: await db.audits.toArray(),
-    settings: await db.settings.toArray()
+    settings: await db.settings.toArray(), containers: await db.containers.toArray(), checklistItems: await db.checklistItems.toArray()
   }
 }
 
@@ -70,5 +72,26 @@ describe('バックアップの復元前検証', () => {
     const inspected = await inspectBackup(file, '')
     expect(inspected.tasks[0].title).toBe('JSONの対象')
     expect(inspected.format).toBe('coachbundle')
+  })
+  it('階層付きタスクを復元し参照を保つ', async () => {
+    const parent = await createContainer({ kind: 'category', name: '生活', parentId: null })
+    const child = await createContainer({ kind: 'project', name: '買い物', parentId: parent })
+    const id = await createTask({ ...newTaskInput(), title: '食品を買う', containerId: child })
+    const saved = await snapshot()
+    await db.containers.clear(); await db.tasks.clear()
+    await restoreBackup(saved)
+    expect((await db.tasks.get(id))?.containerId).toBe(child)
+    expect((await db.containers.get(child))?.parentId).toBe(parent)
+  })
+  it('配分済みチェック項目と子タスクを一緒に復元する', async () => {
+    const parent = await createTask({ ...newTaskInput(), title: '親', score: { ...emptyScore(), mode: 'manual', manualPoints: 40 } })
+    const item = await addChecklistItem(parent, '子にする項目')
+    const child = await convertChecklistItem(item, 1, 10)
+    const saved = await snapshot()
+    await db.checklistItems.clear(); await db.tasks.clear()
+    await restoreBackup(saved)
+    expect((await db.checklistItems.get(item))?.convertedTaskId).toBe(child)
+    expect((await db.tasks.get(parent))?.effectivePoints).toBe(30)
+    expect((await db.tasks.get(child))?.effectivePoints).toBe(10)
   })
 })
