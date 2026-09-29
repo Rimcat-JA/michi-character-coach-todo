@@ -104,6 +104,17 @@ export async function reviseGoalCheckIn(id: string, expectedRevision: number, an
   })
 }
 
+export async function setGoalCheckInAiSummary(id: string, expectedRevision: number, expectedAnswer: string, summary: string): Promise<void> {
+  if (!summary.trim() || summary.length > 10000) throw new Error('AI要約を確認してください')
+  await db.transaction('rw', db.goalCheckIns, async () => {
+    const current = await db.goalCheckIns.get(id)
+    if (!current || current.deletedAt) throw new Error('チェックインがありません')
+    if (current.summaryRevision !== expectedRevision || current.answer !== expectedAnswer) throw new ConflictError()
+    const at = new Date().toISOString()
+    await db.goalCheckIns.put({ ...current, summary: summary.trim(), summaryOrigin: 'ai', summaryRevision: current.summaryRevision + 1, history: [...current.history, { summary: current.summary, at: current.updatedAt }], updatedAt: at })
+  })
+}
+
 export async function deleteGoalCheckIn(id: string, expectedRevision: number): Promise<void> {
   await db.transaction('rw', db.goalCheckIns, async () => {
     const current = await db.goalCheckIns.get(id)

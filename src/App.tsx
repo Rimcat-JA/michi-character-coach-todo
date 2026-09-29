@@ -3,7 +3,7 @@ import { useLiveQuery } from 'dexie-react-hooks'
 import { ArchiveRestore, CalendarDays, Check, CheckCircle2, ChevronDown, Clock3, CloudOff, Database, Download, Focus, FolderTree, History, Inbox, LayoutDashboard, ListTodo, LockKeyhole, Menu, MessageCircle, Moon, MoreHorizontal, Plus, Repeat2, Search, Settings2, ShieldCheck, Sparkles, Tags, Trash2, Upload, X } from 'lucide-react'
 import { db, ensureSettings } from './db'
 import { bulkUpdateTasksAtomic, createRoutine, createTask, correctCompletion, expandRoutines, newTaskInput, restoreTask, setTaskFlag, trashTask, undoCompletion, updateTask, completeTask, type BulkTaskPatch, type TaskInput } from './commands'
-import { addDays, calculateScore, emptyScore, scoreText, today, type ChecklistItem, type Completion, type Container, type LabelDefinition, type LabelGroup, type Routine, type SavedTemplate, type ScoreInput, type Settings, type SmartList, type Task, type TimeBlock, type WorkSession } from './domain'
+import { addDays, calculateScore, emptyScore, scoreText, today, type ChecklistItem, type Completion, type Container, type Goal, type GoalCheckIn, type LabelDefinition, type LabelGroup, type Routine, type SavedTemplate, type ScoreInput, type Settings, type SmartList, type Task, type TimeBlock, type WorkSession } from './domain'
 import { exportBackup, exportPortableJson, exportTasksCsv, exportTasksIcs, inspectBackup, restoreBackup } from './backup'
 import { unionSessionMinutes } from './time-tracking'
 import { dayCapacity, filterTasksByDates, nextAvailableDate, reviewDueTasks, sortTasks, suggestedTasks, urgency } from './planning'
@@ -11,7 +11,7 @@ import { containerPath, containerPointTotals, createContainer, moveContainer, re
 import { addChecklistItem, checklistProgress, convertChecklistItem, toggleChecklistItem } from './checklist'
 import { createLabelDefinition, createLabelGroup } from './labels'
 import { instantiateTemplate, saveProjectTemplate, saveTaskTemplate } from './templates'
-import { selectedTaskContext, type AIStatus } from './ai'
+import { selectedGoalContext, selectedTaskContext, type AIStatus } from './ai'
 import Braindump from './Braindump'
 import TaskMaterials from './TaskMaterials'
 import TaskDependencies from './TaskDependencies'
@@ -79,6 +79,8 @@ function App() {
   const themeRules = useLiveQuery(() => db.themeRules.toArray(), []) ?? []
   const smartLists = useLiveQuery(() => db.smartLists.toArray(), []) ?? []
   const focusSelections = useLiveQuery(() => db.focusSelections.toArray(), []) ?? []
+  const goals = useLiveQuery(() => db.goals.toArray(), []) ?? []
+  const goalCheckIns = useLiveQuery(() => db.goalCheckIns.toArray(), []) ?? []
   const settings = useLiveQuery(() => db.settings.get('main'), [])
   const active = tasks.filter(t => !t.deletedAt)
   const open = active.filter(t => t.status === 'open')
@@ -146,7 +148,7 @@ function App() {
         {view === 'plan' && <><PlanView tasks={open} blocks={timeBlocks} settings={settings} onEdit={setEditor} /><ThemeRulesView tasks={active} rules={themeRules} ownerId={settings.profileId} run={run} /><AutoSchedulePanel tasks={tasks} dependencies={dependencies} blocks={timeBlocks} settings={settings} run={run} /></>}
         {view === 'periods' && <PeriodPlanningView buckets={planningBuckets} tasks={tasks} ownerId={settings.profileId} run={run} />}
         {view === 'calendar' && <CalendarPlanningView blocks={timeBlocks} events={calendarEvents} tasks={tasks} projects={containers} sessions={sessions} ownerId={settings.profileId} run={run} />}
-        {view === 'coach' && <CoachView tasks={open} settings={settings} onEdit={setEditor} onNew={() => setEditor('new')} />}
+        {view === 'coach' && <CoachView tasks={open} goals={goals.filter(goal => goal.ownerId === settings.profileId && !goal.deletedAt)} checkIns={goalCheckIns} settings={settings} onEdit={setEditor} onNew={() => setEditor('new')} />}
         {view === 'focus' && <><SuperFocusView tasks={open} sessions={sessions} onEdit={setEditor} onBack={() => go('today')} run={run} /><PomodoroPanel tasks={open} run={run} /><FocusChoiceTools tasks={tasks} dependencies={dependencies} themes={themeRules.filter(rule => rule.ownerId === settings.profileId)} focusProjects={focusSelection?.projects ?? []} lists={smartLists} ownerId={settings.profileId} date={currentDate} now={nowIso} onEdit={setEditor} run={run} /></>}
         {view === 'history' && <><HistoryView completions={completions} ledger={ledger} sessions={sessions} tasks={tasks} onEdit={id => { const t = tasks.find(x => x.id === id); if (t) setEditor(t) }} run={run} /><TimeTargetsView settings={settings} containers={containers} tasks={tasks} sessions={sessions} run={run} /><AnalyticsView completions={completions} sessions={sessions} /><SessionCorrectionView sessions={sessions} tasks={tasks} run={run} /></>}
         {view === 'routines' && <RoutinesView routines={routines} run={run} />}
@@ -338,19 +340,20 @@ function fixedCoachAnswer(text: string, next: Task | undefined) {
   return answer
 }
 
-function CoachView({ tasks, settings, onEdit, onNew }: { tasks: Task[]; settings: Settings; onEdit: (t: Task) => void; onNew: () => void }) {
+function CoachView({ tasks, goals, checkIns, settings, onEdit, onNew }: { tasks: Task[]; goals: Goal[]; checkIns: GoalCheckIn[]; settings: Settings; onEdit: (t: Task) => void; onNew: () => void }) {
   const [message, setMessage] = useState('')
   const [chat, setChat] = useState<{ who: 'you' | 'coach'; text: string }[]>([])
   const [aiStatus, setAiStatus] = useState<AIStatus | null>(null)
   const [keyInput, setKeyInput] = useState('')
   const [modelInput, setModelInput] = useState(settings.aiModel || 'deepseek/deepseek-v4.1-flash')
   const [selectedId, setSelectedId] = useState('')
+  const [selectedGoalId, setSelectedGoalId] = useState('')
   const [connectionError, setConnectionError] = useState('')
   const [sending, setSending] = useState(false)
   const bridge = window.michiAI
   const next = [...tasks].sort((a, b) => (a.dueDate ?? '9999').localeCompare(b.dueDate ?? '9999') || b.importance - a.importance)[0]
   const selectedTask = tasks.find(t => t.id === selectedId)
-  const selectedContext = selectedTaskContext(selectedTask)
+  const selectedContext = [selectedTaskContext(selectedTask), selectedGoalContext(goals.find(goal => goal.id === selectedGoalId), checkIns)].filter(Boolean).join('\n\n').slice(0, 6000) || null
   const aiReady = Boolean(bridge && aiStatus?.configured && settings.aiEnabled && settings.aiModel)
 
   useEffect(() => {
@@ -411,7 +414,7 @@ function CoachView({ tasks, settings, onEdit, onNew }: { tasks: Task[]; settings
 
   return <>
     <div className="page-heading">
-      <div><span className="eyebrow">CHARACTER COACH</span><h1>{settings.coachName}と整理する</h1><p>{aiReady ? '送信した文章と選択タスクだけを、OpenRouter経由で選択したモデルの提供先へ送ります。' : '現在は端末内の定型応答です。外部AIへの送信は行いません。'}</p></div>
+      <div><span className="eyebrow">CHARACTER COACH</span><h1>{settings.coachName}と整理する</h1><p>{aiReady ? '送信した文章と選択したタスク・目標だけを、OpenRouter経由で選択したモデルの提供先へ送ります。' : '現在は端末内の定型応答です。外部AIへの送信は行いません。'}</p></div>
       <span className="status-tag"><Moon size={15} /> {aiReady ? 'OpenRouter 接続' : 'オフライン対応'}</span>
     </div>
     <div className="coach-layout">
@@ -426,8 +429,9 @@ function CoachView({ tasks, settings, onEdit, onNew }: { tasks: Task[]; settings
           <label className="field">OpenRouterへ送る保存済みタスク
             <select value={selectedId} onChange={e => setSelectedId(e.target.value)}><option value="">送らない</option>{tasks.map(t => <option key={t.id} value={t.id}>{t.title}</option>)}</select>
           </label>
-          {selectedContext && <details><summary>送信するタスク情報を表示</summary><pre>{selectedContext}</pre></details>}
-          <small>メッセージ送信時、入力文と選択タスクだけを送ります。過去の会話・他のタスクは送りません。APIキーは認証ヘッダーにだけ使用します。</small>
+          <label className="field">OpenRouterへ送る目標とチェックイン<select value={selectedGoalId} onChange={e => setSelectedGoalId(e.target.value)}><option value="">送らない</option>{goals.map(goal => <option key={goal.id} value={goal.id}>{goal.title}</option>)}</select></label>
+          {selectedContext && <details><summary>送信する保存情報を表示</summary><pre>{selectedContext}</pre></details>}
+          <small>メッセージ送信時、入力文と選択したタスク・目標の現行チェックインだけを送ります。過去の会話・他のタスクは送りません。APIキーは認証ヘッダーにだけ使用します。</small>
         </div>}
         <div className="chat-input"><input value={message} maxLength={6000} onChange={e => setMessage(e.target.value)} onKeyDown={e => e.key === 'Enter' && send()} placeholder="今日、何から始めよう？" /><button className="primary-button" onClick={send} disabled={!message.trim() || sending}>送信</button></div>
       </section>

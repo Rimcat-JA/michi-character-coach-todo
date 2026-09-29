@@ -45,12 +45,13 @@ export async function saveDayNote(date: string, timezone: string, humanText: str
   })
 }
 
-export async function setDayNoteSummary(id: string, expectedSummaryRevision: number, summary: string | null, origin: 'ai' | 'human'): Promise<void> {
+export async function setDayNoteSummary(id: string, expectedSummaryRevision: number, summary: string | null, origin: 'ai' | 'human', expectedHumanRevision?: number): Promise<void> {
   if (summary !== null && summary.length > 10000) throw new Error('要約は10000文字以内にしてください')
   await db.transaction('rw', db.dayNotes, async () => {
     const note = await db.dayNotes.get(id)
     if (!note || note.deletedAt) throw new Error('日記がありません')
     if (note.summaryRevision !== expectedSummaryRevision) throw new ConflictError()
+    if (expectedHumanRevision !== undefined && note.humanRevision !== expectedHumanRevision) throw new ConflictError()
     const at = new Date().toISOString()
     await db.dayNotes.put({ ...note, aiSummary: summary?.trim() || null, summaryOrigin: summary?.trim() ? origin : null, summaryRevision: note.summaryRevision + 1, summaryOfHumanRevision: summary?.trim() ? note.humanRevision : null, history: [...note.history, { kind: 'summary', text: note.aiSummary, at: note.updatedAt, revision: note.summaryRevision }], updatedAt: at })
   })
