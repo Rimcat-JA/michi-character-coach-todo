@@ -34,6 +34,55 @@ async function addTask(input: TaskInput, generationKey: string, routineId: strin
 export async function createTask(input: TaskInput, key: string = uid()) {
   return receipt(key, { operation: 'create', input }, () => addTask(input, key, null))
 }
+export async function createTasksAtomic(inputs: TaskInput[], key: string = uid()): Promise<string[]> {
+  if (inputs.length < 1 || inputs.length > 100) throw new Error('一括登録は1〜100件で指定してください')
+  const hash = JSON.stringify({ operation: 'bulk_create', inputs })
+  return db.transaction('rw', db.tasks, db.assessments, db.commands, db.audits, async () => {
+    const prior = await db.commands.get(key)
+    if (prior) {
+      if (prior.hash !== hash) throw new Error('IDEMPOTENCY_MISMATCH')
+      return JSON.parse(prior.resultId) as string[]
+    }
+    const ids: string[] = []
+    for (const [index, input] of inputs.entries()) ids.push(await addTask(input, `${key}:${index}`, null))
+    await db.commands.add({ key, hash, resultId: JSON.stringify(ids), at: now() })
+    return ids
+  })
+}
+export type BulkTaskPatch = Partial<Pick<Task, 'project' | 'scheduledDate' | 'dueDate' | 'importance'>>
+export async function bulkUpdateTasksAtomic(items: { id: string; revision: number }[], patch: BulkTaskPatch, key: string = uid()): Promise<string[]> {
+  if (items.length < 1 || items.length > 100 || new Set(items.map(item => item.id)).size !== items.length) throw new Error('一括編集は重複のない1〜100件で指定してください')
+  const fields = Object.keys(patch)
+  if (!fields.length || fields.some(field => !['project', 'scheduledDate', 'dueDate', 'importance'].includes(field))) throw new Error('一括編集の項目が不正です')
+  if ('project' in patch && (typeof patch.project !== 'string' || patch.project.length > 300)) throw new Error('プロジェクト名が不正です')
+  if ('scheduledDate' in patch) {
+    if (patch.scheduledDate === undefined) throw new Error('予定日が不正です')
+    validateDate(patch.scheduledDate, '予定日')
+  }
+  if ('dueDate' in patch) {
+    if (patch.dueDate === undefined) throw new Error('締め切りが不正です')
+    validateDate(patch.dueDate, '締め切り')
+  }
+  if ('importance' in patch && (!Number.isInteger(patch.importance) || patch.importance! < 0 || patch.importance! > 3)) throw new Error('重要度は0〜3で指定してください')
+  const hash = JSON.stringify({ operation: 'bulk_update', items, patch })
+  return db.transaction('rw', db.tasks, db.commands, db.audits, async () => {
+    const prior = await db.commands.get(key)
+    if (prior) {
+      if (prior.hash !== hash) throw new Error('IDEMPOTENCY_MISMATCH')
+      return JSON.parse(prior.resultId) as string[]
+    }
+    const tasks = await Promise.all(items.map(item => db.tasks.get(item.id)))
+    if (tasks.some((task, index) => !task || task.deletedAt || task.revision !== items[index].revision)) throw new ConflictError()
+    const at = now()
+    for (const task of tasks as Task[]) {
+      await db.tasks.put({ ...task, ...patch, revision: task.revision + 1, updatedAt: at })
+      await db.audits.add({ id: uid(), taskId: task.id, operation: 'bulk_update', at, detail: `一括編集: ${fields.join(',')}` })
+    }
+    const ids = tasks.map(task => task!.id)
+    await db.commands.add({ key, hash, resultId: JSON.stringify(ids), at })
+    return ids
+  })
+}
 export async function updateTask(id: string, expectedRevision: number, input: TaskInput, key: string = uid()) {
   return receipt(key, { operation: 'update', id, expectedRevision, input }, async () => {
     validateTaskInput(input)
@@ -58,7 +107,7 @@ export async function completeTask(id: string, expectedRevision: number, key: st
     if (task.status === 'completed') return id
     const at = now(), existing = await db.completions.where('taskId').equals(id).first()
     if (existing) {
-      const points = task.effectivePoints
+      const points = existing.lastConfirmedPoints !== undefined ? existing.lastConfirmedPoints : task.effectivePoints
       await db.completions.put({ ...existing, currentAt: at, netPoints: points, scoreState: points === null ? 'pending' : 'confirmed' })
       if (points !== null) await db.ledger.add({ id: uid(), completionId: existing.id, taskId: id, kind: 'restore', delta: points, at, reason: '完了を再確定' })
     } else {
@@ -80,7 +129,7 @@ export async function undoCompletion(id: string, expectedRevision: number, key: 
     const completion = await db.completions.where('taskId').equals(id).first()
     if (!completion || !completion.currentAt) throw new Error('完了記録がありません')
     if (completion.netPoints !== null) await db.ledger.add({ id: uid(), completionId: completion.id, taskId: id, kind: 'reverse', delta: -completion.netPoints, at: now(), reason: '完了取消' })
-    await db.completions.put({ ...completion, currentAt: null, netPoints: null })
+    await db.completions.put({ ...completion, currentAt: null, netPoints: null, lastConfirmedPoints: completion.netPoints })
     await db.tasks.put({ ...task, status: 'open', revision: task.revision + 1, updatedAt: now() })
     await db.audits.add({ id: uid(), taskId: id, operation: 'undo', at: now(), detail: '完了を取消' })
     return id
@@ -127,6 +176,8 @@ export async function createRoutine(input: Omit<Routine, 'id' | 'revision' | 'cr
     if (input.endDate && input.endDate < input.startDate) throw new Error('終了日は開始日以降にしてください')
     if (!Number.isInteger(input.monthDay) || input.monthDay < 1 || input.monthDay > 31) throw new Error('月の日は1〜31で指定してください')
     if (input.weekdays.some(d => !Number.isInteger(d) || d < 0 || d > 6)) throw new Error('曜日が不正です')
+    if (input.excludedDates && (input.excludedDates.length > 366 || new Set(input.excludedDates).size !== input.excludedDates.length)) throw new Error('除外日が不正です')
+    for (const date of input.excludedDates ?? []) validateDate(date, '除外日')
     calculateScore(input.score)
     const id = uid()
     await db.routines.add({ ...input, title: input.title.trim(), id, revision: 1, createdAt: now() })
@@ -134,7 +185,7 @@ export async function createRoutine(input: Omit<Routine, 'id' | 'revision' | 'cr
   })
 }
 function matchesRoutine(r: Routine, date: string) {
-  if (date < r.startDate || (r.endDate && date > r.endDate)) return false
+  if (date < r.startDate || (r.endDate && date > r.endDate) || r.excludedDates?.includes(date)) return false
   const start = new Date(`${r.startDate}T12:00:00`), current = new Date(`${date}T12:00:00`)
   const days = Math.round((current.getTime() - start.getTime()) / 86400000)
   if (r.cadence === 'daily') return days % r.interval === 0
@@ -154,13 +205,13 @@ export async function expandRoutines(from = addDays(today(), -30), days = 120) {
       const occurrences = await db.tasks.where('routineId').equals(r.id).toArray()
       if (occurrences.length === 0) {
         const key = `${r.id}:${r.startDate}`
-        await db.transaction('rw', db.tasks, db.assessments, db.audits, async () => { if (!(await db.tasks.where('generationKey').equals(key).first())) { await addTask({ ...newTaskInput(), title: r.title, project: r.project, scheduledDate: r.startDate, score: r.score }, key, r.id); count++ } })
+        if (!r.excludedDates?.includes(r.startDate)) await db.transaction('rw', db.tasks, db.assessments, db.audits, async () => { if (!(await db.tasks.where('generationKey').equals(key).first())) { await addTask({ ...newTaskInput(), title: r.title, project: r.project, scheduledDate: r.startDate, score: r.score }, key, r.id); count++ } })
       } else {
         const latest = occurrences.sort((a, b) => (b.scheduledDate ?? '').localeCompare(a.scheduledDate ?? ''))[0]
         const completed = await db.completions.where('taskId').equals(latest.id).first()
         if (completed?.currentAt) {
           const date = addDays(today(new Date(completed.currentAt)), r.interval), key = `${r.id}:${date}`
-          await db.transaction('rw', db.tasks, db.assessments, db.audits, async () => { if (!(await db.tasks.where('generationKey').equals(key).first())) { await addTask({ ...newTaskInput(), title: r.title, project: r.project, scheduledDate: date, score: r.score }, key, r.id); count++ } })
+          if (!r.excludedDates?.includes(date)) await db.transaction('rw', db.tasks, db.assessments, db.audits, async () => { if (!(await db.tasks.where('generationKey').equals(key).first())) { await addTask({ ...newTaskInput(), title: r.title, project: r.project, scheduledDate: date, score: r.score }, key, r.id); count++ } })
         }
       }
       continue
@@ -177,7 +228,10 @@ export async function expandRoutines(from = addDays(today(), -30), days = 120) {
   return count
 }
 export async function logSession(taskId: string, startedAt: string, endedAt: string) {
-  const minutes = Math.max(0, Math.round((new Date(endedAt).getTime() - new Date(startedAt).getTime()) / 60000))
+  const start = Date.parse(startedAt), end = Date.parse(endedAt)
+  if (!Number.isFinite(start) || !Number.isFinite(end) || new Date(start).toISOString() !== startedAt || new Date(end).toISOString() !== endedAt || end < start) throw new Error('作業時間の日時が不正です')
+  if (!(await db.tasks.get(taskId))) throw new Error('作業対象のタスクがありません')
+  const minutes = Math.round((end - start) / 60000)
   if (minutes > 10080) throw new Error('記録時間が長すぎます')
   await db.sessions.add({ id: uid(), taskId, startedAt, endedAt, minutes })
 }
