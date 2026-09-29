@@ -1,5 +1,5 @@
 import Dexie, { type EntityTable } from 'dexie'
-import type { Assessment, Audit, CalendarEvent, ChecklistItem, CommandReceipt, Completion, Container, FocusProjectSelection, Habit, HabitLog, LabelDefinition, LabelGroup, LedgerEntry, PlanningBucket, RolloverEntry, Routine, SavedTemplate, Settings, SmartList, Task, TaskAttachment, TaskComment, TaskDependency, TaskNote, ThemeRule, TimeBlock, WorkSession } from './domain'
+import type { Assessment, Audit, CalendarEvent, ChecklistItem, CommandReceipt, Completion, Container, FocusProjectSelection, Goal, GoalCheckIn, Habit, HabitLog, LabelDefinition, LabelGroup, LedgerEntry, PlanningBucket, RolloverEntry, Routine, SavedTemplate, Settings, SmartList, Task, TaskAttachment, TaskComment, TaskDependency, TaskNote, ThemeRule, TimeBlock, WorkSession } from './domain'
 
 export const db = new Dexie('character-coach-v1') as Dexie & {
   tasks: EntityTable<Task, 'id'>
@@ -29,6 +29,8 @@ export const db = new Dexie('character-coach-v1') as Dexie & {
   focusSelections: EntityTable<FocusProjectSelection, 'id'>
   habits: EntityTable<Habit, 'id'>
   habitLogs: EntityTable<HabitLog, 'id'>
+  goals: EntityTable<Goal, 'id'>
+  goalCheckIns: EntityTable<GoalCheckIn, 'id'>
 }
 db.version(1).stores({
   tasks: 'id, &generationKey, status, scheduledDate, dueDate, project, routineId, deletedAt, updatedAt',
@@ -152,6 +154,7 @@ db.version(12).stores({
 db.version(13).stores({
   habits: 'id, ownerId, active, routineId', habitLogs: 'id, habitId, date, taskId'
 })
+db.version(14).stores({ goals: 'id, ownerId, parentId, deletedAt', goalCheckIns: 'id, goalId, date, deletedAt' })
 
 export async function ensureSettings() {
   const current = await db.settings.get('main')
