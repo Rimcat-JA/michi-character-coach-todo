@@ -118,3 +118,5 @@
   .print-sheet tr { break-inside: avoid; page-break-inside: avoid; }
   .print-sheet th, .print-sheet td { padding: 4mm 2mm; }
 }
+.pomodoro-panel { margin-top: 18px; }
+.pomodoro-clock { display: block; font-size: 42px; font-variant-numeric: tabular-nums; margin: 12px 0; }

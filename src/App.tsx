@@ -40,6 +40,8 @@ import GoalsView from './GoalsView'
 import JournalView from './JournalView'
 import AnalyticsView from './AnalyticsView'
 import PrintPreview from './PrintPreview'
+import PomodoroPanel from './PomodoroPanel'
+import SessionCorrectionView from './SessionCorrectionView'
 import { FocusChoiceTools } from './FocusChoiceTools'
 import SuperFocusView from './SuperFocusView'
 import { setSpotlight } from './focus-tools'
@@ -145,8 +147,8 @@ function App() {
         {view === 'periods' && <PeriodPlanningView buckets={planningBuckets} tasks={tasks} ownerId={settings.profileId} run={run} />}
         {view === 'calendar' && <CalendarPlanningView blocks={timeBlocks} events={calendarEvents} tasks={tasks} projects={containers} sessions={sessions} ownerId={settings.profileId} run={run} />}
         {view === 'coach' && <CoachView tasks={open} settings={settings} onEdit={setEditor} onNew={() => setEditor('new')} />}
-        {view === 'focus' && <><SuperFocusView tasks={open} sessions={sessions} onEdit={setEditor} onBack={() => go('today')} run={run} /><FocusChoiceTools tasks={tasks} dependencies={dependencies} themes={themeRules.filter(rule => rule.ownerId === settings.profileId)} focusProjects={focusSelection?.projects ?? []} lists={smartLists} ownerId={settings.profileId} date={currentDate} now={nowIso} onEdit={setEditor} run={run} /></>}
-        {view === 'history' && <><HistoryView completions={completions} ledger={ledger} sessions={sessions} tasks={tasks} onEdit={id => { const t = tasks.find(x => x.id === id); if (t) setEditor(t) }} run={run} /><TimeTargetsView settings={settings} containers={containers} tasks={tasks} sessions={sessions} run={run} /><AnalyticsView completions={completions} sessions={sessions} /></>}
+        {view === 'focus' && <><SuperFocusView tasks={open} sessions={sessions} onEdit={setEditor} onBack={() => go('today')} run={run} /><PomodoroPanel tasks={open} run={run} /><FocusChoiceTools tasks={tasks} dependencies={dependencies} themes={themeRules.filter(rule => rule.ownerId === settings.profileId)} focusProjects={focusSelection?.projects ?? []} lists={smartLists} ownerId={settings.profileId} date={currentDate} now={nowIso} onEdit={setEditor} run={run} /></>}
+        {view === 'history' && <><HistoryView completions={completions} ledger={ledger} sessions={sessions} tasks={tasks} onEdit={id => { const t = tasks.find(x => x.id === id); if (t) setEditor(t) }} run={run} /><TimeTargetsView settings={settings} containers={containers} tasks={tasks} sessions={sessions} run={run} /><AnalyticsView completions={completions} sessions={sessions} /><SessionCorrectionView sessions={sessions} tasks={tasks} run={run} /></>}
         {view === 'routines' && <RoutinesView routines={routines} run={run} />}
         {view === 'habits' && <HabitsView run={run} />}
         {view === 'goals' && <GoalsView run={run} />}
