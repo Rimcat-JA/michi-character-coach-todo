@@ -1,4 +1,4 @@
-const { app, BrowserWindow, protocol, net, session, ipcMain, safeStorage } = require('electron')
+const { app, BrowserWindow, Notification, protocol, net, session, ipcMain, safeStorage } = require('electron')
 const fs = require('node:fs/promises')
 const path = require('node:path')
 const { pathToFileURL } = require('node:url')
@@ -82,6 +82,13 @@ async function summarizeWithOpenRouter({ model, kind, text }) {
 
 app.whenReady().then(() => {
   let miniWin = null
+  ipcMain.handle('michi:notify', (event, payload) => {
+    assertAppFrame(event)
+    if (!Notification.isSupported()) return false
+    if (!payload || typeof payload.title !== 'string' || typeof payload.body !== 'string' || payload.title.length > 200 || payload.body.length > 300) throw new Error('通知内容が不正です')
+    new Notification({ title: payload.title, body: payload.body }).show()
+    return true
+  })
   ipcMain.handle('michi:ai-status', async event => {
     assertAppFrame(event)
     return { secureStorage: safeStorage.isEncryptionAvailable(), configured: Boolean(await loadKey()) }
