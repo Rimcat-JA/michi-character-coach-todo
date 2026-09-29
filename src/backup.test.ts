@@ -41,6 +41,17 @@ async function snapshot(): Promise<Snapshot> {
 }
 
 describe('バックアップの復元前検証', () => {
+  it('PCとスマホのナビゲーションを別々に復元し、不正な機能名を拒否する', async () => {
+    await db.settings.update('main', { navDesktop: [], navMobile: ['today', 'wall'] })
+    const saved = await snapshot()
+    expect(() => validateSnapshot(saved)).not.toThrow()
+    const corrupt = structuredClone(saved)
+    corrupt.settings[0].navMobile!.push('unknown')
+    expect(() => validateSnapshot(corrupt)).toThrow('ナビゲーション')
+    await db.settings.update('main', { navDesktop: ['tasks'], navMobile: [] })
+    await restoreBackup(saved)
+    expect((await db.settings.get('main'))).toMatchObject({ navDesktop: [], navMobile: ['today', 'wall'] })
+  })
   it('Wallの配置を復元し、不正な座標を拒否する', async () => {
     const id = await createTask({ ...newTaskInput(), title: '付箋' })
     await addWallTile(id, '準備')
