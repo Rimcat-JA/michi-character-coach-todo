@@ -7,19 +7,21 @@ import { createContainer } from './containers'
 import { addChecklistItem, convertChecklistItem } from './checklist'
 import { createLabelDefinition, createLabelGroup } from './labels'
 import { instantiateTemplate, saveTaskTemplate } from './templates'
+import { addTaskAttachment, addTaskComment, addTaskNote, getTaskAttachment } from './materials'
 import { inspectBackup, restoreBackup } from './backup'
 import { validateSnapshot, type Snapshot } from './backup-validation'
 
 beforeEach(async () => { await db.delete(); await db.open(); await ensureSettings() })
 
 async function snapshot(): Promise<Snapshot> {
+  const attachments = await Promise.all((await db.taskAttachments.toArray()).map(async ({ blob, ...item }) => ({ ...item, contentBase64: btoa(Array.from(new Uint8Array(await blob.arrayBuffer()), value => String.fromCharCode(value)).join('')) })))
   return {
     format: 'coachbundle', version: 1, exportedAt: new Date().toISOString(),
     tasks: await db.tasks.toArray(), assessments: await db.assessments.toArray(),
     completions: await db.completions.toArray(), ledger: await db.ledger.toArray(),
     routines: await db.routines.toArray(), sessions: await db.sessions.toArray(),
     commands: await db.commands.toArray(), audits: await db.audits.toArray(),
-    settings: await db.settings.toArray(), containers: await db.containers.toArray(), checklistItems: await db.checklistItems.toArray(), labelGroups: await db.labelGroups.toArray(), labelDefinitions: await db.labelDefinitions.toArray(), savedTemplates: await db.savedTemplates.toArray()
+    settings: await db.settings.toArray(), containers: await db.containers.toArray(), checklistItems: await db.checklistItems.toArray(), labelGroups: await db.labelGroups.toArray(), labelDefinitions: await db.labelDefinitions.toArray(), savedTemplates: await db.savedTemplates.toArray(), taskNotes: await db.taskNotes.toArray(), taskComments: await db.taskComments.toArray(), taskAttachments: attachments
   }
 }
 
@@ -119,5 +121,20 @@ describe('バックアップの復元前検証', () => {
     expect((await db.savedTemplates.get(template))?.version).toBe(1)
     const created = await instantiateTemplate(template)
     expect((await db.checklistItems.where('taskId').equals(created.taskIds[0]).first())?.done).toBe(false)
+  })
+  it('ノート・コメント・添付の内容とハッシュを検証して復元する', async () => {
+    const task = await createTask({ ...newTaskInput(), title: '資料' })
+    await addTaskNote(task, '**確認**', 'self'); await addTaskComment(task, '確認しました')
+    const id = await addTaskAttachment(task, new File(['contents'], 'memo.txt', { type: 'text/plain' }))
+    const saved = await snapshot()
+    const corrupt = structuredClone(saved)
+    corrupt.taskAttachments![0].contentBase64 = btoa('tampered')
+    await expect(restoreBackup(corrupt)).rejects.toThrow('ハッシュ')
+    expect(await db.taskAttachments.count()).toBe(1)
+    await db.taskAttachments.clear(); await db.taskNotes.clear(); await db.taskComments.clear()
+    await restoreBackup(saved)
+    expect((await db.taskNotes.toArray())[0].body).toBe('**確認**')
+    expect((await db.taskComments.toArray())[0].body).toBe('確認しました')
+    expect((await getTaskAttachment(id, (await ensureSettings()).profileId)).name).toBe('memo.txt')
   })
 })

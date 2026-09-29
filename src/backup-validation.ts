@@ -1,4 +1,4 @@
-import { calculateScore, validateTaskInput, validateDate, type Assessment, type Audit, type ChecklistItem, type CommandReceipt, type Completion, type Container, type LabelDefinition, type LabelGroup, type LedgerEntry, type Routine, type SavedTemplate, type Settings, type Task, type WorkSession } from './domain'
+import { calculateScore, validateTaskInput, validateDate, type Assessment, type Audit, type ChecklistItem, type CommandReceipt, type Completion, type Container, type LabelDefinition, type LabelGroup, type LedgerEntry, type Routine, type SavedTemplate, type Settings, type Task, type TaskAttachment, type TaskComment, type TaskNote, type WorkSession } from './domain'
 import { validateLabelSelection } from './labels'
 
 export type Snapshot = {
@@ -10,6 +10,9 @@ export type Snapshot = {
   labelGroups?: LabelGroup[]
   labelDefinitions?: LabelDefinition[]
   savedTemplates?: SavedTemplate[]
+  taskNotes?: TaskNote[]
+  taskComments?: TaskComment[]
+  taskAttachments?: (Omit<TaskAttachment, 'blob'> & { contentBase64: string })[]
 }
 
 const tableNames = ['tasks', 'assessments', 'completions', 'ledger', 'routines', 'sessions', 'commands', 'audits', 'settings'] as const
@@ -191,6 +194,14 @@ export function validateSnapshot(input: unknown): asserts input is Snapshot {
       calculateScore(task.score)
       validateLabelSelection(task.labels, groups, definitions)
     }
+  }
+  for (const field of ['taskNotes', 'taskComments', 'taskAttachments'] as const) if (input[field] !== undefined && !Array.isArray(input[field])) throw new Error(`${field}が不正です`)
+  const notes = (input.taskNotes ?? []) as TaskNote[], comments = (input.taskComments ?? []) as TaskComment[], attachments = (input.taskAttachments ?? []) as NonNullable<Snapshot['taskAttachments']>
+  unique(notes, 'taskNotes', 'id'); unique(comments, 'taskComments', 'id'); unique(attachments, 'taskAttachments', 'id')
+  for (const note of notes) if (!taskIds.has(note.taskId) || note.ownerId !== settings.profileId || !['self', 'source'].includes(note.kind) || !filled(note.body) || note.body.length > 50000 || !timestamp(note.createdAt)) throw new Error('ノートが不正です')
+  for (const comment of comments) if (!taskIds.has(comment.taskId) || comment.ownerId !== settings.profileId || !filled(comment.body) || comment.body.length > 10000 || !timestamp(comment.createdAt)) throw new Error('コメントが不正です')
+  for (const attachment of attachments) {
+    if (!taskIds.has(attachment.taskId) || attachment.ownerId !== settings.profileId || !filled(attachment.name) || attachment.name.length > 200 || [...attachment.name].some(char => char.charCodeAt(0) < 32 || '\\/:*?"<>|'.includes(char)) || typeof attachment.mediaType !== 'string' || attachment.mediaType.length > 120 || !Number.isInteger(attachment.size) || attachment.size < 1 || attachment.size > 5 * 1024 * 1024 || !/^[a-f0-9]{64}$/.test(attachment.sha256) || !timestamp(attachment.createdAt) || typeof attachment.contentBase64 !== 'string' || !/^[A-Za-z0-9+/]*={0,2}$/.test(attachment.contentBase64) || attachment.contentBase64.length > Math.ceil(attachment.size / 3) * 4) throw new Error('添付が不正です')
   }
   if (containers.some(raw => (raw as Container).ownerId !== settings.profileId)) throw new Error('カテゴリ・プロジェクトの所有者が不正です')
   const allowedSettings = new Set(['id', 'profileId', 'datasetId', 'createdAt', 'coachName', 'dailyMinutes', 'dailyPoints', 'notifications', 'aiEnabled', 'aiModel', 'automation', 'lastBackupAt'])
