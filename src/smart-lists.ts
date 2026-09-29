@@ -103,6 +103,8 @@ export async function removeSmartList(id: string) {
   await db.transaction('rw', db.smartLists, db.settings, async () => {
     const settings = await db.settings.get('main'), list = await db.smartLists.get(id)
     if (!settings || !list || list.ownerId !== settings.profileId) throw new Error('Smart Listにアクセスできません')
+    if (settings.customScreen) await db.settings.update('main', { customScreen: Object.fromEntries(Object.entries(settings.customScreen).map(([key, value]) => [key, value === id ? null : value])) as typeof settings.customScreen })
+    if (settings.reminderState) await db.settings.update('main', { reminderState: { ...settings.reminderState, rules: settings.reminderState.rules.map(rule => rule.kind === 'smart-daily' && rule.targetId === id ? { ...rule, enabled: false, updatedAt: new Date().toISOString() } : rule) } })
     await db.smartLists.delete(id)
   })
 }
