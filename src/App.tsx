@@ -13,6 +13,7 @@ import { createLabelDefinition, createLabelGroup } from './labels'
 import { instantiateTemplate, saveProjectTemplate, saveTaskTemplate } from './templates'
 import { selectedGoalContext, selectedTaskContext, type AIStatus } from './ai'
 import Braindump from './Braindump'
+import TaskAssistView from './TaskAssistView'
 import TaskMaterials from './TaskMaterials'
 import TaskDependencies from './TaskDependencies'
 import PeriodPlanningView from './PeriodPlanningView'
@@ -304,6 +305,7 @@ function TasksView({ tasks, lists, settings, onEdit, onToggle, onNew, run }: { t
   return <>
     <div className="page-heading"><div><span className="eyebrow">YOUR TASKS</span><h1>すべてのタスク</h1><p>思いついたことを記録して、必要な作業を見渡せます。</p></div><button className="primary-button" onClick={onNew}><Plus size={17} /> タスクを追加</button></div>
     <SmartListControls lists={lists} ownerId={ownerId} selectedId={smartListId} onSelect={setSmartListId} run={run} />
+    <TaskAssistView settings={settings} run={run} />
     <MatrixView tasks={tasks} lists={lists} ownerId={ownerId} date={today()} onEdit={onEdit} />
     <div className="toolbar">
       <div className="segmented">

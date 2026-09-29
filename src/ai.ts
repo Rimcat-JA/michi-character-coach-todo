@@ -13,6 +13,7 @@ declare global {
       deleteKey: () => Promise<boolean>
       chat: (request: AIRequest) => Promise<string>
       summarize: (request: { model: string; kind: 'day-note' | 'goal-checkin'; text: string }) => Promise<string>
+      assistTask: (request: { model: string; text: string }) => Promise<string>
     }
   }
 }
