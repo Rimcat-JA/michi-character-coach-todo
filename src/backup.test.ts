@@ -14,6 +14,7 @@ import { createCalendarEvent, createTimeBlock } from './calendar-planning'
 import { rolloverTask } from './rollover'
 import { createThemeRule } from './themes'
 import { assignDaySection, setDaySectionMode } from './day-sections'
+import { createSmartList } from './smart-lists'
 import { inspectBackup, restoreBackup } from './backup'
 import { validateSnapshot, type Snapshot } from './backup-validation'
 
@@ -27,7 +28,7 @@ async function snapshot(): Promise<Snapshot> {
     completions: await db.completions.toArray(), ledger: await db.ledger.toArray(),
     routines: await db.routines.toArray(), sessions: await db.sessions.toArray(),
     commands: await db.commands.toArray(), audits: await db.audits.toArray(),
-    settings: await db.settings.toArray(), containers: await db.containers.toArray(), checklistItems: await db.checklistItems.toArray(), labelGroups: await db.labelGroups.toArray(), labelDefinitions: await db.labelDefinitions.toArray(), savedTemplates: await db.savedTemplates.toArray(), taskNotes: await db.taskNotes.toArray(), taskComments: await db.taskComments.toArray(), taskAttachments: attachments, taskDependencies: await db.taskDependencies.toArray(), planningBuckets: await db.planningBuckets.toArray(), timeBlocks: await db.timeBlocks.toArray(), calendarEvents: await db.calendarEvents.toArray(), rollovers: await db.rollovers.toArray(), themeRules: await db.themeRules.toArray()
+    settings: await db.settings.toArray(), containers: await db.containers.toArray(), checklistItems: await db.checklistItems.toArray(), labelGroups: await db.labelGroups.toArray(), labelDefinitions: await db.labelDefinitions.toArray(), savedTemplates: await db.savedTemplates.toArray(), taskNotes: await db.taskNotes.toArray(), taskComments: await db.taskComments.toArray(), taskAttachments: attachments, taskDependencies: await db.taskDependencies.toArray(), planningBuckets: await db.planningBuckets.toArray(), timeBlocks: await db.timeBlocks.toArray(), calendarEvents: await db.calendarEvents.toArray(), rollovers: await db.rollovers.toArray(), themeRules: await db.themeRules.toArray(), smartLists: await db.smartLists.toArray()
   }
 }
 
@@ -200,5 +201,15 @@ describe('バックアップの復元前検証', () => {
     await restoreBackup(saved)
     expect((await db.tasks.get(id))?.dayHalf).toBe('morning')
     expect((await db.settings.get('main'))?.daySectionMode).toBe('halfday')
+  })
+  it('Smart Listの条件を復元し、不正な演算子を拒否する', async () => {
+    const id = await createSmartList('短時間', { type: 'condition', field: 'minutes', operator: 'lte', value: 15 })
+    const saved = await snapshot()
+    await db.smartLists.clear()
+    await restoreBackup(saved)
+    expect((await db.smartLists.get(id))?.name).toBe('短時間')
+    const corrupt = structuredClone(saved)
+    corrupt.smartLists![0].ast = { type: 'condition', field: 'minutes', operator: 'eval' } as never
+    expect(() => validateSnapshot(corrupt)).toThrow('演算子')
   })
 })
