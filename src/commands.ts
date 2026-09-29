@@ -134,11 +134,11 @@ export async function completeTask(id: string, expectedRevision: number, key: st
     const at = now(), existing = await db.completions.where('taskId').equals(id).first()
     if (existing) {
       const points = existing.lastConfirmedPoints !== undefined ? existing.lastConfirmedPoints : task.effectivePoints
-      await db.completions.put({ ...existing, currentAt: at, netPoints: points, scoreState: points === null ? 'pending' : 'confirmed' })
+      await db.completions.put({ ...existing, currentAt: at, localDate: today(new Date(at)), timezone: Intl.DateTimeFormat().resolvedOptions().timeZone, netPoints: points, scoreState: points === null ? 'pending' : 'confirmed' })
       if (points !== null) await db.ledger.add({ id: uid(), completionId: existing.id, taskId: id, kind: 'restore', delta: points, at, reason: '完了を再確定' })
     } else {
       const completionId = uid(), points = task.effectivePoints
-      await db.completions.add({ id: completionId, taskId: id, originalAt: at, currentAt: at, originalPoints: points, netPoints: points, scoreState: points === null ? 'pending' : 'confirmed', title: task.title, project: task.project })
+      await db.completions.add({ id: completionId, taskId: id, originalAt: at, currentAt: at, localDate: today(new Date(at)), timezone: Intl.DateTimeFormat().resolvedOptions().timeZone, originalPoints: points, netPoints: points, scoreState: points === null ? 'pending' : 'confirmed', title: task.title, project: task.project })
       if (points !== null) await db.ledger.add({ id: uid(), completionId, taskId: id, kind: 'award', delta: points, at, reason: '完了' })
     }
     await db.tasks.put({ ...task, status: 'completed', revision: task.revision + 1, updatedAt: at })
