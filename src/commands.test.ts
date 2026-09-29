@@ -1,7 +1,7 @@
 import 'fake-indexeddb/auto'
 import { beforeEach, describe, expect, it } from 'vitest'
 import { db } from './db'
-import { completeTask, createRoutine, createTask, correctCompletion, expandRoutines, newTaskInput, undoCompletion, updateTask } from './commands'
+import { bulkUpdateTasksAtomic, completeTask, createRoutine, createTask, createTasksAtomic, correctCompletion, expandRoutines, logSession, newTaskInput, trashTask, undoCompletion, updateTask } from './commands'
 import { emptyScore, today } from './domain'
 
 beforeEach(async () => { await db.delete(); await db.open() })
@@ -24,7 +24,7 @@ describe('ローカル正式保存と台帳', () => {
     await undoCompletion(id, 2)
     expect((await db.ledger.toArray()).reduce((n, e) => n + e.delta, 0)).toBe(0)
     await completeTask(id, 3)
-    expect((await db.ledger.toArray()).reduce((n, e) => n + e.delta, 0)).toBe(40)
+    expect((await db.ledger.toArray()).reduce((n, e) => n + e.delta, 0)).toBe(35)
     expect(await db.completions.count()).toBe(1)
   })
   it('旧revisionの編集を拒否する', async () => {
@@ -32,6 +32,15 @@ describe('ローカル正式保存と台帳', () => {
     await updateTask(id, 1, { ...input, title: '変更済み' })
     await expect(updateTask(id, 1, { ...input, title: '後勝ち' })).rejects.toThrow('別の画面')
     expect((await db.tasks.get(id))?.title).toBe('変更済み')
+  })
+  it('予定日だけ変更しても締め切りと目標日は変えない', async () => {
+    const input = { ...newTaskInput(), title: '別々の日付', scheduledDate: '2026-10-01', dueDate: '2026-10-03', targetDate: '2026-10-02' }
+    const id = await createTask(input)
+    await updateTask(id, 1, { ...input, scheduledDate: '2026-10-04' })
+    const updated = await db.tasks.get(id)
+    expect(updated?.scheduledDate).toBe('2026-10-04')
+    expect(updated?.dueDate).toBe('2026-10-03')
+    expect(updated?.targetDate).toBe('2026-10-02')
   })
   it('同じrequest keyの異なる内容を拒否する', async () => {
     await createTask({ ...newTaskInput(), title: 'A' }, 'same')
@@ -42,5 +51,49 @@ describe('ローカル正式保存と台帳', () => {
     await expandRoutines(today(), 3)
     await expandRoutines(today(), 3)
     expect(await db.tasks.count()).toBe(3)
+  })
+  it('一括登録の途中で不正行があれば全てロールバックする', async () => {
+    const good = { ...newTaskInput(), title: '有効' }
+    const bad = { ...newTaskInput(), title: '' }
+    await expect(createTasksAtomic([good, bad], 'bulk-invalid')).rejects.toThrow('タイトル')
+    expect(await db.tasks.count()).toBe(0)
+    expect(await db.assessments.count()).toBe(0)
+    expect(await db.commands.count()).toBe(0)
+    expect(await db.audits.count()).toBe(0)
+  })
+  it('一括登録の同じキーの再送では重複作成しない', async () => {
+    const inputs = [{ ...newTaskInput(), title: '1' }, { ...newTaskInput(), title: '2' }]
+    const ids = await createTasksAtomic(inputs, 'bulk-same')
+    expect(await createTasksAtomic(inputs, 'bulk-same')).toEqual(ids)
+    expect(await db.tasks.count()).toBe(2)
+  })
+  it('一括編集は一件でもrevision競合なら全件を変更しない', async () => {
+    const ids = await Promise.all(Array.from({ length: 10 }, (_, index) => createTask({ ...newTaskInput(), title: `タスク${index}` })))
+    const captured = ids.map(id => ({ id, revision: 1 }))
+    await updateTask(ids[4], 1, { ...newTaskInput(), title: '別画面で更新' })
+    await expect(bulkUpdateTasksAtomic(captured, { project: '新しい案件' }, 'bulk-conflict')).rejects.toThrow('別の画面')
+    expect((await db.tasks.toArray()).every(task => task.project === '')).toBe(true)
+    expect(await db.commands.get('bulk-conflict')).toBeUndefined()
+    const refreshed = ids.map((id, index) => ({ id, revision: index === 4 ? 2 : 1 }))
+    expect(await bulkUpdateTasksAtomic(refreshed, { project: '新しい案件' }, 'bulk-success')).toEqual(ids)
+    expect(await bulkUpdateTasksAtomic(refreshed, { project: '新しい案件' }, 'bulk-success')).toEqual(ids)
+    expect((await db.tasks.toArray()).every(task => task.project === '新しい案件' && task.revision >= 2)).toBe(true)
+  })
+  it('完了タスクをゴミ箱へ移しても実績は残り、完了取消でだけ減る', async () => {
+    const id = await createTask({ ...newTaskInput(), title: '残す実績', score: { ...emptyScore(), mode: 'manual', manualPoints: 30 } })
+    await completeTask(id, 1)
+    await trashTask(id, 2)
+    expect((await db.ledger.toArray()).reduce((total, entry) => total + entry.delta, 0)).toBe(30)
+    expect((await db.tasks.get(id))?.deletedAt).not.toBeNull()
+    await undoCompletion(id, 3)
+    expect((await db.ledger.toArray()).reduce((total, entry) => total + entry.delta, 0)).toBe(0)
+  })
+  it('作業区間の逆転と存在しないタスクを保存しない', async () => {
+    const id = await createTask({ ...newTaskInput(), title: '時間の記録' })
+    await expect(logSession(id, '2026-10-01T10:30:00.000Z', '2026-10-01T10:00:00.000Z')).rejects.toThrow('日時')
+    await expect(logSession('missing', '2026-10-01T10:00:00.000Z', '2026-10-01T10:30:00.000Z')).rejects.toThrow('対象')
+    expect(await db.sessions.count()).toBe(0)
+    await logSession(id, '2026-10-01T10:00:00.000Z', '2026-10-01T10:30:00.000Z')
+    expect((await db.sessions.toArray())[0].minutes).toBe(30)
   })
 })

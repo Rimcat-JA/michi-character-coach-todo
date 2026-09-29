@@ -1,51 +1,57 @@
 import { db } from './db'
-import type { Assessment, Audit, CommandReceipt, Completion, LedgerEntry, Routine, Settings, Task, WorkSession } from './domain'
+import { validateSnapshot, type Snapshot } from './backup-validation'
+import { tasksToCsv, tasksToIcs } from './data-export'
 
-type Snapshot = { format: 'coachbundle'; version: 1; exportedAt: string; tasks: Task[]; assessments: Assessment[]; completions: Completion[]; ledger: LedgerEntry[]; routines: Routine[]; sessions: WorkSession[]; commands: CommandReceipt[]; audits: Audit[]; settings: Settings[] }
 type Envelope = { format: 'coachbundle-encrypted'; version: 1; kdf: 'PBKDF2-SHA256'; iterations: 250000; cipher: 'AES-256-GCM'; salt: string; iv: string; data: string }
 const bytes = (s: string) => new TextEncoder().encode(s)
 const b64 = (a: Uint8Array) => btoa(Array.from(a, x => String.fromCharCode(x)).join(''))
 const fromB64 = (s: string) => Uint8Array.from(atob(s), c => c.charCodeAt(0))
+function download(content: BlobPart, name: string, type: string) {
+  const url = URL.createObjectURL(new Blob([content], { type }))
+  const anchor = document.createElement('a')
+  anchor.href = url; anchor.download = name; anchor.click()
+  setTimeout(() => URL.revokeObjectURL(url), 10000)
+}
+const dateStamp = () => new Date().toISOString().slice(0, 10)
 async function key(password: string, salt: Uint8Array) {
   const material = await crypto.subtle.importKey('raw', bytes(password), 'PBKDF2', false, ['deriveKey'])
   return crypto.subtle.deriveKey({ name: 'PBKDF2', salt: salt as BufferSource, iterations: 250000, hash: 'SHA-256' }, material, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt'])
 }
-export async function exportBackup(password: string) {
-  if (password.length < 10) throw new Error('バックアップのパスワードは10文字以上にしてください')
+async function captureSnapshot(): Promise<Snapshot> {
   const snapshot: Snapshot = await db.transaction('r', [db.tasks, db.assessments, db.completions, db.ledger, db.routines, db.sessions, db.commands, db.audits, db.settings], async () => ({
     format: 'coachbundle', version: 1, exportedAt: new Date().toISOString(), tasks: await db.tasks.toArray(), assessments: await db.assessments.toArray(), completions: await db.completions.toArray(), ledger: await db.ledger.toArray(), routines: await db.routines.toArray(), sessions: await db.sessions.toArray(), commands: await db.commands.toArray(), audits: await db.audits.toArray(), settings: await db.settings.toArray()
   }))
+  validateSnapshot(snapshot)
+  return snapshot
+}
+export async function exportBackup(password: string) {
+  if (password.length < 10) throw new Error('バックアップのパスワードは10文字以上にしてください')
+  const snapshot = await captureSnapshot()
   const salt = crypto.getRandomValues(new Uint8Array(16)), iv = crypto.getRandomValues(new Uint8Array(12))
   const data = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, await key(password, salt), bytes(JSON.stringify(snapshot))))
   const envelope: Envelope = { format: 'coachbundle-encrypted', version: 1, kdf: 'PBKDF2-SHA256', iterations: 250000, cipher: 'AES-256-GCM', salt: b64(salt), iv: b64(iv), data: b64(data) }
-  const blob = new Blob([JSON.stringify(envelope)], { type: 'application/json' })
-  const url = URL.createObjectURL(blob), anchor = document.createElement('a')
-  anchor.href = url; anchor.download = `character-coach-${new Date().toISOString().slice(0, 10)}.coachbundle`; anchor.click()
-  setTimeout(() => URL.revokeObjectURL(url), 10000)
+  download(JSON.stringify(envelope), `character-coach-${dateStamp()}.coachbundle`, 'application/json')
   await db.settings.update('main', { lastBackupAt: new Date().toISOString() })
 }
-function validateSnapshot(s: unknown): asserts s is Snapshot {
-  if (!s || typeof s !== 'object') throw new Error('バックアップ形式が不正です')
-  const value = s as Record<string, unknown>
-  if (value.format !== 'coachbundle' || value.version !== 1) throw new Error('対応していないバックアップ形式です')
-  for (const name of ['tasks', 'assessments', 'completions', 'ledger', 'routines', 'sessions', 'commands', 'audits', 'settings']) if (!Array.isArray(value[name])) throw new Error(`${name}がありません`)
-  const tasks = value.tasks as Task[], completions = value.completions as Completion[], ledger = value.ledger as LedgerEntry[]
-  const taskIds = new Set(tasks.map(x => x.id)), completionIds = new Set(completions.map(x => x.id))
-  if (taskIds.size !== tasks.length || completionIds.size !== completions.length) throw new Error('IDが重複しています')
-  if ((value.settings as Settings[]).length !== 1 || (value.settings as Settings[])[0]?.id !== 'main') throw new Error('設定が不正です')
-  for (const c of completions) {
-    if (!taskIds.has(c.taskId)) throw new Error('完了記録の参照先がありません')
-    const sum = ledger.filter(e => e.completionId === c.id).reduce((n, e) => n + e.delta, 0)
-    if (c.currentAt && c.scoreState === 'confirmed' && sum !== c.netPoints) throw new Error('台帳の合計が一致しません')
-    if (!c.currentAt && sum !== 0) throw new Error('取消済み台帳が一致しません')
-  }
+export async function exportPortableJson() {
+  download(JSON.stringify(await captureSnapshot(), null, 2), `character-coach-${dateStamp()}.json`, 'application/json')
+}
+export async function exportTasksCsv() {
+  download(`\uFEFF${tasksToCsv(await db.tasks.toArray())}`, `michi-tasks-${dateStamp()}.csv`, 'text/csv;charset=utf-8')
+}
+export async function exportTasksIcs() {
+  download(tasksToIcs(await db.tasks.toArray()), `michi-tasks-${dateStamp()}.ics`, 'text/calendar;charset=utf-8')
 }
 export async function inspectBackup(file: File, password: string): Promise<Snapshot> {
   if (file.size > 50 * 1024 * 1024) throw new Error('50MBを超えるファイルは読み込めません')
-  const e = JSON.parse(await file.text()) as Envelope
-  if (e.format !== 'coachbundle-encrypted' || e.version !== 1 || e.iterations !== 250000 || e.cipher !== 'AES-256-GCM') throw new Error('対応していない暗号化形式です')
+  const e: unknown = JSON.parse(await file.text())
+  if (!e || typeof e !== 'object') throw new Error('対応していない暗号化形式です')
+  if ((e as Snapshot).format === 'coachbundle') { validateSnapshot(e); return e }
+  const envelope = e as Envelope
+  if (envelope.format !== 'coachbundle-encrypted' || envelope.version !== 1 || envelope.kdf !== 'PBKDF2-SHA256' || envelope.iterations !== 250000 || envelope.cipher !== 'AES-256-GCM' || typeof envelope.salt !== 'string' || typeof envelope.iv !== 'string' || typeof envelope.data !== 'string') throw new Error('対応していない暗号化形式です')
+  if (!password) throw new Error('暗号化バックアップのパスワードを入力してください')
   let plain: ArrayBuffer
-  try { plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: fromB64(e.iv) as BufferSource }, await key(password, fromB64(e.salt)), fromB64(e.data) as BufferSource) }
+  try { plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: fromB64(envelope.iv) as BufferSource }, await key(password, fromB64(envelope.salt)), fromB64(envelope.data) as BufferSource) }
   catch { throw new Error('パスワードが違うか、ファイルが破損しています') }
   const snapshot: unknown = JSON.parse(new TextDecoder().decode(plain))
   validateSnapshot(snapshot)

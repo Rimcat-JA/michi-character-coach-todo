@@ -20,7 +20,7 @@ export type Task = {
   createdAt: string; updatedAt: string; deletedAt: string | null
 }
 export type Assessment = { id: string; taskId: string; score: ScoreInput; result: ScoreResult; createdAt: string; origin: 'human' | 'routine'; ruleVersion: 'v1' }
-export type Completion = { id: string; taskId: string; originalAt: string; currentAt: string | null; originalPoints: number | null; netPoints: number | null; scoreState: 'pending' | 'confirmed'; title: string; project: string }
+export type Completion = { id: string; taskId: string; originalAt: string; currentAt: string | null; originalPoints: number | null; netPoints: number | null; lastConfirmedPoints?: number | null; scoreState: 'pending' | 'confirmed'; title: string; project: string }
 export type LedgerEntry = { id: string; completionId: string; taskId: string; kind: 'award' | 'adjust' | 'reverse' | 'restore'; delta: number; at: string; reason: string }
 export type Routine = { id: string; title: string; cadence: 'daily' | 'weekly' | 'monthly' | 'after_completion'; interval: number; weekdays: number[]; monthDay: number; startDate: string; endDate: string | null; afterTaskId: string | null; score: ScoreInput; project: string; active: boolean; revision: number; createdAt: string }
 export type WorkSession = { id: string; taskId: string; startedAt: string; endedAt: string; minutes: number }
