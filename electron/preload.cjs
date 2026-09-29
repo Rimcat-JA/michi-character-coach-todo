@@ -7,3 +7,8 @@ contextBridge.exposeInMainWorld('michiAI', {
   chat: request => ipcRenderer.invoke('michi:ai-chat', request),
   summarize: request => ipcRenderer.invoke('michi:ai-summarize', request)
 })
+
+contextBridge.exposeInMainWorld('michiDesktop', {
+  openTopOfMind: () => ipcRenderer.invoke('michi:open-top-of-mind'),
+  showMain: () => ipcRenderer.invoke('michi:show-main')
+})

@@ -1,6 +1,6 @@
 import 'fake-indexeddb/auto'
 import { beforeEach, describe, expect, it } from 'vitest'
-import { createTask, newTaskInput } from './commands'
+import { createTask, logSession, newTaskInput } from './commands'
 import { db, ensureSettings } from './db'
 import { beginFocus, completeFocusedTask, focusElapsedSeconds, parseFocusRuntime, pauseFocus, resumeFocus } from './focus-session'
 
@@ -25,5 +25,17 @@ describe('Super Focus', () => {
     expect((await db.tasks.get(id))?.status).toBe('completed')
     expect((await db.tasks.get(id))?.effectivePoints).toBe(0)
     expect((await db.completions.where('taskId').equals(id).first())?.netPoints).toBe(0)
+  })
+  it('二つの窓から同じ中断と完了を試みても区間・実績は一度だけ', async () => {
+    const id = await createTask({ ...newTaskInput(), title: '共有する集中' })
+    const task = (await db.tasks.get(id))!
+    const startedAt = '2026-10-01T10:00:00.000Z', sessionId = `focus:${id}:${startedAt}`
+    await logSession(id, startedAt, '2026-10-01T10:05:00.000Z', sessionId)
+    await logSession(id, startedAt, '2026-10-01T10:05:01.000Z', sessionId)
+    expect(await db.sessions.count()).toBe(1)
+    await completeFocusedTask(task, 0)
+    await expect(completeFocusedTask(task, 0)).rejects.toThrow()
+    expect(await db.completions.count()).toBe(1)
+    expect(await db.ledger.count()).toBe(1)
   })
 })

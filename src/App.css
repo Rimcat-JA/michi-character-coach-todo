@@ -120,3 +120,4 @@
 }
 .pomodoro-panel { margin-top: 18px; }
 .pomodoro-clock { display: block; font-size: 42px; font-variant-numeric: tabular-nums; margin: 12px 0; }
+.mini-focus{min-height:100vh;padding:22px;display:flex;flex-direction:column;gap:15px;background:#f7f7fb}.mini-focus-heading{display:flex;align-items:center;justify-content:space-between;font-size:12px;color:#7364aa}.mini-focus-heading .text-button{font-size:11px}.mini-focus h1{font-size:20px;line-height:1.35;overflow-wrap:anywhere;margin:8px 0 0}.mini-focus-clock{font-variant-numeric:tabular-nums;font-size:39px;color:#6854c5}.mini-focus p{font-size:12px;line-height:1.5;color:#666577}.mini-focus-actions{display:flex;gap:8px}.mini-focus-actions button{flex:1}.mini-focus [role=status]{color:#6956bd}
