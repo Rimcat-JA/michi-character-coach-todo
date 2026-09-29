@@ -5,7 +5,8 @@ contextBridge.exposeInMainWorld('michiAI', {
   saveKey: value => ipcRenderer.invoke('michi:ai-save-key', value),
   deleteKey: () => ipcRenderer.invoke('michi:ai-delete-key'),
   chat: request => ipcRenderer.invoke('michi:ai-chat', request),
-  summarize: request => ipcRenderer.invoke('michi:ai-summarize', request)
+  summarize: request => ipcRenderer.invoke('michi:ai-summarize', request),
+  assistTask: request => ipcRenderer.invoke('michi:ai-assist-task', request)
 })
 
 contextBridge.exposeInMainWorld('michiDesktop', {
