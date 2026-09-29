@@ -91,6 +91,7 @@ export function validateSnapshot(input: unknown): asserts input is Snapshot {
     const task = raw as Task
     if (!filled(task.title) || typeof task.notes !== 'string' || typeof task.project !== 'string' || !Array.isArray(task.labels) || task.labels.some(label => typeof label !== 'string') || task.labels.length > 30) throw new Error('タスクの内容が不正です')
     if (!record(task.score) || !['unset', 'manual', 'formula', 'allocated'].includes(task.score.mode as string) || !['open', 'completed'].includes(task.status) || !Number.isInteger(task.revision) || task.revision < 1 || !points(task.effectivePoints)) throw new Error('タスクの状態が不正です')
+    for (const flag of ['pinned', 'backburner', 'orbit'] as const) if (task[flag] !== undefined && typeof task[flag] !== 'boolean') throw new Error('タスクの分類が不正です')
     if (!nullableString(task.routineId) || (task.routineId !== null && !routineIds.has(task.routineId)) || (task.containerId !== undefined && (!nullableString(task.containerId) || (task.containerId !== null && !containerIds.has(task.containerId)))) || !nullableString(task.deletedAt) || !timestamp(task.createdAt) || !timestamp(task.updatedAt) || (task.deletedAt !== null && !timestamp(task.deletedAt))) throw new Error('タスクの履歴が不正です')
     for (const [name, value] of [['予定日', task.scheduledDate], ['締め切り', task.dueDate], ['目標日', task.targetDate], ['見直し日', task.reviewDate], ['開始可能日', task.availableFrom], ['延期終了日', task.deferredUntil ?? null]] as const) dateOrNull(value, name)
     validateTaskInput(task)

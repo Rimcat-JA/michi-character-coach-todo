@@ -1,7 +1,7 @@
 import 'fake-indexeddb/auto'
 import { beforeEach, describe, expect, it } from 'vitest'
 import { db } from './db'
-import { bulkUpdateTasksAtomic, completeTask, createRoutine, createTask, createTasksAtomic, correctCompletion, expandRoutines, logSession, newTaskInput, trashTask, undoCompletion, updateTask } from './commands'
+import { bulkUpdateTasksAtomic, completeTask, createRoutine, createTask, createTasksAtomic, correctCompletion, expandRoutines, logSession, newTaskInput, setTaskFlag, trashTask, undoCompletion, updateTask } from './commands'
 import { addDays, emptyScore, today } from './domain'
 
 beforeEach(async () => { await db.delete(); await db.open() })
@@ -49,6 +49,25 @@ describe('ローカル正式保存と台帳', () => {
     const updated = await db.tasks.get(id)
     expect(updated?.targetDate).toBe('2026-10-03')
     expect(updated?.dueDate).toBe('2026-10-05')
+  })
+  it('保留解除で属性と手動ポイントを保ち、Orbitとピンは新規発生回を作らない', async () => {
+    const id = await createTask({ ...newTaskInput(), title: '再開予定', frog: 4, weight: 2, score: { ...emptyScore(), mode: 'manual', manualPoints: 25 } })
+    await setTaskFlag(id, 1, 'backburner', true)
+    await setTaskFlag(id, 2, 'orbit', true)
+    await setTaskFlag(id, 3, 'pinned', true)
+    await setTaskFlag(id, 4, 'pinned', false)
+    await setTaskFlag(id, 5, 'backburner', false)
+    const task = await db.tasks.get(id)
+    expect(task).toMatchObject({ backburner: false, orbit: true, pinned: false, frog: 4, weight: 2, effectivePoints: 25, scheduledDate: null, dueDate: null })
+    expect(await db.tasks.count()).toBe(1)
+    expect(await db.completions.count()).toBe(0)
+  })
+  it('FrogとWeightの編集は点数を変えない', async () => {
+    const input = { ...newTaskInput(), title: '負担感', score: { ...emptyScore(), mode: 'formula' as const, minutes: 30, travelMinutes: 0, difficulty: 1, uncertainty: 0, coordination: 0, physical: 0, outing: false } }
+    const id = await createTask(input)
+    const before = (await db.tasks.get(id))?.effectivePoints
+    await updateTask(id, 1, { ...input, frog: 4, weight: 1 })
+    expect((await db.tasks.get(id))?.effectivePoints).toBe(before)
   })
   it('同じrequest keyの異なる内容を拒否する', async () => {
     await createTask({ ...newTaskInput(), title: 'A' }, 'same')

@@ -34,17 +34,17 @@
 | B12 | Auto-schedule Due Tasks | 受入未確認 | 受入試験を未実施。 |
 | B13 | Theming：日・週の重点分野 | 受入未確認 | 受入試験を未実施。 |
 | B14 | 今日のリストの区分 | 一部実装 | 今日の予定と期限超過を表示。区分の全種類は未実装。 |
-| C01 | Importance／Urgency | 一部実装 | 重要度を保存。緊急度の独立評価は未実装。 |
+| C01 | Importance／Urgency | 受入確認済 | 期限から緊急表示を導出。日が近づいても本人重要度と必要ポイントが不変であることをunitで確認。 |
 | C02 | Energy／Focus／Positive Feelings等 | 受入未確認 | 受入試験を未実施。 |
-| C03 | Frog／Weight | 受入未確認 | 受入試験を未実施。 |
+| C03 | Frog／Weight | 受入確認済 | 本人の0〜4尺度を保存し独立並べ替え。式の採点に入れず、修正後もポイント不変をunitで確認。 |
 | C04 | Smart Lists／Global Filter | 一部実装 | タスク文字列検索あり。Smart Listは未実装。 |
-| C05 | Backburner | 受入未確認 | 受入試験を未実施。 |
-| C06 | Orbit | 受入未確認 | 受入試験を未実施。 |
+| C05 | Backburner | 受入確認済 | 保留タスクは自動候補から外し、保留一覧で検索・解除。元の属性と手動ptを維持することをunitとWindows画面で確認。 |
+| C06 | Orbit | 受入確認済 | Orbitに入れても予定日・期限はnullのまま。解除と専用一覧をWindows画面で確認。 |
 | C07 | Sequential／Parallel／Dependencies | 受入未確認 | 受入試験を未実施。 |
 | C08 | Missing Next Steps／Task Hints | 受入未確認 | 受入試験を未実施。 |
 | C09 | Focus Picker／重要プロジェクト | 受入未確認 | 受入試験を未実施。 |
 | C10 | Matrix | 受入未確認 | 受入試験を未実施。 |
-| C11 | Pinned Tasks／Fast Add | 受入未確認 | 受入試験を未実施。 |
+| C11 | Pinned Tasks／Fast Add | 受入確認済 | pinは既存タスクのflag更新だけで件数不変。テンプレートの「新規を追加」は別の発生回を作る。unitとWindows画面で確認。 |
 | D01 | Spotlight | 受入未確認 | 受入試験を未実施。 |
 | D02 | Super Focus Mode | 受入未確認 | 受入試験を未実施。 |
 | D03 | Truncated List | 受入未確認 | 受入試験を未実施。 |
@@ -130,6 +130,6 @@
 | N10 | サーバー不要の端末単独オフライン利用 | 一部実装 | Windows版とオフラインPWAあり。Android実機は未検証。 |
 | N11 | 既存アプリ内コーチを維持した任意のChatGPT／Claudeプラグイン | 受入未確認 | 受入試験を未実施。 |
 
-計: 121件（受入確認済 16、一部実装 23、受入未確認 82）。
+計: 121件（受入確認済 21、一部実装 22、受入未確認 78）。
 
 最終照合: 2026-09-29。実機・外部サービスの受入は継続して記録します。

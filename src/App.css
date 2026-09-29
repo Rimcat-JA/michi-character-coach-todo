@@ -21,3 +21,6 @@
 .toolbar-right { flex-wrap: wrap; }
 .toolbar-right .field { min-width: 145px; font-size: 11px; }
 .day-card > .muted { display: block; font-size: 10px; margin: 8px 0; }
+.segmented { flex-wrap: wrap; }
+.task-flags { display: flex; gap: 7px; flex-wrap: wrap; padding: 0 8px 9px 38px; }
+.task-flags .text-button { font-size: 10px; }
