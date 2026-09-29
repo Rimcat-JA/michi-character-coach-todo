@@ -23,6 +23,7 @@ import { createGoal, createGoalCheckIn } from './goals'
 import { createTracker, recordTrackerEntry, saveDayNote } from './journal'
 import { recordPomodoro, startPomodoro } from './pomodoro'
 import { addWallTile } from './wall'
+import { saveWorkflowPreset } from './workflows'
 import { inspectBackup, restoreBackup } from './backup'
 import { validateSnapshot, type Snapshot } from './backup-validation'
 
@@ -41,6 +42,17 @@ async function snapshot(): Promise<Snapshot> {
 }
 
 describe('バックアップの復元前検証', () => {
+  it('版付きワークフローを復元し、共有対象外の設定を含むものを拒否する', async () => {
+    await saveWorkflowPreset('自分の設定')
+    const saved = await snapshot()
+    expect(() => validateSnapshot(saved)).not.toThrow()
+    const corrupt = structuredClone(saved)
+    Object.assign(corrupt.settings[0].workflowPresets![0].config, { notifications: true })
+    expect(() => validateSnapshot(corrupt)).toThrow('ワークフロー設定')
+    await db.settings.update('main', { workflowPresets: [] })
+    await restoreBackup(saved)
+    expect((await db.settings.get('main'))?.workflowPresets?.[0].name).toBe('自分の設定')
+  })
   it('機能の表示設定を復元し、未知の機能を拒否する', async () => {
     await db.settings.update('main', { hiddenFeatures: ['wall', 'journal'] })
     const saved = await snapshot()
