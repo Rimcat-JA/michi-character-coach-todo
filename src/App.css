@@ -63,3 +63,8 @@
 .focus-choice-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; border-top: 1px solid #f0eef5; padding: 7px 0; }
 .focus-choice-row small { color: #817b94; font-size: 10px; }
 .focus-choice-grid select { width: 100%; min-height: 36px; border: 1px solid #e5e4ec; border-radius: 8px; background: white; padding: 6px 9px; font-size: 11px; }
+.super-focus-actions { display: flex; justify-content: center; flex-wrap: wrap; gap: 9px; margin: 12px 0; }
+.super-focus-complete { margin: 16px auto; display: grid; justify-items: center; gap: 10px; max-width: 280px; }
+.super-focus-complete .field { width: 100%; text-align: left; }
+.super-focus-trouble { margin: 16px auto; max-width: 420px; padding: 14px; background: #faf9ff; border: 1px solid #ebe8f4; border-radius: 10px; }
+.super-focus-trouble p { font-size: 12px; }
