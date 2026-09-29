@@ -3,7 +3,7 @@ import { useLiveQuery } from 'dexie-react-hooks'
 import { ArchiveRestore, CalendarDays, Check, CheckCircle2, ChevronDown, Clock3, CloudOff, Database, Download, Flame, Focus, FolderTree, History, Inbox, LayoutDashboard, ListTodo, LockKeyhole, Menu, MessageCircle, Moon, MoreHorizontal, Plus, Repeat2, Search, Settings2, ShieldCheck, Sparkles, Tags, Trash2, Upload, X } from 'lucide-react'
 import { db, ensureSettings } from './db'
 import { bulkUpdateTasksAtomic, createRoutine, createTask, correctCompletion, expandRoutines, logSession, newTaskInput, restoreTask, setTaskFlag, trashTask, undoCompletion, updateTask, completeTask, type BulkTaskPatch, type TaskInput } from './commands'
-import { addDays, calculateScore, emptyScore, scoreText, today, type ChecklistItem, type Completion, type Container, type LabelDefinition, type LabelGroup, type Routine, type SavedTemplate, type ScoreInput, type Settings, type Task, type TimeBlock, type WorkSession } from './domain'
+import { addDays, calculateScore, emptyScore, scoreText, today, type ChecklistItem, type Completion, type Container, type LabelDefinition, type LabelGroup, type Routine, type SavedTemplate, type ScoreInput, type Settings, type SmartList, type Task, type TimeBlock, type WorkSession } from './domain'
 import { exportBackup, exportPortableJson, exportTasksCsv, exportTasksIcs, inspectBackup, restoreBackup } from './backup'
 import { unionSessionMinutes } from './time-tracking'
 import { dayCapacity, filterTasksByDates, nextAvailableDate, reviewDueTasks, sortTasks, suggestedTasks, urgency } from './planning'
@@ -24,6 +24,8 @@ import { dueSnoozes, rolloverTask, snoozeTask } from './rollover'
 import { ThemeRulesView } from './ThemeRulesView'
 import { ContextSuggestions } from './ContextSuggestions'
 import { assignDaySection, groupTodayTasks, setDaySectionMode, type DaySectionMode } from './day-sections'
+import { SmartListControls } from './SmartListControls'
+import { querySmartList } from './smart-lists'
 import { projectNextStepStatus } from './dependencies'
 import './App.css'
 
@@ -56,6 +58,7 @@ function App() {
   const timeBlocks = useLiveQuery(() => db.timeBlocks.toArray(), []) ?? []
   const calendarEvents = useLiveQuery(() => db.calendarEvents.toArray(), []) ?? []
   const themeRules = useLiveQuery(() => db.themeRules.toArray(), []) ?? []
+  const smartLists = useLiveQuery(() => db.smartLists.toArray(), []) ?? []
   const settings = useLiveQuery(() => db.settings.get('main'), [])
   const active = tasks.filter(t => !t.deletedAt)
   const open = active.filter(t => t.status === 'open')
@@ -113,7 +116,7 @@ function App() {
           <section className="card suggestion-card"><div className="card-heading"><div><span className="eyebrow">NEXT UP</span><h2>次に考えること</h2></div><span className="subtle">登録済みタスクから表示</span></div><div className="suggestion-list">{suggested.length ? suggested.map(t => <button key={t.id} className="suggestion" onClick={() => setEditor(t)}><span className="suggestion-dot"/><span>{t.title}</span><small>{t.dueDate ? `期限 ${dateLabel(t.dueDate)}` : t.scheduledDate ? `予定 ${dateLabel(t.scheduledDate)}` : '日付なし'}</small></button>) : <p className="muted">未完了のタスクはありません。</p>}</div></section>
           <ContextSuggestions tasks={tasks} dependencies={dependencies} themes={themeRules.filter(rule => rule.ownerId === settings.profileId)} date={currentDate} now={nowIso} onEdit={setEditor} />
         </>}
-        {view === 'tasks' && <TasksView tasks={tasks} onEdit={setEditor} onToggle={toggleTask} onNew={() => setEditor('new')} run={run} />}
+        {view === 'tasks' && <TasksView tasks={tasks} lists={smartLists} ownerId={settings.profileId} onEdit={setEditor} onToggle={toggleTask} onNew={() => setEditor('new')} run={run} />}
         {view === 'projects' && <ContainersView containers={containers} tasks={tasks} completions={completions} dependencies={dependencies} ownerId={settings.profileId} run={run} />}
         {view === 'labels' && <LabelsView groups={labelGroups} definitions={labelDefinitions} ownerId={settings.profileId} run={run} />}
         {view === 'saved' && <SavedItemsView templates={savedTemplates} containers={containers} tasks={active} ownerId={settings.profileId} run={run} />}
@@ -147,7 +150,7 @@ function TodaySections({ tasks, blocks, date, mode, onEdit, onToggle, onNew, onA
   </section>
 }
 
-function TasksView({ tasks, onEdit, onToggle, onNew, run }: { tasks: Task[]; onEdit: (t: Task) => void; onToggle: (t: Task) => void; onNew: () => void; run: (fn: () => Promise<unknown>, success?: string) => Promise<boolean> }) {
+function TasksView({ tasks, lists, ownerId, onEdit, onToggle, onNew, run }: { tasks: Task[]; lists: SmartList[]; ownerId: string; onEdit: (t: Task) => void; onToggle: (t: Task) => void; onNew: () => void; run: (fn: () => Promise<unknown>, success?: string) => Promise<boolean> }) {
   const [filter, setFilter] = useState<'open' | 'completed' | 'trash' | 'backburner' | 'orbit'>('open')
   const [sortBy, setSortBy] = useState<'scheduled' | 'frog' | 'weight'>('scheduled')
   const [query, setQuery] = useState('')
@@ -157,15 +160,20 @@ function TasksView({ tasks, onEdit, onToggle, onNew, run }: { tasks: Task[]; onE
   const [showBulk, setShowBulk] = useState(false)
   const [selected, setSelected] = useState<Record<string, number>>({})
   const [bulkNotice, setBulkNotice] = useState('')
+  const [smartListId, setSmartListId] = useState('')
   function chooseFilter(next: typeof filter) { setFilter(next); setSelected({}); setBulkNotice('') }
   const projects = [...new Set(tasks.map(t => t.project).filter(Boolean))]
+  const activeList = lists.find(list => list.id === smartListId && list.ownerId === ownerId)
+  const smartIds = activeList ? new Set(querySmartList(activeList, tasks, ownerId).map(task => task.id)) : null
   const visible = sortTasks(filterTasksByDates(tasks, targetDateFilter || null, dueDateFilter || null)
+    .filter(t => !smartIds || smartIds.has(t.id))
     .filter(t => filter === 'trash' ? !!t.deletedAt : !t.deletedAt && (filter === 'backburner' ? !!t.backburner && t.status === 'open' : filter === 'orbit' ? !!t.orbit && t.status === 'open' : t.status === filter && (filter !== 'open' || !t.backburner)))
     .filter(t => !project || t.project === project)
     .filter(t => !query || [t.title, t.notes, ...t.labels].join(' ').toLowerCase().includes(query.toLowerCase())), sortBy)
 
   return <>
     <div className="page-heading"><div><span className="eyebrow">YOUR TASKS</span><h1>すべてのタスク</h1><p>思いついたことを記録して、必要な作業を見渡せます。</p></div><button className="primary-button" onClick={onNew}><Plus size={17} /> タスクを追加</button></div>
+    <SmartListControls lists={lists} ownerId={ownerId} selectedId={smartListId} onSelect={setSmartListId} run={run} />
     <div className="toolbar">
       <div className="segmented">
         <button className={filter === 'open' ? 'active' : ''} onClick={() => chooseFilter('open')}>未完了</button>

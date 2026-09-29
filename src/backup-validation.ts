@@ -1,8 +1,9 @@
-import { calculateScore, validateTaskInput, validateDate, type Assessment, type Audit, type CalendarEvent, type ChecklistItem, type CommandReceipt, type Completion, type Container, type LabelDefinition, type LabelGroup, type LedgerEntry, type PlanningBucket, type RolloverEntry, type Routine, type SavedTemplate, type Settings, type Task, type TaskAttachment, type TaskComment, type TaskDependency, type TaskNote, type ThemeRule, type TimeBlock, type WorkSession } from './domain'
+import { calculateScore, validateTaskInput, validateDate, type Assessment, type Audit, type CalendarEvent, type ChecklistItem, type CommandReceipt, type Completion, type Container, type LabelDefinition, type LabelGroup, type LedgerEntry, type PlanningBucket, type RolloverEntry, type Routine, type SavedTemplate, type Settings, type SmartList, type Task, type TaskAttachment, type TaskComment, type TaskDependency, type TaskNote, type ThemeRule, type TimeBlock, type WorkSession } from './domain'
 import { validateLabelSelection } from './labels'
 import { validateDependencyGraph } from './dependencies'
 import { validatePlanningBuckets } from './period-planning'
 import { validateThemeRule } from './themes'
+import { validateSmartListAst } from './smart-lists'
 
 export type Snapshot = {
   format: 'coachbundle'; version: 1; exportedAt: string
@@ -22,6 +23,7 @@ export type Snapshot = {
   calendarEvents?: CalendarEvent[]
   rollovers?: RolloverEntry[]
   themeRules?: ThemeRule[]
+  smartLists?: SmartList[]
 }
 
 const tableNames = ['tasks', 'assessments', 'completions', 'ledger', 'routines', 'sessions', 'commands', 'audits', 'settings'] as const
@@ -77,6 +79,9 @@ export function validateSnapshot(input: unknown): asserts input is Snapshot {
   if (input.themeRules !== undefined && !Array.isArray(input.themeRules)) throw new Error('themeRulesが不正です')
   const themeRules = (input.themeRules ?? []) as ThemeRule[]
   unique(themeRules, 'themeRules', 'id')
+  if (input.smartLists !== undefined && !Array.isArray(input.smartLists)) throw new Error('smartListsが不正です')
+  const smartLists = (input.smartLists ?? []) as SmartList[]
+  unique(smartLists, 'smartLists', 'id')
   if (input.rollovers !== undefined && !Array.isArray(input.rollovers)) throw new Error('rolloversが不正です')
   const rollovers = (input.rollovers ?? []) as RolloverEntry[]
   unique(rollovers, 'rollovers', 'id')
@@ -250,6 +255,7 @@ export function validateSnapshot(input: unknown): asserts input is Snapshot {
   if (Object.keys(settings).some(key => !allowedSettings.has(key))) throw new Error('設定に未対応の項目があります')
   if (!filled(settings.profileId) || !filled(settings.datasetId) || !timestamp(settings.createdAt) || typeof settings.coachName !== 'string' || !Number.isInteger(settings.dailyMinutes) || settings.dailyMinutes < 0 || !Number.isInteger(settings.dailyPoints) || settings.dailyPoints < 0 || typeof settings.aiEnabled !== 'boolean' || typeof settings.notifications !== 'boolean' || !['A0', 'A1', 'A2'].includes(settings.automation) || !nullableString(settings.lastBackupAt) || (settings.lastBackupAt !== null && !timestamp(settings.lastBackupAt))) throw new Error('設定が不正です')
   for (const rule of themeRules) { if (rule.ownerId !== settings.profileId || !timestamp(rule.createdAt)) throw new Error('重点テーマが不正です'); validateThemeRule(rule) }
+  for (const list of smartLists) { if (list.ownerId !== settings.profileId || !filled(list.name) || list.name.length > 100 || !Number.isInteger(list.revision) || list.revision < 1 || !timestamp(list.createdAt) || !timestamp(list.updatedAt)) throw new Error('Smart Listが不正です'); validateSmartListAst(list.ast) }
   if (settings.aiModel !== undefined && (typeof settings.aiModel !== 'string' || settings.aiModel.length > 120)) throw new Error('AIモデルIDが不正です')
   if (settings.daySectionMode !== undefined && !['halfday', 'category', 'timeblock', 'custom'].includes(settings.daySectionMode)) throw new Error('今日の表示区分が不正です')
 }
