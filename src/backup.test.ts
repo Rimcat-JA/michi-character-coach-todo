@@ -10,6 +10,7 @@ import { instantiateTemplate, saveTaskTemplate } from './templates'
 import { addTaskAttachment, addTaskComment, addTaskNote, getTaskAttachment } from './materials'
 import { addTaskDependency } from './dependencies'
 import { assignTaskToBucket, createPlanningBucket } from './period-planning'
+import { createCalendarEvent, createTimeBlock } from './calendar-planning'
 import { inspectBackup, restoreBackup } from './backup'
 import { validateSnapshot, type Snapshot } from './backup-validation'
 
@@ -23,7 +24,7 @@ async function snapshot(): Promise<Snapshot> {
     completions: await db.completions.toArray(), ledger: await db.ledger.toArray(),
     routines: await db.routines.toArray(), sessions: await db.sessions.toArray(),
     commands: await db.commands.toArray(), audits: await db.audits.toArray(),
-    settings: await db.settings.toArray(), containers: await db.containers.toArray(), checklistItems: await db.checklistItems.toArray(), labelGroups: await db.labelGroups.toArray(), labelDefinitions: await db.labelDefinitions.toArray(), savedTemplates: await db.savedTemplates.toArray(), taskNotes: await db.taskNotes.toArray(), taskComments: await db.taskComments.toArray(), taskAttachments: attachments, taskDependencies: await db.taskDependencies.toArray(), planningBuckets: await db.planningBuckets.toArray()
+    settings: await db.settings.toArray(), containers: await db.containers.toArray(), checklistItems: await db.checklistItems.toArray(), labelGroups: await db.labelGroups.toArray(), labelDefinitions: await db.labelDefinitions.toArray(), savedTemplates: await db.savedTemplates.toArray(), taskNotes: await db.taskNotes.toArray(), taskComments: await db.taskComments.toArray(), taskAttachments: attachments, taskDependencies: await db.taskDependencies.toArray(), planningBuckets: await db.planningBuckets.toArray(), timeBlocks: await db.timeBlocks.toArray(), calendarEvents: await db.calendarEvents.toArray()
   }
 }
 
@@ -159,5 +160,14 @@ describe('バックアップの復元前検証', () => {
     await restoreBackup(saved)
     expect((await db.tasks.get(id))?.planBucketId).toBe(bucket)
     expect((await db.planningBuckets.get(bucket))?.kind).toBe('quarter')
+  })
+  it('時間枠と会議を別資源として復元する', async () => {
+    const block = await createTimeBlock({ kind: 'activity', category: '学習', projectId: null, date: '2026-10-01', startMinute: 540, endMinute: 600, timezone: 'Asia/Tokyo' })
+    const event = await createCalendarEvent({ kind: 'meeting', title: '会議', startAt: '2026-10-01T01:00:00.000Z', endAt: '2026-10-01T02:00:00.000Z', timezone: 'Asia/Tokyo', linkedTaskId: null })
+    const saved = await snapshot()
+    await db.timeBlocks.clear(); await db.calendarEvents.clear()
+    await restoreBackup(saved)
+    expect((await db.timeBlocks.get(block))?.category).toBe('学習')
+    expect((await db.calendarEvents.get(event))?.title).toBe('会議')
   })
 })
