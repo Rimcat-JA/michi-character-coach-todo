@@ -42,17 +42,17 @@
 | C06 | Orbit | 受入確認済 | Orbitに入れても予定日・期限はnullのまま。解除と専用一覧をWindows画面で確認。 |
 | C07 | Sequential／Parallel／Dependencies | 受入確認済 | A→B→Cの循環追加を拒否し、A完了後はBだけを自動候補へ出すことをunitで確認。 |
 | C08 | Missing Next Steps／Task Hints | 受入確認済 | タスクなし案件と全件完了案件を区別し、前者だけ次の作業登録を案内することをunitで確認。 |
-| C09 | Focus Picker／重要プロジェクト | 受入未確認 | 受入試験を未実施。 |
-| C10 | Matrix | 受入未確認 | 受入試験を未実施。 |
+| C09 | Focus Picker／重要プロジェクト | 受入確認済 | コーチ候補Aの後に本人がBを選ぶと次の推薦でもBを維持し候補を再評価することをunitとWindows画面で確認。 |
+| C10 | Matrix | 受入確認済 | 重要度×緊急度など二軸とSmart List軸で区画表示。同一タスク重複入力でもIDとポイントを一回だけ集計するunitとWindows画面を確認。 |
 | C11 | Pinned Tasks／Fast Add | 受入確認済 | pinは既存タスクのflag更新だけで件数不変。テンプレートの「新規を追加」は別の発生回を作る。unitとWindows画面で確認。 |
 | D01 | Spotlight | 受入未確認 | 受入試験を未実施。 |
 | D02 | Super Focus Mode | 受入未確認 | 受入試験を未実施。 |
-| D03 | Truncated List | 受入未確認 | 受入試験を未実施。 |
+| D03 | Truncated List | 受入確認済 | 20件中5件表示で残り15件を示し、全件表示へ戻せることをunitとWindows画面で確認。 |
 | D04 | Procrastination Wizard／Task Breakdown | 受入未確認 | 受入試験を未実施。 |
 | D05 | This or That | 受入未確認 | 受入試験を未実施。 |
 | D06 | Suggested Task | 一部実装 | 登録済みタスクから次候補を表示。提案規則の全体は未実装。 |
 | D07 | Random Task／Task Jar | 受入未確認 | 受入試験を未実施。 |
-| D08 | Procrastination Count／Staleness | 受入未確認 | 受入試験を未実施。 |
+| D08 | Procrastination Count／Staleness | 受入確認済 | 初回予定日からの経過と最終更新からの経過を別表示。予定変更回数が異なっても初回日が同じなら11日で一致するunitを確認。 |
 | D09 | Reminders／Smart List Day Alerts | 受入未確認 | 受入試験を未実施。 |
 | D10 | Bug Me | 受入未確認 | 受入試験を未実施。 |
 | E01 | Duration Estimates | 一部実装 | 作業・移動分数を保存。専用の見積履歴は未実装。 |
@@ -130,6 +130,6 @@
 | N10 | サーバー不要の端末単独オフライン利用 | 一部実装 | Windows版とオフラインPWAあり。Android実機は未検証。 |
 | N11 | 既存アプリ内コーチを維持した任意のChatGPT／Claudeプラグイン | 受入未確認 | 受入試験を未実施。 |
 
-計: 121件（受入確認済 34、一部実装 20、受入未確認 67）。
+計: 121件（受入確認済 38、一部実装 20、受入未確認 63）。
 
 最終照合: 2026-09-29。実機・外部サービスの受入は継続して記録します。
