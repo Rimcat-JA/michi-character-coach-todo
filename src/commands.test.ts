@@ -42,6 +42,14 @@ describe('ローカル正式保存と台帳', () => {
     expect(updated?.dueDate).toBe('2026-10-03')
     expect(updated?.targetDate).toBe('2026-10-02')
   })
+  it('個人目標日を変更しても外部期限を変えない', async () => {
+    const input = { ...newTaskInput(), title: '独立した期限', targetDate: '2026-10-02', dueDate: '2026-10-05' }
+    const id = await createTask(input)
+    await updateTask(id, 1, { ...input, targetDate: '2026-10-03' })
+    const updated = await db.tasks.get(id)
+    expect(updated?.targetDate).toBe('2026-10-03')
+    expect(updated?.dueDate).toBe('2026-10-05')
+  })
   it('同じrequest keyの異なる内容を拒否する', async () => {
     await createTask({ ...newTaskInput(), title: 'A' }, 'same')
     await expect(createTask({ ...newTaskInput(), title: 'B' }, 'same')).rejects.toThrow('IDEMPOTENCY_MISMATCH')

@@ -18,3 +18,6 @@
 .material-block textarea, .material-block select { width: 100%; }
 .material-entry { width: 100%; background: #f8f7fc; border-radius: 10px; padding: 10px 12px; overflow-wrap: anywhere; }
 .material-entry p { margin: 6px 0 0; white-space: pre-wrap; }
+.toolbar-right { flex-wrap: wrap; }
+.toolbar-right .field { min-width: 145px; font-size: 11px; }
+.day-card > .muted { display: block; font-size: 10px; margin: 8px 0; }
