@@ -12,6 +12,7 @@ import { addTaskDependency } from './dependencies'
 import { assignTaskToBucket, createPlanningBucket } from './period-planning'
 import { createCalendarEvent, createTimeBlock } from './calendar-planning'
 import { rolloverTask } from './rollover'
+import { createThemeRule } from './themes'
 import { inspectBackup, restoreBackup } from './backup'
 import { validateSnapshot, type Snapshot } from './backup-validation'
 
@@ -25,7 +26,7 @@ async function snapshot(): Promise<Snapshot> {
     completions: await db.completions.toArray(), ledger: await db.ledger.toArray(),
     routines: await db.routines.toArray(), sessions: await db.sessions.toArray(),
     commands: await db.commands.toArray(), audits: await db.audits.toArray(),
-    settings: await db.settings.toArray(), containers: await db.containers.toArray(), checklistItems: await db.checklistItems.toArray(), labelGroups: await db.labelGroups.toArray(), labelDefinitions: await db.labelDefinitions.toArray(), savedTemplates: await db.savedTemplates.toArray(), taskNotes: await db.taskNotes.toArray(), taskComments: await db.taskComments.toArray(), taskAttachments: attachments, taskDependencies: await db.taskDependencies.toArray(), planningBuckets: await db.planningBuckets.toArray(), timeBlocks: await db.timeBlocks.toArray(), calendarEvents: await db.calendarEvents.toArray(), rollovers: await db.rollovers.toArray()
+    settings: await db.settings.toArray(), containers: await db.containers.toArray(), checklistItems: await db.checklistItems.toArray(), labelGroups: await db.labelGroups.toArray(), labelDefinitions: await db.labelDefinitions.toArray(), savedTemplates: await db.savedTemplates.toArray(), taskNotes: await db.taskNotes.toArray(), taskComments: await db.taskComments.toArray(), taskAttachments: attachments, taskDependencies: await db.taskDependencies.toArray(), planningBuckets: await db.planningBuckets.toArray(), timeBlocks: await db.timeBlocks.toArray(), calendarEvents: await db.calendarEvents.toArray(), rollovers: await db.rollovers.toArray(), themeRules: await db.themeRules.toArray()
   }
 }
 
@@ -179,5 +180,14 @@ describe('バックアップの復元前検証', () => {
     await restoreBackup(saved)
     expect((await db.tasks.get(id))?.firstScheduledDate).toBe('2026-10-01')
     expect((await db.rollovers.where('taskId').equals(id).first())?.toDate).toBe('2026-10-02')
+  })
+  it('重点テーマと気力属性を復元する', async () => {
+    const id = await createTask({ ...newTaskInput(), title: '執筆', project: '執筆', energyNeed: 0, focusNeed: null, positiveFeeling: 3 })
+    const rule = await createThemeRule({ category: '執筆', weekdays: [2], startDate: null, endDate: null, strength: 2 })
+    const saved = await snapshot()
+    await db.tasks.clear(); await db.themeRules.clear()
+    await restoreBackup(saved)
+    expect(await db.tasks.get(id)).toMatchObject({ energyNeed: 0, focusNeed: null, positiveFeeling: 3 })
+    expect((await db.themeRules.get(rule))?.weekdays).toEqual([2])
   })
 })

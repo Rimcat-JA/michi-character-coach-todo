@@ -10,7 +10,7 @@ function title(name: string) {
 }
 async function templateTask(task: Task, containerKey: string | null): Promise<TemplateTask> {
   const checklist = await db.checklistItems.where('taskId').equals(task.id).toArray()
-  return { title: task.title, notes: task.notes, labels: [...task.labels], importance: task.importance, score: { ...task.score }, checklistTexts: checklist.filter(item => !item.convertedTaskId).map(item => item.text), containerKey }
+  return { title: task.title, notes: task.notes, labels: [...task.labels], importance: task.importance, energyNeed: task.energyNeed ?? null, focusNeed: task.focusNeed ?? null, positiveFeeling: task.positiveFeeling ?? null, score: { ...task.score }, checklistTexts: checklist.filter(item => !item.convertedTaskId).map(item => item.text), containerKey }
 }
 async function save(kind: SavedTemplate['kind'], name: string, containers: SavedTemplate['containers'], tasks: TemplateTask[]) {
   const settings = await ensureSettings(), clean = title(name)
@@ -80,7 +80,7 @@ export async function instantiateTemplate(templateId: string, requestKey: string
     for (const [index, source] of template.tasks.entries()) {
       const containerId = source.containerKey ? containerIds.get(source.containerKey) : null
       if (source.containerKey && !containerId) throw new Error('テンプレートのタスク参照が不正です')
-      const input = { ...newTaskInput(), title: source.title, notes: source.notes, labels: [...source.labels], importance: source.importance, score: { ...source.score }, containerId: containerId ?? null }
+      const input = { ...newTaskInput(), title: source.title, notes: source.notes, labels: [...source.labels], importance: source.importance, energyNeed: source.energyNeed ?? null, focusNeed: source.focusNeed ?? null, positiveFeeling: source.positiveFeeling ?? null, score: { ...source.score }, containerId: containerId ?? null }
       const taskId = await addTask(input, `template:${template.id}:${requestKey}:${index}`, null)
       taskIds.push(taskId)
       for (const text of source.checklistTexts) {

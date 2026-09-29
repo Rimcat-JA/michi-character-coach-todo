@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { emptyScore, type Task } from './domain'
-import { dayCapacity, filterTasksByDates, nextAvailableDate, reviewDueTasks, sortTasks, suggestedTasks, urgency } from './planning'
+import { contextSuggestions, dayCapacity, filterTasksByDates, nextAvailableDate, reviewDueTasks, sortTasks, suggestedTasks, urgency } from './planning'
 
 function task(id: string, overrides: Partial<Task> = {}): Task {
   return { id, generationKey: id, routineId: null, title: id, notes: '', project: '', labels: [], scheduledDate: null, dueDate: null, targetDate: null, reviewDate: null, availableFrom: null, importance: 1, score: emptyScore(), effectivePoints: null, assessmentId: id, status: 'open', revision: 1, createdAt: '2026-09-29T00:00:00.000Z', updatedAt: '2026-09-29T00:00:00.000Z', deletedAt: null, ...overrides }
@@ -55,5 +55,13 @@ describe('日付に基づく候補と見直し', () => {
     expect(suggestedTasks([held], '2026-10-01')).toEqual([])
     expect(held.scheduledDate).toBeNull()
     expect(held.dueDate).toBeNull()
+  })
+  it('気力0の候補と必要度未設定を分け、気力2以上は除外する', () => {
+    const zero = task('zero', { energyNeed: 0, focusNeed: 1 })
+    const high = task('high', { energyNeed: 2, focusNeed: 1 })
+    const unknown = task('unknown', { energyNeed: null, focusNeed: 1 })
+    const result = contextSuggestions([zero, high, unknown], '2026-10-01', 0, 1)
+    expect(result.matches.map(item => item.id)).toEqual(['zero'])
+    expect(result.unknown.map(item => item.id)).toEqual(['unknown'])
   })
 })

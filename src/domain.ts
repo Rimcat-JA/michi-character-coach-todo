@@ -15,7 +15,7 @@ export type Task = {
   id: string; generationKey: string; routineId: string | null; title: string; notes: string
   project: string; containerId?: string | null; planBucketId?: string | null; labels: string[]; scheduledDate: string | null; dueDate: string | null
   targetDate: string | null; reviewDate: string | null; availableFrom: string | null; deferredUntil?: string | null; firstScheduledDate?: string | null; snoozedUntil?: string | null
-  importance: number; frog?: number | null; weight?: number | null; pinned?: boolean; backburner?: boolean; orbit?: boolean; score: ScoreInput; effectivePoints: number | null
+  importance: number; frog?: number | null; weight?: number | null; energyNeed?: number | null; focusNeed?: number | null; positiveFeeling?: number | null; pinned?: boolean; backburner?: boolean; orbit?: boolean; score: ScoreInput; effectivePoints: number | null
   assessmentId: string; status: 'open' | 'completed'; revision: number
   createdAt: string; updatedAt: string; deletedAt: string | null
 }
@@ -23,7 +23,7 @@ export type Container = { id: string; parentId: string | null; kind: 'category' 
 export type ChecklistItem = { id: string; taskId: string; text: string; done: boolean; convertedTaskId: string | null; createdAt: string; updatedAt: string }
 export type LabelGroup = { id: string; ownerId: string; name: string; selectionMode: 'single' | 'multi'; createdAt: string }
 export type LabelDefinition = { id: string; groupId: string | null; ownerId: string; name: string; createdAt: string }
-export type TemplateTask = { title: string; notes: string; labels: string[]; importance: number; score: ScoreInput; checklistTexts: string[]; containerKey: string | null }
+export type TemplateTask = { title: string; notes: string; labels: string[]; importance: number; energyNeed?: number | null; focusNeed?: number | null; positiveFeeling?: number | null; score: ScoreInput; checklistTexts: string[]; containerKey: string | null }
 export type TemplateContainer = { key: string; parentKey: string | null; kind: Container['kind']; name: string }
 export type SavedTemplate = { id: string; familyId: string; ownerId: string; name: string; version: number; kind: 'task' | 'project'; containers: TemplateContainer[]; tasks: TemplateTask[]; createdAt: string }
 export type TaskNote = { id: string; taskId: string; ownerId: string; kind: 'self' | 'source'; body: string; createdAt: string }
@@ -34,6 +34,7 @@ export type PlanningBucket = { id: string; ownerId: string; kind: 'week' | 'mont
 export type TimeBlock = { id: string; ownerId: string; kind: 'activity' | 'work_session'; category: string; projectId: string | null; date: string; startMinute: number; endMinute: number; timezone: string; taskIds: string[]; linkedSessionId: string | null; closed: boolean; revision: number; createdAt: string; updatedAt: string }
 export type CalendarEvent = { id: string; ownerId: string; kind: 'meeting' | 'class' | 'other'; title: string; startAt: string; endAt: string; timezone: string; linkedTaskId: string | null; createdAt: string }
 export type RolloverEntry = { id: string; taskId: string; fromDate: string; toDate: string; at: string }
+export type ThemeRule = { id: string; ownerId: string; category: string; weekdays: number[]; startDate: string | null; endDate: string | null; strength: number; createdAt: string }
 export type Assessment = { id: string; taskId: string; score: ScoreInput; result: ScoreResult; createdAt: string; origin: 'human' | 'routine'; ruleVersion: 'v1' }
 export type Completion = { id: string; taskId: string; originalAt: string; currentAt: string | null; originalPoints: number | null; netPoints: number | null; lastConfirmedPoints?: number | null; scoreState: 'pending' | 'confirmed'; title: string; project: string }
 export type LedgerEntry = { id: string; completionId: string; taskId: string; kind: 'award' | 'adjust' | 'reverse' | 'restore'; delta: number; at: string; reason: string }
@@ -70,12 +71,12 @@ export function calculateScore(s: ScoreInput): ScoreResult {
   const complete = s.minutes !== null && s.travelMinutes !== null && s.difficulty !== null && s.uncertainty !== null && s.coordination !== null && s.physical !== null && s.outing !== null
   return { effective: complete ? lower : null, lower, upper, label: complete ? '自動' : '推定範囲' }
 }
-export function validateTaskInput(input: Pick<Task, 'title' | 'notes' | 'importance' | 'score'> & Partial<Pick<Task, 'frog' | 'weight'>>) {
+export function validateTaskInput(input: Pick<Task, 'title' | 'notes' | 'importance' | 'score'> & Partial<Pick<Task, 'frog' | 'weight' | 'energyNeed' | 'focusNeed' | 'positiveFeeling'>>) {
   const title = input.title.trim()
   if (!title || title.length > 300) throw new Error('タイトルは1〜300文字で入力してください')
   if (input.notes.length > 50000) throw new Error('メモは50,000文字以内で入力してください')
   integer(input.importance, 0, 3, '重要度')
-  for (const [name, value] of [['frog', input.frog], ['weight', input.weight]] as const) if (value !== undefined && value !== null) integer(value, 0, 4, name)
+  for (const [name, value] of [['frog', input.frog], ['weight', input.weight], ['energyNeed', input.energyNeed], ['focusNeed', input.focusNeed], ['positiveFeeling', input.positiveFeeling]] as const) if (value !== undefined && value !== null) integer(value, 0, 4, name)
   validateScore(input.score)
 }
 export function validateDate(date: string | null, label: string) {
