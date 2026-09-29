@@ -32,6 +32,9 @@ import { truncateTasks } from './list-view'
 import TaskStaleness from './TaskStaleness'
 import TaskBreakdownWizard from './TaskBreakdownWizard'
 import DurationEstimate from './DurationEstimate'
+import DayProgressView from './DayProgressView'
+import TimeTargetsView from './TimeTargetsView'
+import { captureDayProgressBaseline } from './progress'
 import { FocusChoiceTools } from './FocusChoiceTools'
 import SuperFocusView from './SuperFocusView'
 import { setSpotlight } from './focus-tools'
@@ -84,7 +87,7 @@ function App() {
   const plannedPoints = todayTasks.reduce((n, t) => n + (t.effectivePoints ?? 0), 0)
   const snoozeAlerts = dueSnoozes(active, nowIso)
 
-  useEffect(() => { ensureSettings().then(() => expandRoutines()).catch(e => showError(e)) }, [])
+  useEffect(() => { ensureSettings().then(() => expandRoutines()).then(() => captureDayProgressBaseline(currentDate)).catch(e => setToast(e instanceof Error ? e.message : String(e))) }, [currentDate])
   useEffect(() => { const timer = setInterval(() => setNowIso(new Date().toISOString()), 60000); return () => clearInterval(timer) }, [])
   useEffect(() => {
     if (!settings?.notifications || !('Notification' in window) || Notification.permission !== 'granted') return
@@ -119,6 +122,7 @@ function App() {
         {view === 'today' && <>
           <div className="page-heading"><div><span className="eyebrow">YOUR DAY · {dateLong(currentDate)}</span><h1>今日を、ひとつずつ。</h1><p>いま必要なことから始めましょう。予定はいつでも調整できます。</p></div><button className="secondary-button" onClick={() => go('plan')}><CalendarDays size={17} /> 計画を見る</button></div>
           <div className="stats-grid"><Stat icon={<ListTodo size={19} />} label="今日の予定" value={`${scheduled.length} 件`} detail={overdue.length ? `期限超過 ${overdue.length} 件` : 'いま進めるタスク'} tone="lilac" /><Stat icon={<Clock3 size={19} />} label="予定時間" value={`${plannedMinutes} 分`} detail={`目安 ${settings.dailyMinutes} 分 / 日`} tone="peach" /><Stat icon={<Sparkles size={19} />} label="必要ポイント" value={`${plannedPoints} pt`} detail={`目安 ${settings.dailyPoints} pt / 日`} tone="mint" /><Stat icon={<CheckCircle2 size={19} />} label="今日の実績" value={`${todayPoints} pt`} detail={`${completedToday.length} 件完了${pendingPoints ? ` · 未設定${pendingPoints}件` : ''}`} tone="blue" /></div>
+          <DayProgressView baseline={settings.dayProgressBaseline} date={currentDate} tasks={active} completions={completions} />
           <div className="two-column"><TodaySections tasks={todayTasks} blocks={timeBlocks} date={currentDate} mode={settings.daySectionMode ?? 'halfday'} onEdit={setEditor} onToggle={toggleTask} onNew={() => setEditor('new')} onAll={() => go('tasks')} run={run} />
           <section className="card coach-panel"><div className="card-heading"><div><span className="eyebrow">YOUR COMPANION</span><h2>{settings.coachName}から</h2></div><span className="template-tag">定型メッセージ</span></div><div className="coach-illustration"><div className="coach-orbit orbit-one"/><div className="coach-orbit orbit-two"/><div className="coach-face"><span className="coach-eye"/><span className="coach-eye"/><span className="coach-mouth"/></div><span className="star star-one">✦</span><span className="star star-two">✧</span></div><div className="speech">{todayTasks.length ? `まずは「${todayTasks[0].title}」から。ひとつ終われば、次を一緒に選びましょう。` : '今日は何から始めましょうか。新しいタスクも、ゆっくり整理できます。'}</div><button className="secondary-button full" onClick={() => go('coach')}><MessageCircle size={16} /> コーチを開く</button></section></div>
           {reviews.length > 0 && <section className="card suggestion-card"><div className="card-heading"><div><span className="eyebrow">REVIEW</span><h2>見直しが必要</h2></div><span className="subtle">見直しだけでは完了しません</span></div><div className="suggestion-list">{reviews.map(task => <button key={task.id} className="suggestion" onClick={() => setEditor(task)}><span className="suggestion-dot"/><span>{task.title}</span><small>見直し {dateLabel(task.reviewDate)}</small></button>)}</div></section>}
@@ -137,7 +141,7 @@ function App() {
         {view === 'calendar' && <CalendarPlanningView blocks={timeBlocks} events={calendarEvents} tasks={tasks} projects={containers} sessions={sessions} ownerId={settings.profileId} run={run} />}
         {view === 'coach' && <CoachView tasks={open} settings={settings} onEdit={setEditor} onNew={() => setEditor('new')} />}
         {view === 'focus' && <><SuperFocusView tasks={open} sessions={sessions} onEdit={setEditor} onBack={() => go('today')} run={run} /><FocusChoiceTools tasks={tasks} dependencies={dependencies} themes={themeRules.filter(rule => rule.ownerId === settings.profileId)} focusProjects={focusSelection?.projects ?? []} lists={smartLists} ownerId={settings.profileId} date={currentDate} now={nowIso} onEdit={setEditor} run={run} /></>}
-        {view === 'history' && <HistoryView completions={completions} ledger={ledger} sessions={sessions} tasks={tasks} onEdit={id => { const t = tasks.find(x => x.id === id); if (t) setEditor(t) }} run={run} />}
+        {view === 'history' && <><HistoryView completions={completions} ledger={ledger} sessions={sessions} tasks={tasks} onEdit={id => { const t = tasks.find(x => x.id === id); if (t) setEditor(t) }} run={run} /><TimeTargetsView settings={settings} containers={containers} tasks={tasks} sessions={sessions} run={run} /></>}
         {view === 'routines' && <RoutinesView routines={routines} run={run} />}
         {view === 'settings' && <SettingsView settings={settings} run={run} />}
       </div>
@@ -454,7 +458,11 @@ function SettingsView({ settings, run }: { settings: Settings; run: (fn: () => P
   function update<K extends keyof Settings>(key: K, value: Settings[K]) {
     run(async () => {
       if ((key === 'dailyMinutes' || key === 'dailyPoints') && (!Number.isInteger(value) || (value as number) < 0)) throw new Error('1日の目安は0以上の整数で入力してください')
-      await db.settings.update('main', { [key]: value })
+      await db.transaction('rw', db.settings, async () => {
+        const current = await db.settings.get('main')
+        if (!current) throw new Error('設定がありません')
+        await db.settings.put({ ...current, [key]: value })
+      })
     }, '設定を保存しました')
   }
   async function inspect() { if (!file) return; await run(async () => { const result = await inspectBackup(file, password); setRestoreInfo(result) }, 'バックアップを検証しました') }
