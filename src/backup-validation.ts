@@ -1,6 +1,7 @@
-import { calculateScore, validateTaskInput, validateDate, type Assessment, type Audit, type ChecklistItem, type CommandReceipt, type Completion, type Container, type LabelDefinition, type LabelGroup, type LedgerEntry, type Routine, type SavedTemplate, type Settings, type Task, type TaskAttachment, type TaskComment, type TaskDependency, type TaskNote, type WorkSession } from './domain'
+import { calculateScore, validateTaskInput, validateDate, type Assessment, type Audit, type ChecklistItem, type CommandReceipt, type Completion, type Container, type LabelDefinition, type LabelGroup, type LedgerEntry, type PlanningBucket, type Routine, type SavedTemplate, type Settings, type Task, type TaskAttachment, type TaskComment, type TaskDependency, type TaskNote, type WorkSession } from './domain'
 import { validateLabelSelection } from './labels'
 import { validateDependencyGraph } from './dependencies'
+import { validatePlanningBuckets } from './period-planning'
 
 export type Snapshot = {
   format: 'coachbundle'; version: 1; exportedAt: string
@@ -15,6 +16,7 @@ export type Snapshot = {
   taskComments?: TaskComment[]
   taskAttachments?: (Omit<TaskAttachment, 'blob'> & { contentBase64: string })[]
   taskDependencies?: TaskDependency[]
+  planningBuckets?: PlanningBucket[]
 }
 
 const tableNames = ['tasks', 'assessments', 'completions', 'ledger', 'routines', 'sessions', 'commands', 'audits', 'settings'] as const
@@ -72,6 +74,11 @@ export function validateSnapshot(input: unknown): asserts input is Snapshot {
   unique(dependencies, 'taskDependencies', 'id')
   for (const edge of dependencies) if (!timestamp(edge.createdAt)) throw new Error('依存関係が不正です')
   validateDependencyGraph(dependencies, taskIds)
+  if (input.planningBuckets !== undefined && !Array.isArray(input.planningBuckets)) throw new Error('planningBucketsが不正です')
+  const planningBuckets = (input.planningBuckets ?? []) as PlanningBucket[]
+  const planningBucketIds = unique(planningBuckets, 'planningBuckets', 'id')
+  validatePlanningBuckets(planningBuckets)
+  for (const bucket of planningBuckets) if (!timestamp(bucket.createdAt)) throw new Error('計画枠の作成日時が不正です')
   if (input.checklistItems !== undefined && !Array.isArray(input.checklistItems)) throw new Error('checklistItemsが不正です')
   const checklistItems = (input.checklistItems ?? []) as unknown[]
   unique(checklistItems, 'checklistItems', 'id')
@@ -99,7 +106,7 @@ export function validateSnapshot(input: unknown): asserts input is Snapshot {
     if (!filled(task.title) || typeof task.notes !== 'string' || typeof task.project !== 'string' || !Array.isArray(task.labels) || task.labels.some(label => typeof label !== 'string') || task.labels.length > 30) throw new Error('タスクの内容が不正です')
     if (!record(task.score) || !['unset', 'manual', 'formula', 'allocated'].includes(task.score.mode as string) || !['open', 'completed'].includes(task.status) || !Number.isInteger(task.revision) || task.revision < 1 || !points(task.effectivePoints)) throw new Error('タスクの状態が不正です')
     for (const flag of ['pinned', 'backburner', 'orbit'] as const) if (task[flag] !== undefined && typeof task[flag] !== 'boolean') throw new Error('タスクの分類が不正です')
-    if (!nullableString(task.routineId) || (task.routineId !== null && !routineIds.has(task.routineId)) || (task.containerId !== undefined && (!nullableString(task.containerId) || (task.containerId !== null && !containerIds.has(task.containerId)))) || !nullableString(task.deletedAt) || !timestamp(task.createdAt) || !timestamp(task.updatedAt) || (task.deletedAt !== null && !timestamp(task.deletedAt))) throw new Error('タスクの履歴が不正です')
+    if (!nullableString(task.routineId) || (task.routineId !== null && !routineIds.has(task.routineId)) || (task.containerId !== undefined && (!nullableString(task.containerId) || (task.containerId !== null && !containerIds.has(task.containerId)))) || (task.planBucketId !== undefined && (!nullableString(task.planBucketId) || (task.planBucketId !== null && !planningBucketIds.has(task.planBucketId)))) || !nullableString(task.deletedAt) || !timestamp(task.createdAt) || !timestamp(task.updatedAt) || (task.deletedAt !== null && !timestamp(task.deletedAt))) throw new Error('タスクの履歴が不正です')
     for (const [name, value] of [['予定日', task.scheduledDate], ['締め切り', task.dueDate], ['目標日', task.targetDate], ['見直し日', task.reviewDate], ['開始可能日', task.availableFrom], ['延期終了日', task.deferredUntil ?? null]] as const) dateOrNull(value, name)
     validateTaskInput(task)
     if (calculateScore(task.score).effective !== task.effectivePoints) throw new Error('タスクのポイントが評価と一致しません')
@@ -164,6 +171,7 @@ export function validateSnapshot(input: unknown): asserts input is Snapshot {
     if ((audit.taskId !== null && !taskIds.has(audit.taskId)) || !filled(audit.operation) || !timestamp(audit.at) || typeof audit.detail !== 'string') throw new Error('監査履歴が不正です')
   }
   const settings = tables.settings[0] as Settings
+  if (planningBuckets.some(bucket => bucket.ownerId !== settings.profileId)) throw new Error('計画枠の所有者が不正です')
   if (input.labelGroups !== undefined && !Array.isArray(input.labelGroups)) throw new Error('labelGroupsが不正です')
   if (input.labelDefinitions !== undefined && !Array.isArray(input.labelDefinitions)) throw new Error('labelDefinitionsが不正です')
   const groups = (input.labelGroups ?? []) as LabelGroup[], definitions = (input.labelDefinitions ?? []) as LabelDefinition[]

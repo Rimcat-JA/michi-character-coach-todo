@@ -9,6 +9,7 @@ import { createLabelDefinition, createLabelGroup } from './labels'
 import { instantiateTemplate, saveTaskTemplate } from './templates'
 import { addTaskAttachment, addTaskComment, addTaskNote, getTaskAttachment } from './materials'
 import { addTaskDependency } from './dependencies'
+import { assignTaskToBucket, createPlanningBucket } from './period-planning'
 import { inspectBackup, restoreBackup } from './backup'
 import { validateSnapshot, type Snapshot } from './backup-validation'
 
@@ -22,7 +23,7 @@ async function snapshot(): Promise<Snapshot> {
     completions: await db.completions.toArray(), ledger: await db.ledger.toArray(),
     routines: await db.routines.toArray(), sessions: await db.sessions.toArray(),
     commands: await db.commands.toArray(), audits: await db.audits.toArray(),
-    settings: await db.settings.toArray(), containers: await db.containers.toArray(), checklistItems: await db.checklistItems.toArray(), labelGroups: await db.labelGroups.toArray(), labelDefinitions: await db.labelDefinitions.toArray(), savedTemplates: await db.savedTemplates.toArray(), taskNotes: await db.taskNotes.toArray(), taskComments: await db.taskComments.toArray(), taskAttachments: attachments, taskDependencies: await db.taskDependencies.toArray()
+    settings: await db.settings.toArray(), containers: await db.containers.toArray(), checklistItems: await db.checklistItems.toArray(), labelGroups: await db.labelGroups.toArray(), labelDefinitions: await db.labelDefinitions.toArray(), savedTemplates: await db.savedTemplates.toArray(), taskNotes: await db.taskNotes.toArray(), taskComments: await db.taskComments.toArray(), taskAttachments: attachments, taskDependencies: await db.taskDependencies.toArray(), planningBuckets: await db.planningBuckets.toArray()
   }
 }
 
@@ -148,5 +149,15 @@ describe('バックアップの復元前検証', () => {
     await db.taskDependencies.clear()
     await restoreBackup(saved)
     expect((await db.taskDependencies.toArray())[0]).toMatchObject({ taskId: b, dependsOnId: a })
+  })
+  it('期間計画への割当を復元する', async () => {
+    const bucket = await createPlanningBucket('quarter', '2026-10-01')
+    const id = await createTask({ ...newTaskInput(), title: '計画済み' })
+    await assignTaskToBucket(id, 1, bucket)
+    const saved = await snapshot()
+    await db.tasks.clear(); await db.planningBuckets.clear()
+    await restoreBackup(saved)
+    expect((await db.tasks.get(id))?.planBucketId).toBe(bucket)
+    expect((await db.planningBuckets.get(bucket))?.kind).toBe('quarter')
   })
 })
