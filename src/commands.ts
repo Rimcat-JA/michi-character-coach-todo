@@ -37,7 +37,7 @@ export async function addTask(input: TaskInput, generationKey: string, routineId
   const result = calculateScore(input.score)
   const project = await resolvedProject(input)
   const id = uid(), assessmentId = uid(), at = now()
-  const task: Task = { ...input, project, title: input.title.trim(), labels: [...input.labels], score: { ...input.score }, id, generationKey, routineId, effectivePoints: result.effective, assessmentId, status: 'open', revision: 1, createdAt: at, updatedAt: at, deletedAt: null }
+  const task: Task = { ...input, project, firstScheduledDate: input.scheduledDate, title: input.title.trim(), labels: [...input.labels], score: { ...input.score }, id, generationKey, routineId, effectivePoints: result.effective, assessmentId, status: 'open', revision: 1, createdAt: at, updatedAt: at, deletedAt: null }
   const assessment: Assessment = { id: assessmentId, taskId: id, score: { ...input.score }, result, createdAt: at, origin: routineId ? 'routine' : 'human', ruleVersion: 'v1' }
   await db.tasks.add(task); await db.assessments.add(assessment)
   await db.audits.add({ id: uid(), taskId: id, operation: 'create', at, detail: routineId ? 'ルーティンから作成' : '本人が作成' })
@@ -108,7 +108,7 @@ export async function updateTask(id: string, expectedRevision: number, input: Ta
     const project = await resolvedProject(input)
     const assessmentId = scoreChanged ? uid() : old.assessmentId
     if (scoreChanged) await db.assessments.add({ id: assessmentId, taskId: id, score: { ...input.score }, result, createdAt: now(), origin: 'human', ruleVersion: 'v1' })
-    await db.tasks.put({ ...old, ...input, project, title: input.title.trim(), labels: [...input.labels], score: { ...input.score }, assessmentId, effectivePoints: result.effective, revision: old.revision + 1, updatedAt: now() })
+    await db.tasks.put({ ...old, ...input, project, firstScheduledDate: old.firstScheduledDate ?? old.scheduledDate ?? input.scheduledDate, title: input.title.trim(), labels: [...input.labels], score: { ...input.score }, assessmentId, effectivePoints: result.effective, revision: old.revision + 1, updatedAt: now() })
     await db.audits.add({ id: uid(), taskId: id, operation: 'update', at: now(), detail: '本人が編集' })
     return id
   })

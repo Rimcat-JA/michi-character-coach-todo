@@ -6,8 +6,8 @@ export function reviewDueTasks(tasks: Task[], date: string): Task[] {
     .sort((a, b) => a.reviewDate!.localeCompare(b.reviewDate!) || b.importance - a.importance)
 }
 
-export function suggestedTasks(tasks: Task[], date: string, limit = 3, dependencies: TaskDependency[] = []): Task[] {
-  return executableTasks(tasks, dependencies).filter(task => !task.backburner && (!task.availableFrom || task.availableFrom <= date) && (!task.deferredUntil || task.deferredUntil <= date))
+export function suggestedTasks(tasks: Task[], date: string, limit = 3, dependencies: TaskDependency[] = [], now = new Date().toISOString()): Task[] {
+  return executableTasks(tasks, dependencies).filter(task => !task.backburner && (!task.snoozedUntil || task.snoozedUntil <= now) && (!task.availableFrom || task.availableFrom <= date) && (!task.deferredUntil || task.deferredUntil <= date))
     .sort((a, b) => (a.dueDate ?? '9999').localeCompare(b.dueDate ?? '9999') || b.importance - a.importance)
     .slice(0, limit)
 }

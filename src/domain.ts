@@ -14,7 +14,7 @@ export type ScoreResult = { effective: number | null; lower: number | null; uppe
 export type Task = {
   id: string; generationKey: string; routineId: string | null; title: string; notes: string
   project: string; containerId?: string | null; planBucketId?: string | null; labels: string[]; scheduledDate: string | null; dueDate: string | null
-  targetDate: string | null; reviewDate: string | null; availableFrom: string | null; deferredUntil?: string | null
+  targetDate: string | null; reviewDate: string | null; availableFrom: string | null; deferredUntil?: string | null; firstScheduledDate?: string | null; snoozedUntil?: string | null
   importance: number; frog?: number | null; weight?: number | null; pinned?: boolean; backburner?: boolean; orbit?: boolean; score: ScoreInput; effectivePoints: number | null
   assessmentId: string; status: 'open' | 'completed'; revision: number
   createdAt: string; updatedAt: string; deletedAt: string | null
@@ -33,6 +33,7 @@ export type TaskDependency = { id: string; taskId: string; dependsOnId: string; 
 export type PlanningBucket = { id: string; ownerId: string; kind: 'week' | 'month' | 'quarter'; startDate: string; endDate: string; parentId: string | null; revision: number; createdAt: string }
 export type TimeBlock = { id: string; ownerId: string; kind: 'activity' | 'work_session'; category: string; projectId: string | null; date: string; startMinute: number; endMinute: number; timezone: string; taskIds: string[]; linkedSessionId: string | null; closed: boolean; revision: number; createdAt: string; updatedAt: string }
 export type CalendarEvent = { id: string; ownerId: string; kind: 'meeting' | 'class' | 'other'; title: string; startAt: string; endAt: string; timezone: string; linkedTaskId: string | null; createdAt: string }
+export type RolloverEntry = { id: string; taskId: string; fromDate: string; toDate: string; at: string }
 export type Assessment = { id: string; taskId: string; score: ScoreInput; result: ScoreResult; createdAt: string; origin: 'human' | 'routine'; ruleVersion: 'v1' }
 export type Completion = { id: string; taskId: string; originalAt: string; currentAt: string | null; originalPoints: number | null; netPoints: number | null; lastConfirmedPoints?: number | null; scoreState: 'pending' | 'confirmed'; title: string; project: string }
 export type LedgerEntry = { id: string; completionId: string; taskId: string; kind: 'award' | 'adjust' | 'reverse' | 'restore'; delta: number; at: string; reason: string }
