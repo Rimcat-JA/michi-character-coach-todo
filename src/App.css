@@ -100,3 +100,21 @@
 .heatmap-day.unsynced { background: repeating-linear-gradient(45deg, #e3e3e3 0, #e3e3e3 3px, #fff 3px, #fff 6px); }
 .heatmap-detail { display: flex; justify-content: space-between; gap: 12px; border-top: 1px solid var(--border, #e0e3e8); padding: 9px 0; }
 @media (max-width: 700px) { .point-heatmap { grid-template-columns: repeat(7, minmax(0, 1fr)); } }
+.print-overlay { position: fixed; inset: 0; overflow: auto; z-index: 1000; background: rgba(20, 24, 34, .6); padding: 24px; }
+.print-sheet { max-width: 1000px; margin: 0 auto; padding: 24px; background: white; color: #20242b; border-radius: 12px; }
+.print-controls { margin-bottom: 24px; }
+.print-controls button { margin-right: 8px; }
+.print-sheet table { width: 100%; border-collapse: collapse; }
+.print-sheet th, .print-sheet td { border-bottom: 1px solid #cbd1d8; padding: 7px; text-align: left; overflow-wrap: anywhere; }
+.print-sheet thead { background: #f0f2f5; }
+@media print {
+  @page { size: A4; margin: 12mm; }
+  body { background: white !important; }
+  .sidebar, .topbar, .bottom-nav, .page-content > :not(.print-overlay), .print-controls { display: none !important; }
+  .app-shell, .main-area, .page-content, .print-overlay, .print-sheet { display: block !important; position: static !important; width: auto !important; max-width: none !important; height: auto !important; overflow: visible !important; margin: 0 !important; padding: 0 !important; border: 0 !important; box-shadow: none !important; background: white !important; }
+  .print-sheet { font: 10pt/1.35 sans-serif; color: black !important; }
+  .print-sheet h1 { font-size: 15pt; }
+  .print-sheet thead { display: table-header-group; }
+  .print-sheet tr { break-inside: avoid; page-break-inside: avoid; }
+  .print-sheet th, .print-sheet td { padding: 4mm 2mm; }
+}

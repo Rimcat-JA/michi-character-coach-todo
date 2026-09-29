@@ -39,6 +39,7 @@ import HabitsView from './HabitsView'
 import GoalsView from './GoalsView'
 import JournalView from './JournalView'
 import AnalyticsView from './AnalyticsView'
+import PrintPreview from './PrintPreview'
 import { FocusChoiceTools } from './FocusChoiceTools'
 import SuperFocusView from './SuperFocusView'
 import { setSpotlight } from './focus-tools'
@@ -182,6 +183,7 @@ function TasksView({ tasks, lists, settings, onEdit, onToggle, onNew, run }: { t
   const [dueDateFilter, setDueDateFilter] = useState('')
   const [showBulk, setShowBulk] = useState(false)
   const [selected, setSelected] = useState<Record<string, number>>({})
+  const [printOpen, setPrintOpen] = useState(false)
   const [bulkNotice, setBulkNotice] = useState('')
   const [smartListId, setSmartListId] = useState('')
   const ownerId = settings.profileId
@@ -220,7 +222,7 @@ function TasksView({ tasks, lists, settings, onEdit, onToggle, onNew, run }: { t
     <section className="card list-card">
       <div className="list-header"><span>表示 {shown.length} / 全体 {visible.length} 件{remaining > 0 ? ` · 残り${remaining}件` : ''}</span>{remaining > 0 && <button className="text-button" onClick={() => run(() => db.settings.update('main', { taskListLimit: null }).then(() => undefined), '全件表示にしました')}>全件表示</button>}<button className="text-button" onClick={() => setShowBulk(!showBulk)}>{showBulk ? '閉じる' : 'クイック追加・複数行入力'}</button></div>
       {showBulk && <Braindump />}
-      {filter !== 'trash' && shown.length > 0 && <div className="bulk-select-bar"><button className="text-button" onClick={() => setSelected(Object.fromEntries(shown.slice(0, 100).map(task => [task.id, task.revision])))}>表示中の先頭100件を選択</button><span>{Object.keys(selected).length} 件を選択中</span>{Object.keys(selected).length > 0 && <button className="text-button" onClick={() => setSelected({})}>選択を解除</button>}</div>}
+      {filter !== 'trash' && shown.length > 0 && <div className="bulk-select-bar"><button className="text-button" onClick={() => setSelected(Object.fromEntries(shown.slice(0, 100).map(task => [task.id, task.revision])))}>表示中の先頭100件を選択</button><span>{Object.keys(selected).length} 件を選択中</span>{Object.keys(selected).length > 0 && <><button className="text-button" onClick={() => setPrintOpen(true)}>選択した一覧を印刷</button><button className="text-button" onClick={() => setSelected({})}>選択を解除</button></>}</div>}
       {bulkNotice && <p role="status" className="bulk-notice">{bulkNotice}</p>}
       {Object.keys(selected).length > 0 && filter !== 'trash' && <BulkEdit items={Object.entries(selected).map(([id, revision]) => ({ id, revision }))} onDone={count => { setSelected({}); setBulkNotice(`${count}件を一括更新しました`) }} />}
       {shown.length ? shown.map(t => <div key={t.id} className="task-with-actions">
@@ -230,6 +232,7 @@ function TasksView({ tasks, lists, settings, onEdit, onToggle, onNew, run }: { t
         {filter === 'trash' ? <button className="ghost-action" onClick={() => run(() => restoreTask(t.id, t.revision))}><ArchiveRestore size={15} /> 復元</button> : <button className="ghost-action" onClick={() => run(() => trashTask(t.id, t.revision))}><Trash2 size={15} /> ゴミ箱</button>}
       </div>) : <Empty title="該当するタスクはありません" detail="検索条件を変えるか、新しく追加してください。" action={<button className="secondary-button" onClick={onNew}><Plus size={16} /> タスクを追加</button>} />}
     </section>
+    {printOpen && <PrintPreview tasks={tasks.filter(task => selected[task.id] !== undefined)} onClose={() => setPrintOpen(false)} />}
   </>
 }
 function BulkEdit({ items, onDone }: { items: { id: string; revision: number }[]; onDone: (count: number) => void }) {
