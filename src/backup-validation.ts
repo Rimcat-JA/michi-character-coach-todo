@@ -7,6 +7,7 @@ import { validateSmartListAst } from './smart-lists'
 import { NAV_FEATURE_IDS } from './navigation'
 import { OPTIONAL_FEATURE_IDS } from './features'
 import { validateWorkflowPreset } from './workflows'
+import { validateAppearance } from './appearance'
 
 export type Snapshot = {
   format: 'coachbundle'; version: 1; exportedAt: string
@@ -277,7 +278,7 @@ export function validateSnapshot(input: unknown): asserts input is Snapshot {
     if (!taskIds.has(attachment.taskId) || attachment.ownerId !== settings.profileId || !filled(attachment.name) || attachment.name.length > 200 || [...attachment.name].some(char => char.charCodeAt(0) < 32 || '\\/:*?"<>|'.includes(char)) || typeof attachment.mediaType !== 'string' || attachment.mediaType.length > 120 || !Number.isInteger(attachment.size) || attachment.size < 1 || attachment.size > 5 * 1024 * 1024 || !/^[a-f0-9]{64}$/.test(attachment.sha256) || !timestamp(attachment.createdAt) || typeof attachment.contentBase64 !== 'string' || !/^[A-Za-z0-9+/]*={0,2}$/.test(attachment.contentBase64) || attachment.contentBase64.length > Math.ceil(attachment.size / 3) * 4) throw new Error('添付が不正です')
   }
   if (containers.some(raw => (raw as Container).ownerId !== settings.profileId)) throw new Error('カテゴリ・プロジェクトの所有者が不正です')
-  const allowedSettings = new Set(['id', 'profileId', 'datasetId', 'createdAt', 'coachName', 'dailyMinutes', 'dailyPoints', 'notifications', 'aiEnabled', 'aiModel', 'daySectionMode', 'taskListLimit', 'automation', 'lastBackupAt', 'timeTargets', 'dayProgressBaseline', 'wallTiles', 'navDesktop', 'navMobile', 'hiddenFeatures', 'workflowPresets'])
+  const allowedSettings = new Set(['id', 'profileId', 'datasetId', 'createdAt', 'coachName', 'dailyMinutes', 'dailyPoints', 'notifications', 'aiEnabled', 'aiModel', 'daySectionMode', 'taskListLimit', 'automation', 'lastBackupAt', 'timeTargets', 'dayProgressBaseline', 'wallTiles', 'navDesktop', 'navMobile', 'hiddenFeatures', 'workflowPresets', 'appearance'])
   if (Object.keys(settings).some(key => !allowedSettings.has(key))) throw new Error('設定に未対応の項目があります')
   if (!filled(settings.profileId) || !filled(settings.datasetId) || !timestamp(settings.createdAt) || typeof settings.coachName !== 'string' || !Number.isInteger(settings.dailyMinutes) || settings.dailyMinutes < 0 || !Number.isInteger(settings.dailyPoints) || settings.dailyPoints < 0 || typeof settings.aiEnabled !== 'boolean' || typeof settings.notifications !== 'boolean' || !['A0', 'A1', 'A2'].includes(settings.automation) || !nullableString(settings.lastBackupAt) || (settings.lastBackupAt !== null && !timestamp(settings.lastBackupAt))) throw new Error('設定が不正です')
   for (const rule of themeRules) { if (rule.ownerId !== settings.profileId || !timestamp(rule.createdAt)) throw new Error('重点テーマが不正です'); validateThemeRule(rule) }
@@ -353,4 +354,5 @@ export function validateSnapshot(input: unknown): asserts input is Snapshot {
     if (!Array.isArray(settings.workflowPresets) || settings.workflowPresets.length > 100 || new Set(settings.workflowPresets.map(preset => preset.id)).size !== settings.workflowPresets.length) throw new Error('ワークフロープリセットが不正です')
     for (const preset of settings.workflowPresets) validateWorkflowPreset(preset)
   }
+  if (settings.appearance !== undefined) validateAppearance(settings.appearance)
 }

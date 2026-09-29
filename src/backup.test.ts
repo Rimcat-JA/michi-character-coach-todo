@@ -24,6 +24,7 @@ import { createTracker, recordTrackerEntry, saveDayNote } from './journal'
 import { recordPomodoro, startPomodoro } from './pomodoro'
 import { addWallTile } from './wall'
 import { saveWorkflowPreset } from './workflows'
+import { saveAppearance } from './appearance'
 import { inspectBackup, restoreBackup } from './backup'
 import { validateSnapshot, type Snapshot } from './backup-validation'
 
@@ -42,6 +43,17 @@ async function snapshot(): Promise<Snapshot> {
 }
 
 describe('バックアップの復元前検証', () => {
+  it('見た目の設定を復元し、不正な配色を拒否する', async () => {
+    await saveAppearance({ theme: 'high-contrast', accent: 'blue', fontScale: 110, iconStyle: 'bold' })
+    const saved = await snapshot()
+    expect(() => validateSnapshot(saved)).not.toThrow()
+    const corrupt = structuredClone(saved)
+    corrupt.settings[0].appearance!.accent = 'invalid' as 'blue'
+    expect(() => validateSnapshot(corrupt)).toThrow('見た目')
+    await db.settings.update('main', { appearance: undefined })
+    await restoreBackup(saved)
+    expect((await db.settings.get('main'))?.appearance).toMatchObject({ theme: 'high-contrast', accent: 'blue', fontScale: 110, iconStyle: 'bold' })
+  })
   it('版付きワークフローを復元し、共有対象外の設定を含むものを拒否する', async () => {
     await saveWorkflowPreset('自分の設定')
     const saved = await snapshot()
