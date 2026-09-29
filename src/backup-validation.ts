@@ -1,4 +1,4 @@
-import { calculateScore, validateTaskInput, validateDate, type Assessment, type Audit, type CalendarEvent, type ChecklistItem, type CommandReceipt, type Completion, type Container, type FocusProjectSelection, type LabelDefinition, type LabelGroup, type LedgerEntry, type PlanningBucket, type RolloverEntry, type Routine, type SavedTemplate, type Settings, type SmartList, type Task, type TaskAttachment, type TaskComment, type TaskDependency, type TaskNote, type ThemeRule, type TimeBlock, type WorkSession } from './domain'
+import { calculateScore, validateTaskInput, validateDate, type Assessment, type Audit, type CalendarEvent, type ChecklistItem, type CommandReceipt, type Completion, type Container, type FocusProjectSelection, type Habit, type HabitLog, type LabelDefinition, type LabelGroup, type LedgerEntry, type PlanningBucket, type RolloverEntry, type Routine, type SavedTemplate, type Settings, type SmartList, type Task, type TaskAttachment, type TaskComment, type TaskDependency, type TaskNote, type ThemeRule, type TimeBlock, type WorkSession } from './domain'
 import { validateLabelSelection } from './labels'
 import { validateDependencyGraph } from './dependencies'
 import { validatePlanningBuckets } from './period-planning'
@@ -25,6 +25,8 @@ export type Snapshot = {
   themeRules?: ThemeRule[]
   smartLists?: SmartList[]
   focusSelections?: FocusProjectSelection[]
+  habits?: Habit[]
+  habitLogs?: HabitLog[]
 }
 
 const tableNames = ['tasks', 'assessments', 'completions', 'ledger', 'routines', 'sessions', 'commands', 'audits', 'settings'] as const
@@ -267,6 +269,19 @@ export function validateSnapshot(input: unknown): asserts input is Snapshot {
   if (settings.aiModel !== undefined && (typeof settings.aiModel !== 'string' || settings.aiModel.length > 120)) throw new Error('AIモデルIDが不正です')
   if (settings.daySectionMode !== undefined && !['halfday', 'category', 'timeblock', 'custom'].includes(settings.daySectionMode)) throw new Error('今日の表示区分が不正です')
   if (settings.taskListLimit !== undefined && settings.taskListLimit !== null && ![5, 10, 20, 50].includes(settings.taskListLimit)) throw new Error('一覧の表示件数が不正です')
+  if (input.habits !== undefined && !Array.isArray(input.habits)) throw new Error('習慣が不正です')
+  if (input.habitLogs !== undefined && !Array.isArray(input.habitLogs)) throw new Error('習慣ログが不正です')
+  const habits = (input.habits ?? []) as Habit[], habitLogs = (input.habitLogs ?? []) as HabitLog[]
+  const habitIds = unique(habits, '習慣', 'id')
+  for (const habit of habits) {
+    if (habit.ownerId !== settings.profileId || !filled(habit.title) || habit.title.length > 100 || !filled(habit.unit) || habit.unit.length > 30 || !['increase', 'decrease'].includes(habit.direction) || !['daily', 'weekly', 'monthly'].includes(habit.cadence) || !Number.isFinite(habit.targetAmount) || habit.targetAmount < 0 || habit.targetAmount > 1000000 || !Array.isArray(habit.weekdays) || new Set(habit.weekdays).size !== habit.weekdays.length || habit.weekdays.some(day => !Number.isInteger(day) || day < 0 || day > 6) || !nullableString(habit.routineId) || (habit.routineId !== null && !routineIds.has(habit.routineId)) || typeof habit.active !== 'boolean' || !timestamp(habit.createdAt) || !timestamp(habit.updatedAt)) throw new Error('習慣が不正です')
+    try { new Intl.DateTimeFormat('ja-JP', { timeZone: habit.timezone }) } catch { throw new Error('習慣のtimezoneが不正です') }
+  }
+  unique(habitLogs, '習慣ログ', 'id')
+  for (const log of habitLogs) {
+    validateDate(log.date, '習慣ログ日')
+    if (!habitIds.has(log.habitId) || log.id !== `${log.habitId}:${log.date}` || !Number.isFinite(log.amount) || log.amount < 0 || log.amount > 1000000 || !['manual', 'task'].includes(log.source) || !nullableString(log.taskId) || (log.taskId !== null && !taskIds.has(log.taskId)) || !Number.isInteger(log.revision) || log.revision < 1 || !timestamp(log.updatedAt) || !Array.isArray(log.history) || log.history.length > 1000 || log.history.some(entry => !Number.isFinite(entry.amount) || entry.amount < 0 || entry.amount > 1000000 || !timestamp(entry.at) || !filled(entry.reason) || entry.reason.length > 300)) throw new Error('習慣ログが不正です')
+  }
   if (settings.timeTargets !== undefined) {
     if (!Array.isArray(settings.timeTargets) || settings.timeTargets.length > 100 || new Set(settings.timeTargets.map(target => target.id)).size !== settings.timeTargets.length) throw new Error('時間目標が不正です')
     for (const target of settings.timeTargets) {
