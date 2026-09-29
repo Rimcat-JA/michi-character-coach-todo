@@ -1,5 +1,5 @@
 import Dexie, { type EntityTable } from 'dexie'
-import type { Assessment, Audit, ChecklistItem, CommandReceipt, Completion, Container, LabelDefinition, LabelGroup, LedgerEntry, Routine, SavedTemplate, Settings, Task, WorkSession } from './domain'
+import type { Assessment, Audit, ChecklistItem, CommandReceipt, Completion, Container, LabelDefinition, LabelGroup, LedgerEntry, Routine, SavedTemplate, Settings, Task, TaskAttachment, TaskComment, TaskNote, WorkSession } from './domain'
 
 export const db = new Dexie('character-coach-v1') as Dexie & {
   tasks: EntityTable<Task, 'id'>
@@ -16,6 +16,9 @@ export const db = new Dexie('character-coach-v1') as Dexie & {
   labelGroups: EntityTable<LabelGroup, 'id'>
   labelDefinitions: EntityTable<LabelDefinition, 'id'>
   savedTemplates: EntityTable<SavedTemplate, 'id'>
+  taskNotes: EntityTable<TaskNote, 'id'>
+  taskComments: EntityTable<TaskComment, 'id'>
+  taskAttachments: EntityTable<TaskAttachment, 'id'>
 }
 db.version(1).stores({
   tasks: 'id, &generationKey, status, scheduledDate, dueDate, project, routineId, deletedAt, updatedAt',
@@ -56,6 +59,15 @@ db.version(4).stores({
   containers: 'id, parentId, kind, ownerId, deletedAt', checklistItems: 'id, taskId, convertedTaskId',
   labelGroups: 'id, ownerId', labelDefinitions: 'id, groupId, ownerId, name',
   savedTemplates: 'id, familyId, ownerId, kind, name, version'
+})
+db.version(5).stores({
+  tasks: 'id, &generationKey, status, scheduledDate, dueDate, project, containerId, routineId, deletedAt, updatedAt',
+  assessments: 'id, taskId, createdAt', completions: 'id, &taskId, currentAt',
+  ledger: 'id, completionId, taskId, at', routines: 'id, active', sessions: 'id, taskId, startedAt',
+  commands: 'key', audits: 'id, taskId, at', settings: 'id',
+  containers: 'id, parentId, kind, ownerId, deletedAt', checklistItems: 'id, taskId, convertedTaskId',
+  labelGroups: 'id, ownerId', labelDefinitions: 'id, groupId, ownerId, name', savedTemplates: 'id, familyId, ownerId, kind, name, version',
+  taskNotes: 'id, taskId, ownerId', taskComments: 'id, taskId, ownerId', taskAttachments: 'id, taskId, ownerId'
 })
 
 export async function ensureSettings() {

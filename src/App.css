@@ -11,3 +11,10 @@
 .container-create{display:grid;grid-template-columns:130px minmax(120px,1fr) minmax(160px,1fr) auto;gap:8px}.container-create input,.container-create select,.container-row input,.container-row select{min-height:36px;border:1px solid #e5e4ec;border-radius:8px;background:white;padding:6px 9px;font-size:11px;min-width:0}.container-row{display:grid;grid-template-columns:minmax(200px,1fr) auto minmax(150px,220px);gap:12px;align-items:center;border-top:1px solid #f0eef4;padding:12px 0;font-size:11px;color:#817b94}.container-main{display:flex;align-items:center;gap:8px;min-width:0;flex-wrap:wrap}.container-main strong{color:#363247;overflow-wrap:anywhere}.container-row .text-button{font-size:10px}
 @media(max-width:760px){.container-create,.container-row{grid-template-columns:1fr}.container-row{gap:7px}.container-create button{justify-content:center}}
 .checklist-panel{border-top:1px solid #ece9f3;padding-top:15px;margin-top:18px}.checklist-panel h3{font-size:13px;margin:0 0 5px}.checklist-panel p{font-size:10px;color:#817b94;margin:0 0 10px}.checklist-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:7px 0;border-top:1px solid #f3f1f7;font-size:11px}.checklist-row>span:nth-child(2){flex:1}.checklist-row input[type=checkbox]{accent-color:#7763df}.checklist-add,.checklist-convert{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:10px}.checklist-add input,.checklist-convert input{min-height:35px;border:1px solid #e5e4ec;border-radius:8px;padding:6px 9px;font-size:11px;flex:1;min-width:130px}.checklist-convert{width:100%;margin:0 0 5px 22px}
+.task-materials { margin-top: 22px; padding-top: 18px; border-top: 1px solid #e8e6f1; }
+.task-materials h3 { margin: 0 0 8px; font-size: 16px; }
+.material-block { display: flex; flex-direction: column; align-items: flex-start; gap: 9px; margin-top: 18px; }
+.material-block > strong { font-size: 14px; }
+.material-block textarea, .material-block select { width: 100%; }
+.material-entry { width: 100%; background: #f8f7fc; border-radius: 10px; padding: 10px 12px; overflow-wrap: anywhere; }
+.material-entry p { margin: 6px 0 0; white-space: pre-wrap; }
