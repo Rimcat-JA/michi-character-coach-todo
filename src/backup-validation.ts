@@ -160,6 +160,8 @@ export function validateSnapshot(input: unknown): asserts input is Snapshot {
   for (const raw of tables.completions) {
     const completion = raw as Completion
     if (!taskIds.has(completion.taskId) || !timestamp(completion.originalAt) || !nullableString(completion.currentAt) || (completion.currentAt !== null && !timestamp(completion.currentAt)) || !points(completion.originalPoints) || !points(completion.netPoints) || (completion.lastConfirmedPoints !== undefined && !points(completion.lastConfirmedPoints)) || !['pending', 'confirmed'].includes(completion.scoreState) || typeof completion.title !== 'string' || typeof completion.project !== 'string') throw new Error('完了履歴が不正です')
+    if (completion.localDate !== undefined) validateDate(completion.localDate, '完了日')
+    if (completion.timezone !== undefined) { try { new Intl.DateTimeFormat('ja-JP', { timeZone: completion.timezone }) } catch { throw new Error('完了timezoneが不正です') } }
     completionById.set(completion.id, completion)
   }
 
