@@ -1,12 +1,13 @@
-import type { Task } from './domain'
+import type { Task, TaskDependency } from './domain'
+import { executableTasks } from './dependencies'
 
 export function reviewDueTasks(tasks: Task[], date: string): Task[] {
   return tasks.filter(task => !task.deletedAt && task.status === 'open' && task.reviewDate !== null && task.reviewDate <= date)
     .sort((a, b) => a.reviewDate!.localeCompare(b.reviewDate!) || b.importance - a.importance)
 }
 
-export function suggestedTasks(tasks: Task[], date: string, limit = 3): Task[] {
-  return tasks.filter(task => !task.deletedAt && task.status === 'open' && !task.backburner && (!task.availableFrom || task.availableFrom <= date) && (!task.deferredUntil || task.deferredUntil <= date))
+export function suggestedTasks(tasks: Task[], date: string, limit = 3, dependencies: TaskDependency[] = []): Task[] {
+  return executableTasks(tasks, dependencies).filter(task => !task.backburner && (!task.availableFrom || task.availableFrom <= date) && (!task.deferredUntil || task.deferredUntil <= date))
     .sort((a, b) => (a.dueDate ?? '9999').localeCompare(b.dueDate ?? '9999') || b.importance - a.importance)
     .slice(0, limit)
 }

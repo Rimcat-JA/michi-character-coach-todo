@@ -1,5 +1,6 @@
-import { calculateScore, validateTaskInput, validateDate, type Assessment, type Audit, type ChecklistItem, type CommandReceipt, type Completion, type Container, type LabelDefinition, type LabelGroup, type LedgerEntry, type Routine, type SavedTemplate, type Settings, type Task, type TaskAttachment, type TaskComment, type TaskNote, type WorkSession } from './domain'
+import { calculateScore, validateTaskInput, validateDate, type Assessment, type Audit, type ChecklistItem, type CommandReceipt, type Completion, type Container, type LabelDefinition, type LabelGroup, type LedgerEntry, type Routine, type SavedTemplate, type Settings, type Task, type TaskAttachment, type TaskComment, type TaskDependency, type TaskNote, type WorkSession } from './domain'
 import { validateLabelSelection } from './labels'
+import { validateDependencyGraph } from './dependencies'
 
 export type Snapshot = {
   format: 'coachbundle'; version: 1; exportedAt: string
@@ -13,6 +14,7 @@ export type Snapshot = {
   taskNotes?: TaskNote[]
   taskComments?: TaskComment[]
   taskAttachments?: (Omit<TaskAttachment, 'blob'> & { contentBase64: string })[]
+  taskDependencies?: TaskDependency[]
 }
 
 const tableNames = ['tasks', 'assessments', 'completions', 'ledger', 'routines', 'sessions', 'commands', 'audits', 'settings'] as const
@@ -65,6 +67,11 @@ export function validateSnapshot(input: unknown): asserts input is Snapshot {
     }
   }
   const taskIds = unique(tables.tasks, 'tasks', 'id')
+  if (input.taskDependencies !== undefined && !Array.isArray(input.taskDependencies)) throw new Error('taskDependenciesが不正です')
+  const dependencies = (input.taskDependencies ?? []) as TaskDependency[]
+  unique(dependencies, 'taskDependencies', 'id')
+  for (const edge of dependencies) if (!timestamp(edge.createdAt)) throw new Error('依存関係が不正です')
+  validateDependencyGraph(dependencies, taskIds)
   if (input.checklistItems !== undefined && !Array.isArray(input.checklistItems)) throw new Error('checklistItemsが不正です')
   const checklistItems = (input.checklistItems ?? []) as unknown[]
   unique(checklistItems, 'checklistItems', 'id')

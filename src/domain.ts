@@ -29,6 +29,7 @@ export type SavedTemplate = { id: string; familyId: string; ownerId: string; nam
 export type TaskNote = { id: string; taskId: string; ownerId: string; kind: 'self' | 'source'; body: string; createdAt: string }
 export type TaskComment = { id: string; taskId: string; ownerId: string; body: string; createdAt: string }
 export type TaskAttachment = { id: string; taskId: string; ownerId: string; name: string; mediaType: string; size: number; sha256: string; blob: Blob; createdAt: string }
+export type TaskDependency = { id: string; taskId: string; dependsOnId: string; createdAt: string }
 export type Assessment = { id: string; taskId: string; score: ScoreInput; result: ScoreResult; createdAt: string; origin: 'human' | 'routine'; ruleVersion: 'v1' }
 export type Completion = { id: string; taskId: string; originalAt: string; currentAt: string | null; originalPoints: number | null; netPoints: number | null; lastConfirmedPoints?: number | null; scoreState: 'pending' | 'confirmed'; title: string; project: string }
 export type LedgerEntry = { id: string; completionId: string; taskId: string; kind: 'award' | 'adjust' | 'reverse' | 'restore'; delta: number; at: string; reason: string }
