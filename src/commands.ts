@@ -1,0 +1,183 @@
+import { db } from './db'
+import { addDays, calculateScore, emptyScore, today, uid, validateDate, validateTaskInput, type Assessment, type Routine, type Task } from './domain'
+
+export class ConflictError extends Error { constructor() { super('別の画面で更新されました。再読み込みして差分を確認してください。') } }
+const now = () => new Date().toISOString()
+const tables = [db.tasks, db.assessments, db.completions, db.ledger, db.routines, db.sessions, db.commands, db.audits]
+async function receipt<T>(key: string, payload: unknown, run: () => Promise<T>): Promise<T> {
+  const hash = JSON.stringify(payload)
+  return db.transaction('rw', tables, async () => {
+    const prior = await db.commands.get(key)
+    if (prior) {
+      if (prior.hash !== hash) throw new Error('IDEMPOTENCY_MISMATCH')
+      return prior.resultId as T
+    }
+    const result = await run()
+    await db.commands.add({ key, hash, resultId: String(result ?? ''), at: now() })
+    return result
+  })
+}
+export type TaskInput = Pick<Task, 'title' | 'notes' | 'project' | 'labels' | 'scheduledDate' | 'dueDate' | 'targetDate' | 'reviewDate' | 'availableFrom' | 'importance' | 'score'>
+export const newTaskInput = (): TaskInput => ({ title: '', notes: '', project: '', labels: [], scheduledDate: null, dueDate: null, targetDate: null, reviewDate: null, availableFrom: null, importance: 1, score: emptyScore() })
+
+async function addTask(input: TaskInput, generationKey: string, routineId: string | null): Promise<string> {
+  validateTaskInput(input)
+  for (const [name, value] of [['予定日', input.scheduledDate], ['締め切り', input.dueDate], ['目標日', input.targetDate], ['見直し日', input.reviewDate], ['開始可能日', input.availableFrom]] as const) validateDate(value, name)
+  const result = calculateScore(input.score)
+  const id = uid(), assessmentId = uid(), at = now()
+  const task: Task = { ...input, title: input.title.trim(), labels: [...input.labels], score: { ...input.score }, id, generationKey, routineId, effectivePoints: result.effective, assessmentId, status: 'open', revision: 1, createdAt: at, updatedAt: at, deletedAt: null }
+  const assessment: Assessment = { id: assessmentId, taskId: id, score: { ...input.score }, result, createdAt: at, origin: routineId ? 'routine' : 'human', ruleVersion: 'v1' }
+  await db.tasks.add(task); await db.assessments.add(assessment)
+  await db.audits.add({ id: uid(), taskId: id, operation: 'create', at, detail: routineId ? 'ルーティンから作成' : '本人が作成' })
+  return id
+}
+export async function createTask(input: TaskInput, key: string = uid()) {
+  return receipt(key, { operation: 'create', input }, () => addTask(input, key, null))
+}
+export async function updateTask(id: string, expectedRevision: number, input: TaskInput, key: string = uid()) {
+  return receipt(key, { operation: 'update', id, expectedRevision, input }, async () => {
+    validateTaskInput(input)
+    for (const [name, value] of [['予定日', input.scheduledDate], ['締め切り', input.dueDate], ['目標日', input.targetDate], ['見直し日', input.reviewDate], ['開始可能日', input.availableFrom]] as const) validateDate(value, name)
+    const old = await db.tasks.get(id)
+    if (!old || old.deletedAt) throw new Error('タスクが見つかりません')
+    if (old.revision !== expectedRevision) throw new ConflictError()
+    const scoreChanged = JSON.stringify(old.score) !== JSON.stringify(input.score)
+    const result = calculateScore(input.score)
+    const assessmentId = scoreChanged ? uid() : old.assessmentId
+    if (scoreChanged) await db.assessments.add({ id: assessmentId, taskId: id, score: { ...input.score }, result, createdAt: now(), origin: 'human', ruleVersion: 'v1' })
+    await db.tasks.put({ ...old, ...input, title: input.title.trim(), labels: [...input.labels], score: { ...input.score }, assessmentId, effectivePoints: result.effective, revision: old.revision + 1, updatedAt: now() })
+    await db.audits.add({ id: uid(), taskId: id, operation: 'update', at: now(), detail: '本人が編集' })
+    return id
+  })
+}
+export async function completeTask(id: string, expectedRevision: number, key: string = uid()) {
+  return receipt(key, { operation: 'complete', id, expectedRevision }, async () => {
+    const task = await db.tasks.get(id)
+    if (!task || task.deletedAt) throw new Error('タスクが見つかりません')
+    if (task.revision !== expectedRevision) throw new ConflictError()
+    if (task.status === 'completed') return id
+    const at = now(), existing = await db.completions.where('taskId').equals(id).first()
+    if (existing) {
+      const points = task.effectivePoints
+      await db.completions.put({ ...existing, currentAt: at, netPoints: points, scoreState: points === null ? 'pending' : 'confirmed' })
+      if (points !== null) await db.ledger.add({ id: uid(), completionId: existing.id, taskId: id, kind: 'restore', delta: points, at, reason: '完了を再確定' })
+    } else {
+      const completionId = uid(), points = task.effectivePoints
+      await db.completions.add({ id: completionId, taskId: id, originalAt: at, currentAt: at, originalPoints: points, netPoints: points, scoreState: points === null ? 'pending' : 'confirmed', title: task.title, project: task.project })
+      if (points !== null) await db.ledger.add({ id: uid(), completionId, taskId: id, kind: 'award', delta: points, at, reason: '完了' })
+    }
+    await db.tasks.put({ ...task, status: 'completed', revision: task.revision + 1, updatedAt: at })
+    await db.audits.add({ id: uid(), taskId: id, operation: 'complete', at, detail: task.effectivePoints === null ? 'ポイント未設定で完了' : `${task.effectivePoints}ptで完了` })
+    return id
+  })
+}
+export async function undoCompletion(id: string, expectedRevision: number, key: string = uid()) {
+  return receipt(key, { operation: 'undo', id, expectedRevision }, async () => {
+    const task = await db.tasks.get(id)
+    if (!task) throw new Error('タスクが見つかりません')
+    if (task.revision !== expectedRevision) throw new ConflictError()
+    if (task.status !== 'completed') return id
+    const completion = await db.completions.where('taskId').equals(id).first()
+    if (!completion || !completion.currentAt) throw new Error('完了記録がありません')
+    if (completion.netPoints !== null) await db.ledger.add({ id: uid(), completionId: completion.id, taskId: id, kind: 'reverse', delta: -completion.netPoints, at: now(), reason: '完了取消' })
+    await db.completions.put({ ...completion, currentAt: null, netPoints: null })
+    await db.tasks.put({ ...task, status: 'open', revision: task.revision + 1, updatedAt: now() })
+    await db.audits.add({ id: uid(), taskId: id, operation: 'undo', at: now(), detail: '完了を取消' })
+    return id
+  })
+}
+export async function correctCompletion(id: string, points: number, reason: string, key: string = uid()) {
+  return receipt(key, { operation: 'correct', id, points, reason }, async () => {
+    if (!Number.isInteger(points) || points < 0 || points > 100000) throw new Error('ポイントは0〜100000の整数で入力してください')
+    if (!reason.trim()) throw new Error('訂正理由を入力してください')
+    const completion = await db.completions.where('taskId').equals(id).first()
+    if (!completion?.currentAt) throw new Error('有効な完了記録がありません')
+    const delta = points - (completion.netPoints ?? 0)
+    await db.ledger.add({ id: uid(), completionId: completion.id, taskId: id, kind: 'adjust', delta, at: now(), reason: reason.trim() })
+    await db.completions.put({ ...completion, netPoints: points, scoreState: 'confirmed' })
+    await db.audits.add({ id: uid(), taskId: id, operation: 'correct_points', at: now(), detail: `${points}pt: ${reason.trim()}` })
+    return id
+  })
+}
+export async function trashTask(id: string, expectedRevision: number, key: string = uid()) {
+  return receipt(key, { operation: 'trash', id, expectedRevision }, async () => {
+    const task = await db.tasks.get(id)
+    if (!task) throw new Error('タスクが見つかりません')
+    if (task.revision !== expectedRevision) throw new ConflictError()
+    await db.tasks.put({ ...task, deletedAt: now(), revision: task.revision + 1, updatedAt: now() })
+    await db.audits.add({ id: uid(), taskId: id, operation: 'trash', at: now(), detail: '表示上の削除。実績は維持' })
+    return id
+  })
+}
+export async function restoreTask(id: string, expectedRevision: number, key: string = uid()) {
+  return receipt(key, { operation: 'restore_task', id, expectedRevision }, async () => {
+    const task = await db.tasks.get(id)
+    if (!task) throw new Error('タスクが見つかりません')
+    if (task.revision !== expectedRevision) throw new ConflictError()
+    await db.tasks.put({ ...task, deletedAt: null, revision: task.revision + 1, updatedAt: now() })
+    return id
+  })
+}
+
+export async function createRoutine(input: Omit<Routine, 'id' | 'revision' | 'createdAt'>, key: string = uid()) {
+  return receipt(key, { operation: 'routine_create', input }, async () => {
+    if (!input.title.trim()) throw new Error('ルーティン名を入力してください')
+    if (!Number.isInteger(input.interval) || input.interval < 1 || input.interval > 365) throw new Error('間隔は1〜365で入力してください')
+    validateDate(input.startDate, '開始日'); validateDate(input.endDate, '終了日')
+    if (input.endDate && input.endDate < input.startDate) throw new Error('終了日は開始日以降にしてください')
+    if (!Number.isInteger(input.monthDay) || input.monthDay < 1 || input.monthDay > 31) throw new Error('月の日は1〜31で指定してください')
+    if (input.weekdays.some(d => !Number.isInteger(d) || d < 0 || d > 6)) throw new Error('曜日が不正です')
+    calculateScore(input.score)
+    const id = uid()
+    await db.routines.add({ ...input, title: input.title.trim(), id, revision: 1, createdAt: now() })
+    return id
+  })
+}
+function matchesRoutine(r: Routine, date: string) {
+  if (date < r.startDate || (r.endDate && date > r.endDate)) return false
+  const start = new Date(`${r.startDate}T12:00:00`), current = new Date(`${date}T12:00:00`)
+  const days = Math.round((current.getTime() - start.getTime()) / 86400000)
+  if (r.cadence === 'daily') return days % r.interval === 0
+  if (r.cadence === 'weekly') return Math.floor(days / 7) % r.interval === 0 && r.weekdays.includes(current.getDay())
+  if (r.cadence === 'monthly') {
+    const months = (current.getFullYear() - start.getFullYear()) * 12 + current.getMonth() - start.getMonth()
+    const last = new Date(current.getFullYear(), current.getMonth() + 1, 0).getDate()
+    return months >= 0 && months % r.interval === 0 && current.getDate() === Math.min(r.monthDay, last)
+  }
+  return false
+}
+export async function expandRoutines(from = addDays(today(), -30), days = 120) {
+  const routines = await db.routines.filter(r => r.active).toArray()
+  let count = 0
+  for (const r of routines) {
+    if (r.cadence === 'after_completion') {
+      const occurrences = await db.tasks.where('routineId').equals(r.id).toArray()
+      if (occurrences.length === 0) {
+        const key = `${r.id}:${r.startDate}`
+        await db.transaction('rw', db.tasks, db.assessments, db.audits, async () => { if (!(await db.tasks.where('generationKey').equals(key).first())) { await addTask({ ...newTaskInput(), title: r.title, project: r.project, scheduledDate: r.startDate, score: r.score }, key, r.id); count++ } })
+      } else {
+        const latest = occurrences.sort((a, b) => (b.scheduledDate ?? '').localeCompare(a.scheduledDate ?? ''))[0]
+        const completed = await db.completions.where('taskId').equals(latest.id).first()
+        if (completed?.currentAt) {
+          const date = addDays(today(new Date(completed.currentAt)), r.interval), key = `${r.id}:${date}`
+          await db.transaction('rw', db.tasks, db.assessments, db.audits, async () => { if (!(await db.tasks.where('generationKey').equals(key).first())) { await addTask({ ...newTaskInput(), title: r.title, project: r.project, scheduledDate: date, score: r.score }, key, r.id); count++ } })
+        }
+      }
+      continue
+    }
+    for (let i = 0; i < days; i++) {
+      const date = addDays(from, i)
+      if (!matchesRoutine(r, date)) continue
+      const key = `${r.id}:${date}`
+      await db.transaction('rw', db.tasks, db.assessments, db.audits, async () => {
+        if (!(await db.tasks.where('generationKey').equals(key).first())) { await addTask({ ...newTaskInput(), title: r.title, project: r.project, scheduledDate: date, score: r.score }, key, r.id); count++ }
+      })
+    }
+  }
+  return count
+}
+export async function logSession(taskId: string, startedAt: string, endedAt: string) {
+  const minutes = Math.max(0, Math.round((new Date(endedAt).getTime() - new Date(startedAt).getTime()) / 60000))
+  if (minutes > 10080) throw new Error('記録時間が長すぎます')
+  await db.sessions.add({ id: uid(), taskId, startedAt, endedAt, minutes })
+}
