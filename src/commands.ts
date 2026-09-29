@@ -19,8 +19,8 @@ async function receipt<T>(key: string, payload: unknown, run: () => Promise<T>):
     return result
   })
 }
-export type TaskInput = Pick<Task, 'title' | 'notes' | 'project' | 'labels' | 'scheduledDate' | 'dueDate' | 'targetDate' | 'reviewDate' | 'availableFrom' | 'importance' | 'score'> & { containerId?: string | null }
-export const newTaskInput = (): TaskInput => ({ title: '', notes: '', project: '', containerId: null, labels: [], scheduledDate: null, dueDate: null, targetDate: null, reviewDate: null, availableFrom: null, importance: 1, score: emptyScore() })
+export type TaskInput = Pick<Task, 'title' | 'notes' | 'project' | 'labels' | 'scheduledDate' | 'dueDate' | 'targetDate' | 'reviewDate' | 'availableFrom' | 'importance' | 'score'> & { containerId?: string | null; deferredUntil?: string | null }
+export const newTaskInput = (): TaskInput => ({ title: '', notes: '', project: '', containerId: null, labels: [], scheduledDate: null, dueDate: null, targetDate: null, reviewDate: null, availableFrom: null, deferredUntil: null, importance: 1, score: emptyScore() })
 
 async function resolvedProject(input: TaskInput): Promise<string> {
   if (!input.containerId) return input.project
@@ -33,7 +33,7 @@ async function resolvedProject(input: TaskInput): Promise<string> {
 export async function addTask(input: TaskInput, generationKey: string, routineId: string | null): Promise<string> {
   validateTaskInput(input)
   await validateLabelsForOwner(input.labels)
-  for (const [name, value] of [['予定日', input.scheduledDate], ['締め切り', input.dueDate], ['目標日', input.targetDate], ['見直し日', input.reviewDate], ['開始可能日', input.availableFrom]] as const) validateDate(value, name)
+  for (const [name, value] of [['予定日', input.scheduledDate], ['締め切り', input.dueDate], ['目標日', input.targetDate], ['見直し日', input.reviewDate], ['開始可能日', input.availableFrom], ['延期終了日', input.deferredUntil ?? null]] as const) validateDate(value, name)
   const result = calculateScore(input.score)
   const project = await resolvedProject(input)
   const id = uid(), assessmentId = uid(), at = now()
@@ -99,7 +99,7 @@ export async function updateTask(id: string, expectedRevision: number, input: Ta
   return receipt(key, { operation: 'update', id, expectedRevision, input }, async () => {
     validateTaskInput(input)
     await validateLabelsForOwner(input.labels)
-    for (const [name, value] of [['予定日', input.scheduledDate], ['締め切り', input.dueDate], ['目標日', input.targetDate], ['見直し日', input.reviewDate], ['開始可能日', input.availableFrom]] as const) validateDate(value, name)
+    for (const [name, value] of [['予定日', input.scheduledDate], ['締め切り', input.dueDate], ['目標日', input.targetDate], ['見直し日', input.reviewDate], ['開始可能日', input.availableFrom], ['延期終了日', input.deferredUntil ?? null]] as const) validateDate(value, name)
     const old = await db.tasks.get(id)
     if (!old || old.deletedAt) throw new Error('タスクが見つかりません')
     if (old.revision !== expectedRevision) throw new ConflictError()

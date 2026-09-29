@@ -14,7 +14,7 @@ export type ScoreResult = { effective: number | null; lower: number | null; uppe
 export type Task = {
   id: string; generationKey: string; routineId: string | null; title: string; notes: string
   project: string; containerId?: string | null; labels: string[]; scheduledDate: string | null; dueDate: string | null
-  targetDate: string | null; reviewDate: string | null; availableFrom: string | null
+  targetDate: string | null; reviewDate: string | null; availableFrom: string | null; deferredUntil?: string | null
   importance: number; score: ScoreInput; effectivePoints: number | null
   assessmentId: string; status: 'open' | 'completed'; revision: number
   createdAt: string; updatedAt: string; deletedAt: string | null
