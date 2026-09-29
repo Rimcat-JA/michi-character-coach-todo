@@ -81,6 +81,7 @@ async function summarizeWithOpenRouter({ model, kind, text }) {
 }
 
 app.whenReady().then(() => {
+  let miniWin = null
   ipcMain.handle('michi:ai-status', async event => {
     assertAppFrame(event)
     return { secureStorage: safeStorage.isEncryptionAvailable(), configured: Boolean(await loadKey()) }
@@ -139,6 +140,28 @@ app.whenReady().then(() => {
   win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
   win.webContents.on('will-navigate', (event, url) => { if (!url.startsWith('michi://app/')) event.preventDefault() })
   win.loadURL('michi://app/index.html')
+  ipcMain.handle('michi:open-top-of-mind', event => {
+    assertAppFrame(event)
+    if (miniWin && !miniWin.isDestroyed()) { miniWin.show(); miniWin.focus(); return true }
+    miniWin = new BrowserWindow({
+      width: 390, height: 440, minWidth: 340, minHeight: 360,
+      alwaysOnTop: true, autoHideMenuBar: true, backgroundColor: '#f7f7fb', title: 'michi · Top of Mind',
+      webPreferences: { nodeIntegration: false, contextIsolation: true, sandbox: true, webSecurity: true, preload: path.join(__dirname, 'preload.cjs') }
+    })
+    miniWin.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+    miniWin.webContents.on('will-navigate', (event, url) => { if (!url.startsWith('michi://app/')) event.preventDefault() })
+    miniWin.on('closed', () => { miniWin = null })
+    miniWin.loadURL('michi://app/index.html#mini')
+    return true
+  })
+  ipcMain.handle('michi:show-main', event => {
+    assertAppFrame(event)
+    if (win.isDestroyed()) return false
+    if (win.isMinimized()) win.restore()
+    win.show(); win.focus()
+    return true
+  })
+  win.on('closed', () => { if (miniWin && !miniWin.isDestroyed()) miniWin.close() })
 })
 
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit() })

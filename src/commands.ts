@@ -253,11 +253,19 @@ export async function expandRoutines(from = addDays(today(), -30), days = 120) {
   }
   return count
 }
-export async function logSession(taskId: string, startedAt: string, endedAt: string) {
+export async function logSession(taskId: string, startedAt: string, endedAt: string, sessionId: string = uid()) {
   const start = Date.parse(startedAt), end = Date.parse(endedAt)
   if (!Number.isFinite(start) || !Number.isFinite(end) || new Date(start).toISOString() !== startedAt || new Date(end).toISOString() !== endedAt || end < start) throw new Error('作業時間の日時が不正です')
-  if (!(await db.tasks.get(taskId))) throw new Error('作業対象のタスクがありません')
+  if (!sessionId || sessionId.length > 500) throw new Error('作業区間のIDが不正です')
   const minutes = Math.round((end - start) / 60000)
   if (minutes > 10080) throw new Error('記録時間が長すぎます')
-  await db.sessions.add({ id: uid(), taskId, startedAt, endedAt, minutes, revision: 1, corrections: [] })
+  await db.transaction('rw', [db.tasks, db.sessions], async () => {
+    const prior = await db.sessions.get(sessionId)
+    if (prior) {
+      if (prior.taskId !== taskId || prior.startedAt !== startedAt) throw new Error('作業区間のIDが重複しています')
+      return
+    }
+    if (!(await db.tasks.get(taskId))) throw new Error('作業対象のタスクがありません')
+    await db.sessions.add({ id: sessionId, taskId, startedAt, endedAt, minutes, revision: 1, corrections: [] })
+  })
 }

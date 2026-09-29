@@ -44,11 +44,12 @@ import PomodoroPanel from './PomodoroPanel'
 import SessionCorrectionView from './SessionCorrectionView'
 import { FocusChoiceTools } from './FocusChoiceTools'
 import SuperFocusView from './SuperFocusView'
+import TopOfMindView from './TopOfMindView'
 import { setSpotlight } from './focus-tools'
 import { projectNextStepStatus } from './dependencies'
 import './App.css'
 
-type View = 'today' | 'tasks' | 'projects' | 'labels' | 'saved' | 'plan' | 'periods' | 'calendar' | 'coach' | 'focus' | 'history' | 'routines' | 'habits' | 'goals' | 'journal' | 'settings'
+type View = 'today' | 'tasks' | 'projects' | 'labels' | 'saved' | 'plan' | 'periods' | 'calendar' | 'coach' | 'focus' | 'history' | 'routines' | 'habits' | 'goals' | 'journal' | 'settings' | 'mini'
 const INITIAL_NOW = new Date()
 const nav: { view: View; label: string; icon: typeof Inbox }[] = [
   { view: 'today', label: '今日', icon: LayoutDashboard }, { view: 'tasks', label: 'すべてのタスク', icon: ListTodo }, { view: 'projects', label: 'カテゴリとプロジェクト', icon: FolderTree }, { view: 'labels', label: 'ラベル', icon: Tags }, { view: 'saved', label: 'テンプレート', icon: ArchiveRestore }, { view: 'plan', label: '計画', icon: CalendarDays }, { view: 'periods', label: '週・月・四半期', icon: CalendarDays }, { view: 'calendar', label: '時間枠と予定', icon: CalendarDays },
@@ -96,7 +97,7 @@ function App() {
   const plannedPoints = todayTasks.reduce((n, t) => n + (t.effectivePoints ?? 0), 0)
   const snoozeAlerts = dueSnoozes(active, nowIso)
 
-  useEffect(() => { ensureSettings().then(() => expandRoutines()).then(() => captureDayProgressBaseline(currentDate)).catch(e => setToast(e instanceof Error ? e.message : String(e))) }, [currentDate])
+  useEffect(() => { if (location.hash === '#mini') return; ensureSettings().then(() => expandRoutines()).then(() => captureDayProgressBaseline(currentDate)).catch(e => setToast(e instanceof Error ? e.message : String(e))) }, [currentDate])
   useEffect(() => { const timer = setInterval(() => setNowIso(new Date().toISOString()), 60000); return () => clearInterval(timer) }, [])
   useEffect(() => {
     if (!settings?.notifications || !('Notification' in window) || Notification.permission !== 'granted') return
@@ -116,6 +117,7 @@ function App() {
   const suggested = suggestedTasks(tasks, currentDate, 3, dependencies, nowIso, themeRules.filter(rule => rule.ownerId === settings?.profileId), focusSelection?.projects ?? [])
   const reviews = reviewDueTasks(visibleOpen, currentDate)
   if (!settings) return <div className="loading">ローカルデータを準備しています…</div>
+  if (view === 'mini') return <TopOfMindView tasks={active} />
 
   return <div className="app-shell">
     <aside className={`sidebar ${menuOpen ? 'open' : ''}`}>
