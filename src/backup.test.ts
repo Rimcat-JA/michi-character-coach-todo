@@ -41,6 +41,17 @@ async function snapshot(): Promise<Snapshot> {
 }
 
 describe('バックアップの復元前検証', () => {
+  it('機能の表示設定を復元し、未知の機能を拒否する', async () => {
+    await db.settings.update('main', { hiddenFeatures: ['wall', 'journal'] })
+    const saved = await snapshot()
+    expect(() => validateSnapshot(saved)).not.toThrow()
+    const corrupt = structuredClone(saved)
+    corrupt.settings[0].hiddenFeatures!.push('unknown')
+    expect(() => validateSnapshot(corrupt)).toThrow('機能の表示')
+    await db.settings.update('main', { hiddenFeatures: [] })
+    await restoreBackup(saved)
+    expect((await db.settings.get('main'))?.hiddenFeatures).toEqual(['wall', 'journal'])
+  })
   it('PCとスマホのナビゲーションを別々に復元し、不正な機能名を拒否する', async () => {
     await db.settings.update('main', { navDesktop: [], navMobile: ['today', 'wall'] })
     const saved = await snapshot()
