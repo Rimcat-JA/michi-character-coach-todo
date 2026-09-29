@@ -18,8 +18,8 @@ async function key(password: string, salt: Uint8Array) {
   return crypto.subtle.deriveKey({ name: 'PBKDF2', salt: salt as BufferSource, iterations: 250000, hash: 'SHA-256' }, material, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt'])
 }
 async function captureSnapshot(): Promise<Snapshot> {
-  const snapshot: Snapshot = await db.transaction('r', [db.tasks, db.assessments, db.completions, db.ledger, db.routines, db.sessions, db.commands, db.audits, db.settings], async () => ({
-    format: 'coachbundle', version: 1, exportedAt: new Date().toISOString(), tasks: await db.tasks.toArray(), assessments: await db.assessments.toArray(), completions: await db.completions.toArray(), ledger: await db.ledger.toArray(), routines: await db.routines.toArray(), sessions: await db.sessions.toArray(), commands: await db.commands.toArray(), audits: await db.audits.toArray(), settings: await db.settings.toArray()
+  const snapshot: Snapshot = await db.transaction('r', [db.tasks, db.assessments, db.completions, db.ledger, db.routines, db.sessions, db.commands, db.audits, db.settings, db.containers, db.checklistItems, db.labelGroups, db.labelDefinitions, db.savedTemplates], async () => ({
+    format: 'coachbundle', version: 1, exportedAt: new Date().toISOString(), tasks: await db.tasks.toArray(), assessments: await db.assessments.toArray(), completions: await db.completions.toArray(), ledger: await db.ledger.toArray(), routines: await db.routines.toArray(), sessions: await db.sessions.toArray(), commands: await db.commands.toArray(), audits: await db.audits.toArray(), settings: await db.settings.toArray(), containers: await db.containers.toArray(), checklistItems: await db.checklistItems.toArray(), labelGroups: await db.labelGroups.toArray(), labelDefinitions: await db.labelDefinitions.toArray(), savedTemplates: await db.savedTemplates.toArray()
   }))
   validateSnapshot(snapshot)
   return snapshot
@@ -59,9 +59,15 @@ export async function inspectBackup(file: File, password: string): Promise<Snaps
 }
 export async function restoreBackup(snapshot: Snapshot) {
   validateSnapshot(snapshot)
-  await db.transaction('rw', [db.tasks, db.assessments, db.completions, db.ledger, db.routines, db.sessions, db.commands, db.audits, db.settings], async () => {
-    await Promise.all([db.tasks.clear(), db.assessments.clear(), db.completions.clear(), db.ledger.clear(), db.routines.clear(), db.sessions.clear(), db.commands.clear(), db.audits.clear(), db.settings.clear()])
-    await db.tasks.bulkAdd(snapshot.tasks); await db.assessments.bulkAdd(snapshot.assessments); await db.completions.bulkAdd(snapshot.completions); await db.ledger.bulkAdd(snapshot.ledger)
-    await db.routines.bulkAdd(snapshot.routines); await db.sessions.bulkAdd(snapshot.sessions); await db.commands.bulkAdd(snapshot.commands); await db.audits.bulkAdd(snapshot.audits); await db.settings.bulkAdd(snapshot.settings)
+  const names = snapshot.containers === undefined ? [...new Set(snapshot.tasks.map(task => task.project.trim()).filter(Boolean))] : []
+  const at = new Date().toISOString(), ownerId = snapshot.settings[0].profileId
+  const legacyContainers = names.map(name => ({ id: crypto.randomUUID(), parentId: null, kind: 'project' as const, name, ownerId, revision: 1, createdAt: at, updatedAt: at, deletedAt: null }))
+  const byName = new Map(legacyContainers.map(container => [container.name, container.id]))
+  const prepared: Snapshot = snapshot.containers === undefined ? { ...snapshot, containers: legacyContainers, tasks: snapshot.tasks.map(task => ({ ...task, containerId: task.project.trim() ? byName.get(task.project.trim()) : null })) } : snapshot
+  validateSnapshot(prepared)
+  await db.transaction('rw', [db.tasks, db.assessments, db.completions, db.ledger, db.routines, db.sessions, db.commands, db.audits, db.settings, db.containers, db.checklistItems, db.labelGroups, db.labelDefinitions, db.savedTemplates], async () => {
+    await Promise.all([db.tasks.clear(), db.assessments.clear(), db.completions.clear(), db.ledger.clear(), db.routines.clear(), db.sessions.clear(), db.commands.clear(), db.audits.clear(), db.settings.clear(), db.containers.clear(), db.checklistItems.clear(), db.labelGroups.clear(), db.labelDefinitions.clear(), db.savedTemplates.clear()])
+    await db.tasks.bulkAdd(prepared.tasks); await db.assessments.bulkAdd(prepared.assessments); await db.completions.bulkAdd(prepared.completions); await db.ledger.bulkAdd(prepared.ledger)
+    await db.routines.bulkAdd(prepared.routines); await db.sessions.bulkAdd(prepared.sessions); await db.commands.bulkAdd(prepared.commands); await db.audits.bulkAdd(prepared.audits); await db.settings.bulkAdd(prepared.settings); await db.containers.bulkAdd(prepared.containers ?? []); await db.checklistItems.bulkAdd(prepared.checklistItems ?? []); await db.labelGroups.bulkAdd(prepared.labelGroups ?? []); await db.labelDefinitions.bulkAdd(prepared.labelDefinitions ?? []); await db.savedTemplates.bulkAdd(prepared.savedTemplates ?? [])
   })
 }
