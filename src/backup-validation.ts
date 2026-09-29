@@ -1,4 +1,4 @@
-import { calculateScore, validateTaskInput, validateDate, type Assessment, type Audit, type ChecklistItem, type CommandReceipt, type Completion, type Container, type LabelDefinition, type LabelGroup, type LedgerEntry, type PlanningBucket, type Routine, type SavedTemplate, type Settings, type Task, type TaskAttachment, type TaskComment, type TaskDependency, type TaskNote, type WorkSession } from './domain'
+import { calculateScore, validateTaskInput, validateDate, type Assessment, type Audit, type CalendarEvent, type ChecklistItem, type CommandReceipt, type Completion, type Container, type LabelDefinition, type LabelGroup, type LedgerEntry, type PlanningBucket, type Routine, type SavedTemplate, type Settings, type Task, type TaskAttachment, type TaskComment, type TaskDependency, type TaskNote, type TimeBlock, type WorkSession } from './domain'
 import { validateLabelSelection } from './labels'
 import { validateDependencyGraph } from './dependencies'
 import { validatePlanningBuckets } from './period-planning'
@@ -17,6 +17,8 @@ export type Snapshot = {
   taskAttachments?: (Omit<TaskAttachment, 'blob'> & { contentBase64: string })[]
   taskDependencies?: TaskDependency[]
   planningBuckets?: PlanningBucket[]
+  timeBlocks?: TimeBlock[]
+  calendarEvents?: CalendarEvent[]
 }
 
 const tableNames = ['tasks', 'assessments', 'completions', 'ledger', 'routines', 'sessions', 'commands', 'audits', 'settings'] as const
@@ -171,6 +173,16 @@ export function validateSnapshot(input: unknown): asserts input is Snapshot {
     if ((audit.taskId !== null && !taskIds.has(audit.taskId)) || !filled(audit.operation) || !timestamp(audit.at) || typeof audit.detail !== 'string') throw new Error('監査履歴が不正です')
   }
   const settings = tables.settings[0] as Settings
+  if (input.timeBlocks !== undefined && !Array.isArray(input.timeBlocks)) throw new Error('timeBlocksが不正です')
+  if (input.calendarEvents !== undefined && !Array.isArray(input.calendarEvents)) throw new Error('calendarEventsが不正です')
+  const blocks = (input.timeBlocks ?? []) as TimeBlock[], events = (input.calendarEvents ?? []) as CalendarEvent[]
+  unique(blocks, 'timeBlocks', 'id'); unique(events, 'calendarEvents', 'id')
+  const sessionIds = new Set(tables.sessions.map(item => (item as WorkSession).id))
+  for (const block of blocks) {
+    if (block.ownerId !== settings.profileId || !['activity', 'work_session'].includes(block.kind) || !filled(block.category) || block.category.length > 100 || !nullableString(block.projectId) || (block.kind === 'work_session' && (!block.projectId || !containerIds.has(block.projectId))) || (block.kind === 'activity' && block.projectId !== null) || !Number.isInteger(block.startMinute) || !Number.isInteger(block.endMinute) || block.startMinute < 0 || block.endMinute > 1440 || block.startMinute >= block.endMinute || !filled(block.timezone) || !Array.isArray(block.taskIds) || new Set(block.taskIds).size !== block.taskIds.length || block.taskIds.some(id => !taskIds.has(id)) || !nullableString(block.linkedSessionId) || (block.linkedSessionId !== null && !sessionIds.has(block.linkedSessionId)) || typeof block.closed !== 'boolean' || !Number.isInteger(block.revision) || block.revision < 1 || !timestamp(block.createdAt) || !timestamp(block.updatedAt)) throw new Error('時間枠が不正です')
+    validateDate(block.date, '時間枠の日付')
+  }
+  for (const event of events) if (event.ownerId !== settings.profileId || !['meeting', 'class', 'other'].includes(event.kind) || !filled(event.title) || event.title.length > 300 || !filled(event.timezone) || !timestamp(event.createdAt) || !nullableString(event.linkedTaskId) || (event.linkedTaskId !== null && !taskIds.has(event.linkedTaskId)) || !filled(event.startAt) || !filled(event.endAt) || !Number.isFinite(Date.parse(event.startAt)) || !Number.isFinite(Date.parse(event.endAt)) || Date.parse(event.endAt) <= Date.parse(event.startAt)) throw new Error('予定が不正です')
   if (planningBuckets.some(bucket => bucket.ownerId !== settings.profileId)) throw new Error('計画枠の所有者が不正です')
   if (input.labelGroups !== undefined && !Array.isArray(input.labelGroups)) throw new Error('labelGroupsが不正です')
   if (input.labelDefinitions !== undefined && !Array.isArray(input.labelDefinitions)) throw new Error('labelDefinitionsが不正です')
