@@ -40,8 +40,8 @@
 | C04 | Smart Lists／Global Filter | 一部実装 | タスク文字列検索あり。Smart Listは未実装。 |
 | C05 | Backburner | 受入確認済 | 保留タスクは自動候補から外し、保留一覧で検索・解除。元の属性と手動ptを維持することをunitとWindows画面で確認。 |
 | C06 | Orbit | 受入確認済 | Orbitに入れても予定日・期限はnullのまま。解除と専用一覧をWindows画面で確認。 |
-| C07 | Sequential／Parallel／Dependencies | 受入未確認 | 受入試験を未実施。 |
-| C08 | Missing Next Steps／Task Hints | 受入未確認 | 受入試験を未実施。 |
+| C07 | Sequential／Parallel／Dependencies | 受入確認済 | A→B→Cの循環追加を拒否し、A完了後はBだけを自動候補へ出すことをunitで確認。 |
+| C08 | Missing Next Steps／Task Hints | 受入確認済 | タスクなし案件と全件完了案件を区別し、前者だけ次の作業登録を案内することをunitで確認。 |
 | C09 | Focus Picker／重要プロジェクト | 受入未確認 | 受入試験を未実施。 |
 | C10 | Matrix | 受入未確認 | 受入試験を未実施。 |
 | C11 | Pinned Tasks／Fast Add | 受入確認済 | pinは既存タスクのflag更新だけで件数不変。テンプレートの「新規を追加」は別の発生回を作る。unitとWindows画面で確認。 |
@@ -130,6 +130,6 @@
 | N10 | サーバー不要の端末単独オフライン利用 | 一部実装 | Windows版とオフラインPWAあり。Android実機は未検証。 |
 | N11 | 既存アプリ内コーチを維持した任意のChatGPT／Claudeプラグイン | 受入未確認 | 受入試験を未実施。 |
 
-計: 121件（受入確認済 21、一部実装 22、受入未確認 78）。
+計: 121件（受入確認済 23、一部実装 22、受入未確認 76）。
 
 最終照合: 2026-09-29。実機・外部サービスの受入は継続して記録します。
