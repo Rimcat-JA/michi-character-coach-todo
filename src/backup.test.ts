@@ -25,6 +25,7 @@ import { recordPomodoro, startPomodoro } from './pomodoro'
 import { addWallTile } from './wall'
 import { saveWorkflowPreset } from './workflows'
 import { saveAppearance } from './appearance'
+import { createReminder, dispatchDueReminders } from './reminders'
 import { inspectBackup, restoreBackup } from './backup'
 import { validateSnapshot, type Snapshot } from './backup-validation'
 
@@ -43,6 +44,23 @@ async function snapshot(): Promise<Snapshot> {
 }
 
 describe('バックアップの復元前検証', () => {
+  it('通知予約と履歴を復元し、存在しない対象と不正な宛先を拒否する', async () => {
+    const taskId = await createTask({ ...newTaskInput(), title: '通知対象' })
+    const start = new Date(2026, 8, 29, 10)
+    await createReminder('bug-me', taskId, '', ['in-app'], start)
+    await dispatchDueReminders(new Date(2026, 8, 29, 10, 30))
+    const saved = await snapshot()
+    expect(() => validateSnapshot(saved)).not.toThrow()
+    const missing = structuredClone(saved)
+    missing.settings[0].reminderState!.rules[0].targetId = 'missing'
+    expect(() => validateSnapshot(missing)).toThrow('通知予約')
+    const invalidChannel = structuredClone(saved)
+    invalidChannel.settings[0].reminderState!.rules[0].channels = ['other'] as never
+    expect(() => validateSnapshot(invalidChannel)).toThrow('通知予約')
+    await db.settings.update('main', { reminderState: undefined })
+    await restoreBackup(saved)
+    expect((await db.settings.get('main'))?.reminderState?.events).toHaveLength(1)
+  })
   it('見た目の設定を復元し、不正な配色を拒否する', async () => {
     await saveAppearance({ theme: 'high-contrast', accent: 'blue', fontScale: 110, iconStyle: 'bold' })
     const saved = await snapshot()

@@ -6,7 +6,7 @@ export type AIRequest = { model: string; message: string; selectedTask: string |
 
 declare global {
   interface Window {
-    michiDesktop?: { openTopOfMind: () => Promise<boolean>; showMain: () => Promise<boolean> }
+    michiDesktop?: { openTopOfMind: () => Promise<boolean>; showMain: () => Promise<boolean>; notify: (payload: { title: string; body: string }) => Promise<boolean> }
     michiAI?: {
       status: () => Promise<AIStatus>
       saveKey: (value: string) => Promise<boolean>

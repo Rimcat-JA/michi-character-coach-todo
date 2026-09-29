@@ -10,5 +10,6 @@ contextBridge.exposeInMainWorld('michiAI', {
 
 contextBridge.exposeInMainWorld('michiDesktop', {
   openTopOfMind: () => ipcRenderer.invoke('michi:open-top-of-mind'),
-  showMain: () => ipcRenderer.invoke('michi:show-main')
+  showMain: () => ipcRenderer.invoke('michi:show-main'),
+  notify: payload => ipcRenderer.invoke('michi:notify', payload)
 })
