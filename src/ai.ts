@@ -1,8 +1,8 @@
-import type { Goal, GoalCheckIn, Task } from './domain'
+import type { CharacterProfile, Goal, GoalCheckIn, Task } from './domain'
 import { currentCheckInContext } from './goals'
 
 export type AIStatus = { secureStorage: boolean; configured: boolean }
-export type AIRequest = { model: string; message: string; selectedTask: string | null }
+export type AIRequest = { model: string; message: string; selectedTask: string | null; character?: CharacterProfile }
 
 declare global {
   interface Window {
