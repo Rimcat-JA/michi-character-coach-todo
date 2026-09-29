@@ -5,6 +5,7 @@ import { db, ensureSettings } from './db'
 import { createRoutine, createTask, correctCompletion, expandRoutines, logSession, newTaskInput, restoreTask, trashTask, undoCompletion, updateTask, completeTask, type TaskInput } from './commands'
 import { addDays, calculateScore, emptyScore, scoreText, today, type Routine, type ScoreInput, type Settings, type Task } from './domain'
 import { exportBackup, inspectBackup, restoreBackup } from './backup'
+import { selectedTaskContext, type AIStatus } from './ai'
 import './App.css'
 
 type View = 'today' | 'tasks' | 'plan' | 'coach' | 'focus' | 'history' | 'routines' | 'settings'
@@ -118,13 +119,126 @@ function PlanView({ tasks, settings, onEdit }: { tasks: Task[]; settings: Settin
   return <><div className="page-heading"><div><span className="eyebrow">LOOK AHEAD</span><h1>これからの計画</h1><p>予定日と締め切りを分けて管理します。容量は目安として表示します。</p></div></div><div className="week-grid">{days.map(day => { const items = tasks.filter(t => t.scheduledDate === day), mins = items.reduce((n, t) => n + (t.score.minutes ?? 0), 0), points = items.reduce((n, t) => n + (t.effectivePoints ?? 0), 0); return <section key={day} className={`day-card ${day === today() ? 'is-today' : ''}`}><div className="day-title"><strong>{dateLong(day)}</strong>{day === today() && <span>今日</span>}</div><div className="capacity"><span className={mins > settings.dailyMinutes ? 'over' : ''}>{mins}/{settings.dailyMinutes}分</span><span className={points > settings.dailyPoints ? 'over' : ''}>{points}/{settings.dailyPoints}pt</span></div><div className="meter"><i style={{ width: `${Math.min(100, mins / Math.max(settings.dailyMinutes, 1) * 100)}%` }} /></div><div className="day-tasks">{items.length ? items.map(t => <button key={t.id} onClick={() => onEdit(t)}><span>{t.title}</span><small>{scoreText(t)}</small></button>) : <span className="muted">予定なし</span>}</div></section> })}</div><div className="card info-card"><CalendarDays size={20} /><p>締め切りは予定日を動かしても変わりません。時間とポイントの上限も別々に確認できます。</p></div></>
 }
 
-function CoachView({ tasks, settings, onEdit, onNew }: { tasks: Task[]; settings: Settings; onEdit: (t: Task) => void; onNew: () => void }) {
-  const [message, setMessage] = useState(''), [chat, setChat] = useState<{ who: 'you' | 'coach'; text: string }[]>([])
-  const next = [...tasks].sort((a, b) => (a.dueDate ?? '9999').localeCompare(b.dueDate ?? '9999') || b.importance - a.importance)[0]
-  function send() { const text = message.trim(); if (!text) return; let answer = 'ここでは保存済みのタスクを一緒に確認できます。新しいAI推論は実行していません。'; if (/今日|いま|次|何から/.test(text)) answer = next ? `登録済みのタスクなら「${next.title}」が次の候補です。必要なら開いて予定を調整しましょう。` : '未完了のタスクはありません。必要な作業があれば手動で追加できます。'; if (/疲れ|しんど|無理/.test(text)) answer = '今日は負荷を下げても大丈夫です。予定を見直す場合は、対象のタスクを選んで変更しましょう。'; setChat(c => [...c, { who: 'you', text }, { who: 'coach', text: answer }]); setMessage('') }
-  return <><div className="page-heading"><div><span className="eyebrow">CHARACTER COACH</span><h1>{settings.coachName}と整理する</h1><p>現在は端末内の定型応答です。外部AIへの送信は行いません。</p></div><span className="status-tag"><Moon size={15} /> オフライン対応</span></div><div className="coach-layout"><section className="card conversation"><div className="conversation-top"><div className="small-avatar">✦</div><div><strong>{settings.coachName}</strong><small>定型応答 · タスクの保存状態を参照</small></div></div><div className="messages"><div className="message coach">こんにちは。今日は何を整理しましょうか？ 登録済みのタスクを一緒に見られます。</div>{chat.map((m, i) => <div key={i} className={`message ${m.who}`}>{m.text}</div>)}</div><div className="chat-input"><input value={message} onChange={e => setMessage(e.target.value)} onKeyDown={e => e.key === 'Enter' && send()} placeholder="今日、何から始めよう？" /><button className="primary-button" onClick={send} disabled={!message.trim()}>送信</button></div></section><aside className="card coach-aside"><span className="eyebrow">FROM YOUR LIST</span><h2>いまの候補</h2>{next ? <><p>締め切りと重要度から、登録済みタスクを表示しています。</p><button className="candidate" onClick={() => onEdit(next)}><strong>{next.title}</strong><span>{scoreText(next)} {next.dueDate && `· 期限 ${dateLabel(next.dueDate)}`}</span></button></> : <Empty title="候補はありません" detail="必要なタスクを手動で追加できます。" action={<button className="secondary-button" onClick={onNew}>追加する</button>} />}<div className="aside-note"><LockKeyhole size={17} /> 会話からタスクを自動作成・変更しません。</div></aside></div></>
+function fixedCoachAnswer(text: string, next: Task | undefined) {
+  let answer = 'ここでは保存済みのタスクを一緒に確認できます。新しいAI推論は実行していません。'
+  if (/今日|いま|次|何から/.test(text)) answer = next ? `登録済みのタスクなら「${next.title}」が次の候補です。必要なら開いて予定を調整しましょう。` : '未完了のタスクはありません。必要な作業があれば手動で追加できます。'
+  if (/疲れ|しんど|無理/.test(text)) answer = '今日は負荷を下げても大丈夫です。予定を見直す場合は、対象のタスクを選んで変更しましょう。'
+  return answer
 }
 
+function CoachView({ tasks, settings, onEdit, onNew }: { tasks: Task[]; settings: Settings; onEdit: (t: Task) => void; onNew: () => void }) {
+  const [message, setMessage] = useState('')
+  const [chat, setChat] = useState<{ who: 'you' | 'coach'; text: string }[]>([])
+  const [aiStatus, setAiStatus] = useState<AIStatus | null>(null)
+  const [keyInput, setKeyInput] = useState('')
+  const [modelInput, setModelInput] = useState(settings.aiModel || 'deepseek/deepseek-v4.1-flash')
+  const [selectedId, setSelectedId] = useState('')
+  const [connectionError, setConnectionError] = useState('')
+  const [sending, setSending] = useState(false)
+  const bridge = window.michiAI
+  const next = [...tasks].sort((a, b) => (a.dueDate ?? '9999').localeCompare(b.dueDate ?? '9999') || b.importance - a.importance)[0]
+  const selectedTask = tasks.find(t => t.id === selectedId)
+  const selectedContext = selectedTaskContext(selectedTask)
+  const aiReady = Boolean(bridge && aiStatus?.configured && settings.aiEnabled && settings.aiModel)
+
+  useEffect(() => {
+    if (!window.michiAI) return
+    window.michiAI.status().then(setAiStatus).catch(e => setConnectionError(e instanceof Error ? e.message : String(e)))
+  }, [])
+
+  async function saveConnection() {
+    if (!bridge) return
+    setConnectionError('')
+    try {
+      const model = modelInput.trim()
+      if (!/^[\w~./:-]{3,120}$/.test(model)) throw new Error('モデルIDを入力してください')
+      if (!aiStatus?.configured && !keyInput) throw new Error('APIキーを入力してください')
+      if (keyInput) await bridge.saveKey(keyInput.trim())
+      await db.settings.update('main', { aiEnabled: true, aiModel: model })
+      setKeyInput('')
+      setAiStatus(await bridge.status())
+    } catch (e) {
+      setConnectionError(e instanceof Error ? e.message : String(e))
+    }
+  }
+
+  async function disconnect() {
+    if (!bridge) return
+    setConnectionError('')
+    try {
+      await bridge.deleteKey()
+      await db.settings.update('main', { aiEnabled: false })
+      setAiStatus(await bridge.status())
+      setKeyInput('')
+    } catch (e) {
+      setConnectionError(e instanceof Error ? e.message : String(e))
+    }
+  }
+
+  async function send() {
+    const text = message.trim()
+    if (!text || sending) return
+    setChat(c => [...c, { who: 'you', text }])
+    setMessage('')
+    if (aiReady && bridge && navigator.onLine) {
+      setSending(true)
+      try {
+        const answer = await bridge.chat({ model: settings.aiModel!, message: text, selectedTask: selectedContext })
+        setChat(c => [...c, { who: 'coach', text: answer }])
+      } catch (e) {
+        const error = e instanceof Error ? e.message : String(e)
+        const answer = error.includes('OpenRouterへ接続できませんでした') ? `接続できないため端末内の定型応答を表示します。${fixedCoachAnswer(text, next)}` : error
+        setChat(c => [...c, { who: 'coach', text: answer }])
+      } finally {
+        setSending(false)
+      }
+      return
+    }
+    setChat(c => [...c, { who: 'coach', text: fixedCoachAnswer(text, next) }])
+  }
+
+  return <>
+    <div className="page-heading">
+      <div><span className="eyebrow">CHARACTER COACH</span><h1>{settings.coachName}と整理する</h1><p>{aiReady ? '送信した文章と選択タスクだけを、OpenRouter経由で選択したモデルの提供先へ送ります。' : '現在は端末内の定型応答です。外部AIへの送信は行いません。'}</p></div>
+      <span className="status-tag"><Moon size={15} /> {aiReady ? 'OpenRouter 接続' : 'オフライン対応'}</span>
+    </div>
+    <div className="coach-layout">
+      <section className="card conversation">
+        <div className="conversation-top"><div className="small-avatar">✦</div><div><strong>{settings.coachName}</strong><small>{aiReady ? 'AI応答 · 選択したデータだけ送信' : '定型応答 · タスクの保存状態を参照'}</small></div></div>
+        <div className="messages">
+          <div className="message coach">こんにちは。今日は何を整理しましょうか？</div>
+          {chat.map((m, i) => <div key={i} className={`message ${m.who}`}>{m.text}</div>)}
+          {sending && <div className="message coach">OpenRouterからの応答を待っています…</div>}
+        </div>
+        {aiReady && <div className="coach-share">
+          <label className="field">OpenRouterへ送る保存済みタスク
+            <select value={selectedId} onChange={e => setSelectedId(e.target.value)}><option value="">送らない</option>{tasks.map(t => <option key={t.id} value={t.id}>{t.title}</option>)}</select>
+          </label>
+          {selectedContext && <details><summary>送信するタスク情報を表示</summary><pre>{selectedContext}</pre></details>}
+          <small>メッセージ送信時、入力文と選択タスクだけを送ります。過去の会話・他のタスクは送りません。APIキーは認証ヘッダーにだけ使用します。</small>
+        </div>}
+        <div className="chat-input"><input value={message} maxLength={6000} onChange={e => setMessage(e.target.value)} onKeyDown={e => e.key === 'Enter' && send()} placeholder="今日、何から始めよう？" /><button className="primary-button" onClick={send} disabled={!message.trim() || sending}>送信</button></div>
+      </section>
+      <aside className="card coach-aside">
+        <span className="eyebrow">FROM YOUR LIST</span><h2>いまの候補</h2>
+        {next ? <><p>締め切りと重要度から、登録済みタスクを表示しています。</p><button className="candidate" onClick={() => onEdit(next)}><strong>{next.title}</strong><span>{scoreText(next)} {next.dueDate && `· 期限 ${dateLabel(next.dueDate)}`}</span></button></> : <Empty title="候補はありません" detail="必要なタスクを手動で追加できます。" action={<button className="secondary-button" onClick={onNew}>追加する</button>} />}
+        <div className="aside-note"><LockKeyhole size={17} /> 会話からタスクを自動作成・変更しません。</div>
+        <div className="coach-ai-setup">
+          <h3>OpenRouter接続</h3>
+          {bridge ? <>
+            <p>APIキーはWindowsの暗号化保存を使用し、バックアップには含めません。</p>
+            <label className="field">モデルID<input value={modelInput} onChange={e => setModelInput(e.target.value)} placeholder="例：提供元/モデル名" /></label>
+            <label className="field">APIキー<input type="password" autoComplete="off" value={keyInput} onChange={e => setKeyInput(e.target.value)} placeholder={aiStatus?.configured ? '登録済み（変更時のみ入力）' : 'OpenRouterのキー'} /></label>
+            <button className="secondary-button full" disabled={aiStatus?.secureStorage === false} onClick={saveConnection}>接続を保存</button>
+            {aiStatus?.configured && <button className="text-button" onClick={disconnect}>キーを削除してOFFにする</button>}
+            {aiStatus?.secureStorage === false && <p>この端末では安全なキー保存を利用できません。</p>}
+            {connectionError && <p role="alert">{connectionError}</p>}
+          </> : <p>AI接続はWindowsデスクトップ版で設定できます。ブラウザ版は定型応答です。</p>}
+        </div>
+      </aside>
+    </div>
+  </>
+}
 function FocusView({ tasks, sessions, onEdit, run }: { tasks: Task[]; sessions: { minutes: number; startedAt: string }[]; onEdit: (t: Task) => void; run: (fn: () => Promise<unknown>, success?: string) => Promise<void> }) {
   const [selected, setSelected] = useState(''), [started, setStarted] = useState<string | null>(() => localStorage.getItem('michi-focus-start')), [tick, setTick] = useState(INITIAL_NOW.getTime())
   useEffect(() => { const id = setInterval(() => setTick(Date.now()), 1000); return () => clearInterval(id) }, [])
@@ -155,7 +269,7 @@ function SettingsView({ settings, run }: { settings: Settings; run: (fn: () => P
   function update<K extends keyof Settings>(key: K, value: Settings[K]) { run(() => db.settings.update('main', { [key]: value }), '設定を保存しました') }
   async function inspect() { if (!file) return; await run(async () => { const result = await inspectBackup(file, password); setRestoreInfo(result) }, 'バックアップを検証しました') }
   async function restore() { if (!restoreInfo) return; if (!confirm(`現在のデータを置き換えます。${restoreInfo.tasks.length}件のタスクを復元しますか？`)) return; await run(async () => { await restoreBackup(restoreInfo); setRestoreInfo(null); setFile(null) }, 'バックアップを復元しました') }
-  return <><div className="page-heading"><div><span className="eyebrow">PREFERENCES & DATA</span><h1>設定とデータ</h1><p>この端末の保存と、自分に合う使い方を管理します。</p></div></div><div className="settings-grid"><section className="card setting-section"><div className="setting-heading"><Settings2 size={20} /><div><h2>日々の目安</h2><p>計画画面の容量表示に使います。</p></div></div><div className="form-grid"><label className="field">1日の時間（分）<input type="number" min={0} value={settings.dailyMinutes} onChange={e => update('dailyMinutes', Number(e.target.value))} /></label><label className="field">1日のポイント<input type="number" min={0} value={settings.dailyPoints} onChange={e => update('dailyPoints', Number(e.target.value))} /></label><label className="field full-field">コーチの名前<input value={settings.coachName} onChange={e => update('coachName', e.target.value)} /></label></div></section><section className="card setting-section"><div className="setting-heading"><ShieldCheck size={20} /><div><h2>AIと自動化</h2><p>初期状態では外部AIの呼び出しはありません。</p></div></div><div className="setting-line"><div><strong>AI処理</strong><small>現在の実装では外部AI接続は未提供です</small></div><span className="status-tag">OFF</span></div><div className="setting-line"><div><strong>自動化レベル</strong><small>AIによるタスク変更は実行しません</small></div><span className="status-tag">A1 確認中心</span></div><div className="setting-line"><div><strong>通知</strong><small>アプリ終了後の通知は未提供です</small></div><span className="status-tag">未設定</span></div></section><section className="card setting-section"><div className="setting-heading"><Database size={20} /><div><h2>ローカルデータ</h2><p>タスクと台帳はこのブラウザのIndexedDBが正本です。</p></div></div><div className="data-row"><span>データセット</span><code>{settings.datasetId.slice(0, 8)}…</code></div><div className="data-row"><span>保存使用量</span><strong>{storage}</strong></div><div className="data-row"><span>最後の書き出し</span><strong>{settings.lastBackupAt ? new Date(settings.lastBackupAt).toLocaleString('ja-JP') : 'まだありません'}</strong></div><button className="secondary-button" onClick={() => navigator.storage?.persist?.().then(ok => alert(ok ? '保存保護が許可されました' : 'ブラウザによって許可されませんでした'))}>保存保護を要求</button></section><section className="card setting-section"><div className="setting-heading"><LockKeyhole size={20} /><div><h2>暗号化バックアップ</h2><p>パスワードで保護した .coachbundle を保存・復元します。</p></div></div><label className="field">バックアップ用パスワード<input type="password" value={password} onChange={e => setPassword(e.target.value)} placeholder="10文字以上" /></label><button className="secondary-button" disabled={password.length < 10} onClick={() => run(() => exportBackup(password), 'バックアップを書き出しました')}><Download size={16} /> 書き出す</button><div className="divider"/><label className="field">復元するファイル<input type="file" accept=".coachbundle,application/json" onChange={e => { setFile(e.target.files?.[0] ?? null); setRestoreInfo(null) }} /></label><button className="secondary-button" disabled={!file || !password} onClick={inspect}><Upload size={16} /> 内容を検証</button>{restoreInfo && <div className="restore-preview"><strong>検証済み：{restoreInfo.tasks.length}件のタスク、{restoreInfo.completions.length}件の完了記録</strong><p>現在のデータを置き換えます。必要なら先に書き出してください。</p><button className="primary-button" onClick={restore}>このバックアップを復元</button></div>}</section></div></>
+  return <><div className="page-heading"><div><span className="eyebrow">PREFERENCES & DATA</span><h1>設定とデータ</h1><p>この端末の保存と、自分に合う使い方を管理します。</p></div></div><div className="settings-grid"><section className="card setting-section"><div className="setting-heading"><Settings2 size={20} /><div><h2>日々の目安</h2><p>計画画面の容量表示に使います。</p></div></div><div className="form-grid"><label className="field">1日の時間（分）<input type="number" min={0} value={settings.dailyMinutes} onChange={e => update('dailyMinutes', Number(e.target.value))} /></label><label className="field">1日のポイント<input type="number" min={0} value={settings.dailyPoints} onChange={e => update('dailyPoints', Number(e.target.value))} /></label><label className="field full-field">コーチの名前<input value={settings.coachName} onChange={e => update('coachName', e.target.value)} /></label></div></section><section className="card setting-section"><div className="setting-heading"><ShieldCheck size={20} /><div><h2>AIと自動化</h2><p>初期状態では外部AIの呼び出しはありません。</p></div></div><div className="setting-line"><div><strong>AI処理</strong><small>OpenRouter接続はコーチ画面から設定できます</small></div><span className="status-tag">任意</span></div><div className="setting-line"><div><strong>自動化レベル</strong><small>AIによるタスク変更は実行しません</small></div><span className="status-tag">A1 確認中心</span></div><div className="setting-line"><div><strong>通知</strong><small>アプリ終了後の通知は未提供です</small></div><span className="status-tag">未設定</span></div></section><section className="card setting-section"><div className="setting-heading"><Database size={20} /><div><h2>ローカルデータ</h2><p>タスクと台帳はこのブラウザのIndexedDBが正本です。</p></div></div><div className="data-row"><span>データセット</span><code>{settings.datasetId.slice(0, 8)}…</code></div><div className="data-row"><span>保存使用量</span><strong>{storage}</strong></div><div className="data-row"><span>最後の書き出し</span><strong>{settings.lastBackupAt ? new Date(settings.lastBackupAt).toLocaleString('ja-JP') : 'まだありません'}</strong></div><button className="secondary-button" onClick={() => navigator.storage?.persist?.().then(ok => alert(ok ? '保存保護が許可されました' : 'ブラウザによって許可されませんでした'))}>保存保護を要求</button></section><section className="card setting-section"><div className="setting-heading"><LockKeyhole size={20} /><div><h2>暗号化バックアップ</h2><p>パスワードで保護した .coachbundle を保存・復元します。</p></div></div><label className="field">バックアップ用パスワード<input type="password" value={password} onChange={e => setPassword(e.target.value)} placeholder="10文字以上" /></label><button className="secondary-button" disabled={password.length < 10} onClick={() => run(() => exportBackup(password), 'バックアップを書き出しました')}><Download size={16} /> 書き出す</button><div className="divider"/><label className="field">復元するファイル<input type="file" accept=".coachbundle,application/json" onChange={e => { setFile(e.target.files?.[0] ?? null); setRestoreInfo(null) }} /></label><button className="secondary-button" disabled={!file || !password} onClick={inspect}><Upload size={16} /> 内容を検証</button>{restoreInfo && <div className="restore-preview"><strong>検証済み：{restoreInfo.tasks.length}件のタスク、{restoreInfo.completions.length}件の完了記録</strong><p>現在のデータを置き換えます。必要なら先に書き出してください。</p><button className="primary-button" onClick={restore}>このバックアップを復元</button></div>}</section></div></>
 }
 
 export default App

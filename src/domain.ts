@@ -26,7 +26,7 @@ export type Routine = { id: string; title: string; cadence: 'daily' | 'weekly' |
 export type WorkSession = { id: string; taskId: string; startedAt: string; endedAt: string; minutes: number }
 export type CommandReceipt = { key: string; hash: string; resultId: string; at: string }
 export type Audit = { id: string; taskId: string | null; operation: string; at: string; detail: string }
-export type Settings = { id: 'main'; profileId: string; datasetId: string; createdAt: string; coachName: string; dailyMinutes: number; dailyPoints: number; notifications: boolean; aiEnabled: boolean; automation: 'A0' | 'A1' | 'A2'; lastBackupAt: string | null }
+export type Settings = { id: 'main'; profileId: string; datasetId: string; createdAt: string; coachName: string; dailyMinutes: number; dailyPoints: number; notifications: boolean; aiEnabled: boolean; aiModel?: string; automation: 'A0' | 'A1' | 'A2'; lastBackupAt: string | null }
 
 export const emptyScore = (): ScoreInput => ({ mode: 'unset', manualPoints: null, minutes: null, travelMinutes: null, difficulty: null, uncertainty: null, coordination: null, physical: null, outing: null })
 export const today = (d = new Date()) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
