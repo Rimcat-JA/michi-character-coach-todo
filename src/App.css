@@ -68,3 +68,9 @@
 .super-focus-complete .field { width: 100%; text-align: left; }
 .super-focus-trouble { margin: 16px auto; max-width: 420px; padding: 14px; background: #faf9ff; border: 1px solid #ebe8f4; border-radius: 10px; }
 .super-focus-trouble p { font-size: 12px; }
+.breakdown-wizard .field { margin: 12px 0; }
+.breakdown-preview { margin-top: 14px; padding: 12px; border: 1px solid var(--border, #d9dde2); border-radius: 12px; }
+.breakdown-row { display: flex; gap: 8px; align-items: center; margin: 8px 0; }
+.breakdown-row input:first-child { flex: 1; min-width: 0; }
+.breakdown-row input[type='number'] { width: 80px; }
+.breakdown-preview button { margin-right: 8px; }

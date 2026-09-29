@@ -48,7 +48,7 @@
 | D01 | Spotlight | 受入確認済 | 今日10件から3件を既存IDの参照として選び、集中画面の選択肢を3件に限定。4件目を拒否し元タスク10件を維持するunitとWindows画面を確認。 |
 | D02 | Super Focus Mode | 受入確認済 | Spotlightの1件を開始・中断・再開・次候補・困っている・今日へ戻る操作で扱う。中断区間を除く経過と未設定ptの0pt手動確認後の完了をunitとWindows画面で確認。 |
 | D03 | Truncated List | 受入確認済 | 20件中5件表示で残り15件を示し、全件表示へ戻せることをunitとWindows画面で確認。 |
-| D04 | Procrastination Wizard／Task Breakdown | 受入未確認 | 受入試験を未実施。 |
+| D04 | Procrastination Wizard／Task Breakdown | 受入確認済 | 理由別の案を確認・編集して採用。未採用案はDBに入らず、40ptを3分割して親子を完了しても合計40pt。unitとWindows画面で確認。 |
 | D05 | This or That | 受入確認済 | 実行可能候補2件を重複なく表示。候補1件では一件だけと再計画案内をunitで確認。Windows画面でも二択を確認。 |
 | D06 | Suggested Task | 受入確認済 | 実行可能な登録済みIDだけを推薦。保存条件・依存解決・期限に一致する理由をunitで確認し、Windows画面で推薦を表示。 |
 | D07 | Random Task／Task Jar | 受入確認済 | 依存待ちを抽選対象から除き、seedと候補IDを監査へ保存。再現可能なunitとWindows画面を確認。 |
