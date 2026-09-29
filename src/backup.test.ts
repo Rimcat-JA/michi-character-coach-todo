@@ -15,6 +15,7 @@ import { rolloverTask } from './rollover'
 import { createThemeRule } from './themes'
 import { assignDaySection, setDaySectionMode } from './day-sections'
 import { createSmartList } from './smart-lists'
+import { setFocusProjects } from './focus-projects'
 import { inspectBackup, restoreBackup } from './backup'
 import { validateSnapshot, type Snapshot } from './backup-validation'
 
@@ -28,7 +29,7 @@ async function snapshot(): Promise<Snapshot> {
     completions: await db.completions.toArray(), ledger: await db.ledger.toArray(),
     routines: await db.routines.toArray(), sessions: await db.sessions.toArray(),
     commands: await db.commands.toArray(), audits: await db.audits.toArray(),
-    settings: await db.settings.toArray(), containers: await db.containers.toArray(), checklistItems: await db.checklistItems.toArray(), labelGroups: await db.labelGroups.toArray(), labelDefinitions: await db.labelDefinitions.toArray(), savedTemplates: await db.savedTemplates.toArray(), taskNotes: await db.taskNotes.toArray(), taskComments: await db.taskComments.toArray(), taskAttachments: attachments, taskDependencies: await db.taskDependencies.toArray(), planningBuckets: await db.planningBuckets.toArray(), timeBlocks: await db.timeBlocks.toArray(), calendarEvents: await db.calendarEvents.toArray(), rollovers: await db.rollovers.toArray(), themeRules: await db.themeRules.toArray(), smartLists: await db.smartLists.toArray()
+    settings: await db.settings.toArray(), containers: await db.containers.toArray(), checklistItems: await db.checklistItems.toArray(), labelGroups: await db.labelGroups.toArray(), labelDefinitions: await db.labelDefinitions.toArray(), savedTemplates: await db.savedTemplates.toArray(), taskNotes: await db.taskNotes.toArray(), taskComments: await db.taskComments.toArray(), taskAttachments: attachments, taskDependencies: await db.taskDependencies.toArray(), planningBuckets: await db.planningBuckets.toArray(), timeBlocks: await db.timeBlocks.toArray(), calendarEvents: await db.calendarEvents.toArray(), rollovers: await db.rollovers.toArray(), themeRules: await db.themeRules.toArray(), smartLists: await db.smartLists.toArray(), focusSelections: await db.focusSelections.toArray()
   }
 }
 
@@ -211,5 +212,15 @@ describe('バックアップの復元前検証', () => {
     const corrupt = structuredClone(saved)
     corrupt.smartLists![0].ast = { type: 'condition', field: 'minutes', operator: 'eval' } as never
     expect(() => validateSnapshot(corrupt)).toThrow('演算子')
+  })
+  it('本人の重点案件と表示件数を復元する', async () => {
+    await createTask({ ...newTaskInput(), title: '案件B', project: 'B' })
+    await setFocusProjects('2026-10-01', ['B'], 'user')
+    await db.settings.update('main', { taskListLimit: 5 })
+    const saved = await snapshot()
+    await db.focusSelections.clear()
+    await restoreBackup(saved)
+    expect((await db.focusSelections.toArray())[0]).toMatchObject({ projects: ['B'], source: 'user' })
+    expect((await db.settings.get('main'))?.taskListLimit).toBe(5)
   })
 })

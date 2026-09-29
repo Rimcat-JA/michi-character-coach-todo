@@ -47,3 +47,14 @@
 .smart-list-toolbar select { min-width: 220px; }
 .smart-list-builder { display: grid; gap: 12px; padding-top: 14px; }
 .smart-list-condition input { min-width: 120px; flex: 1; }
+.focus-project-choices { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 12px; }
+.focus-project-choices label { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; }
+.matrix-panel { padding: 18px 24px; margin-bottom: 20px; }
+.matrix-panel summary { cursor: pointer; color: #705be0; font-weight: 700; }
+.matrix-body { padding-top: 18px; }
+.matrix-controls { display: flex; gap: 12px; align-items: end; flex-wrap: wrap; margin-bottom: 15px; }
+.matrix-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(155px, 1fr)); gap: 8px; }
+.matrix-cell { min-height: 85px; border: 1px solid #ebe8f4; background: #faf9ff; border-radius: 9px; padding: 10px; display: flex; flex-direction: column; gap: 4px; }
+.matrix-cell strong { font-size: 11px; }
+.matrix-cell small { font-size: 10px; color: #817b94; }
+.matrix-cell button { text-align: left; }

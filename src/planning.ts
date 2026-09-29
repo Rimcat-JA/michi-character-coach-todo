@@ -1,15 +1,16 @@
 import type { Task, TaskDependency, ThemeRule } from './domain'
 import { executableTasks } from './dependencies'
 import { rankTasksByTheme } from './themes'
+import { rankTasksForFocus } from './focus-projects'
 
 export function reviewDueTasks(tasks: Task[], date: string): Task[] {
   return tasks.filter(task => !task.deletedAt && task.status === 'open' && task.reviewDate !== null && task.reviewDate <= date)
     .sort((a, b) => a.reviewDate!.localeCompare(b.reviewDate!) || b.importance - a.importance)
 }
 
-export function suggestedTasks(tasks: Task[], date: string, limit = 3, dependencies: TaskDependency[] = [], now = new Date().toISOString(), themeRules: ThemeRule[] = []): Task[] {
+export function suggestedTasks(tasks: Task[], date: string, limit = 3, dependencies: TaskDependency[] = [], now = new Date().toISOString(), themeRules: ThemeRule[] = [], focusProjects: string[] = []): Task[] {
   const eligible = executableTasks(tasks, dependencies).filter(task => !task.backburner && (!task.snoozedUntil || task.snoozedUntil <= now) && (!task.availableFrom || task.availableFrom <= date) && (!task.deferredUntil || task.deferredUntil <= date))
-  return (themeRules.length ? rankTasksByTheme(eligible, date, themeRules) : eligible.sort((a, b) => (a.dueDate ?? '9999').localeCompare(b.dueDate ?? '9999') || b.importance - a.importance)).slice(0, limit)
+  return (focusProjects.length ? rankTasksForFocus(eligible, date, focusProjects, themeRules) : themeRules.length ? rankTasksByTheme(eligible, date, themeRules) : eligible.sort((a, b) => (a.dueDate ?? '9999').localeCompare(b.dueDate ?? '9999') || b.importance - a.importance)).slice(0, limit)
 }
 
 export function contextSuggestions(tasks: Task[], date: string, energy: number | null, focus: number | null, dependencies: TaskDependency[] = [], now = new Date().toISOString(), themeRules: ThemeRule[] = []) {

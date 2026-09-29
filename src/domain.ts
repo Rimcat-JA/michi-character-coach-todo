@@ -38,6 +38,7 @@ export type ThemeRule = { id: string; ownerId: string; category: string; weekday
 export type SmartListField = 'status' | 'title' | 'project' | 'labels' | 'scheduledDate' | 'dueDate' | 'importance' | 'effectivePoints' | 'minutes' | 'energyNeed' | 'focusNeed'
 export type SmartListAst = { type: 'all' | 'any'; children: SmartListAst[] } | { type: 'not'; child: SmartListAst } | { type: 'condition'; field: SmartListField; operator: 'eq' | 'neq' | 'lte' | 'gte' | 'contains' | 'is_unknown'; value?: string | number }
 export type SmartList = { id: string; ownerId: string; name: string; ast: SmartListAst; revision: number; createdAt: string; updatedAt: string }
+export type FocusProjectSelection = { id: string; ownerId: string; date: string; projects: string[]; source: 'user' | 'coach'; revision: number; updatedAt: string }
 export type Assessment = { id: string; taskId: string; score: ScoreInput; result: ScoreResult; createdAt: string; origin: 'human' | 'routine'; ruleVersion: 'v1' }
 export type Completion = { id: string; taskId: string; originalAt: string; currentAt: string | null; originalPoints: number | null; netPoints: number | null; lastConfirmedPoints?: number | null; scoreState: 'pending' | 'confirmed'; title: string; project: string }
 export type LedgerEntry = { id: string; completionId: string; taskId: string; kind: 'award' | 'adjust' | 'reverse' | 'restore'; delta: number; at: string; reason: string }
@@ -45,7 +46,7 @@ export type Routine = { id: string; title: string; cadence: 'daily' | 'weekly' |
 export type WorkSession = { id: string; taskId: string; startedAt: string; endedAt: string; minutes: number }
 export type CommandReceipt = { key: string; hash: string; resultId: string; at: string }
 export type Audit = { id: string; taskId: string | null; operation: string; at: string; detail: string }
-export type Settings = { id: 'main'; profileId: string; datasetId: string; createdAt: string; coachName: string; dailyMinutes: number; dailyPoints: number; notifications: boolean; aiEnabled: boolean; aiModel?: string; daySectionMode?: 'halfday' | 'category' | 'timeblock' | 'custom'; automation: 'A0' | 'A1' | 'A2'; lastBackupAt: string | null }
+export type Settings = { id: 'main'; profileId: string; datasetId: string; createdAt: string; coachName: string; dailyMinutes: number; dailyPoints: number; notifications: boolean; aiEnabled: boolean; aiModel?: string; daySectionMode?: 'halfday' | 'category' | 'timeblock' | 'custom'; taskListLimit?: number | null; automation: 'A0' | 'A1' | 'A2'; lastBackupAt: string | null }
 
 export const emptyScore = (): ScoreInput => ({ mode: 'unset', manualPoints: null, minutes: null, travelMinutes: null, difficulty: null, uncertainty: null, coordination: null, physical: null, outing: null })
 export const today = (d = new Date()) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`

@@ -1,4 +1,4 @@
-import { calculateScore, validateTaskInput, validateDate, type Assessment, type Audit, type CalendarEvent, type ChecklistItem, type CommandReceipt, type Completion, type Container, type LabelDefinition, type LabelGroup, type LedgerEntry, type PlanningBucket, type RolloverEntry, type Routine, type SavedTemplate, type Settings, type SmartList, type Task, type TaskAttachment, type TaskComment, type TaskDependency, type TaskNote, type ThemeRule, type TimeBlock, type WorkSession } from './domain'
+import { calculateScore, validateTaskInput, validateDate, type Assessment, type Audit, type CalendarEvent, type ChecklistItem, type CommandReceipt, type Completion, type Container, type FocusProjectSelection, type LabelDefinition, type LabelGroup, type LedgerEntry, type PlanningBucket, type RolloverEntry, type Routine, type SavedTemplate, type Settings, type SmartList, type Task, type TaskAttachment, type TaskComment, type TaskDependency, type TaskNote, type ThemeRule, type TimeBlock, type WorkSession } from './domain'
 import { validateLabelSelection } from './labels'
 import { validateDependencyGraph } from './dependencies'
 import { validatePlanningBuckets } from './period-planning'
@@ -24,6 +24,7 @@ export type Snapshot = {
   rollovers?: RolloverEntry[]
   themeRules?: ThemeRule[]
   smartLists?: SmartList[]
+  focusSelections?: FocusProjectSelection[]
 }
 
 const tableNames = ['tasks', 'assessments', 'completions', 'ledger', 'routines', 'sessions', 'commands', 'audits', 'settings'] as const
@@ -82,6 +83,9 @@ export function validateSnapshot(input: unknown): asserts input is Snapshot {
   if (input.smartLists !== undefined && !Array.isArray(input.smartLists)) throw new Error('smartListsが不正です')
   const smartLists = (input.smartLists ?? []) as SmartList[]
   unique(smartLists, 'smartLists', 'id')
+  if (input.focusSelections !== undefined && !Array.isArray(input.focusSelections)) throw new Error('focusSelectionsが不正です')
+  const focusSelections = (input.focusSelections ?? []) as FocusProjectSelection[]
+  unique(focusSelections, 'focusSelections', 'id')
   if (input.rollovers !== undefined && !Array.isArray(input.rollovers)) throw new Error('rolloversが不正です')
   const rollovers = (input.rollovers ?? []) as RolloverEntry[]
   unique(rollovers, 'rollovers', 'id')
@@ -251,11 +255,13 @@ export function validateSnapshot(input: unknown): asserts input is Snapshot {
     if (!taskIds.has(attachment.taskId) || attachment.ownerId !== settings.profileId || !filled(attachment.name) || attachment.name.length > 200 || [...attachment.name].some(char => char.charCodeAt(0) < 32 || '\\/:*?"<>|'.includes(char)) || typeof attachment.mediaType !== 'string' || attachment.mediaType.length > 120 || !Number.isInteger(attachment.size) || attachment.size < 1 || attachment.size > 5 * 1024 * 1024 || !/^[a-f0-9]{64}$/.test(attachment.sha256) || !timestamp(attachment.createdAt) || typeof attachment.contentBase64 !== 'string' || !/^[A-Za-z0-9+/]*={0,2}$/.test(attachment.contentBase64) || attachment.contentBase64.length > Math.ceil(attachment.size / 3) * 4) throw new Error('添付が不正です')
   }
   if (containers.some(raw => (raw as Container).ownerId !== settings.profileId)) throw new Error('カテゴリ・プロジェクトの所有者が不正です')
-  const allowedSettings = new Set(['id', 'profileId', 'datasetId', 'createdAt', 'coachName', 'dailyMinutes', 'dailyPoints', 'notifications', 'aiEnabled', 'aiModel', 'daySectionMode', 'automation', 'lastBackupAt'])
+  const allowedSettings = new Set(['id', 'profileId', 'datasetId', 'createdAt', 'coachName', 'dailyMinutes', 'dailyPoints', 'notifications', 'aiEnabled', 'aiModel', 'daySectionMode', 'taskListLimit', 'automation', 'lastBackupAt'])
   if (Object.keys(settings).some(key => !allowedSettings.has(key))) throw new Error('設定に未対応の項目があります')
   if (!filled(settings.profileId) || !filled(settings.datasetId) || !timestamp(settings.createdAt) || typeof settings.coachName !== 'string' || !Number.isInteger(settings.dailyMinutes) || settings.dailyMinutes < 0 || !Number.isInteger(settings.dailyPoints) || settings.dailyPoints < 0 || typeof settings.aiEnabled !== 'boolean' || typeof settings.notifications !== 'boolean' || !['A0', 'A1', 'A2'].includes(settings.automation) || !nullableString(settings.lastBackupAt) || (settings.lastBackupAt !== null && !timestamp(settings.lastBackupAt))) throw new Error('設定が不正です')
   for (const rule of themeRules) { if (rule.ownerId !== settings.profileId || !timestamp(rule.createdAt)) throw new Error('重点テーマが不正です'); validateThemeRule(rule) }
   for (const list of smartLists) { if (list.ownerId !== settings.profileId || !filled(list.name) || list.name.length > 100 || !Number.isInteger(list.revision) || list.revision < 1 || !timestamp(list.createdAt) || !timestamp(list.updatedAt)) throw new Error('Smart Listが不正です'); validateSmartListAst(list.ast) }
+  for (const focus of focusSelections) { validateDate(focus.date, '重点日'); if (focus.id !== `${settings.profileId}:${focus.date}` || focus.ownerId !== settings.profileId || !Array.isArray(focus.projects) || focus.projects.length > 5 || new Set(focus.projects).size !== focus.projects.length || focus.projects.some(name => !filled(name) || name.length > 300) || !['user', 'coach'].includes(focus.source) || !Number.isInteger(focus.revision) || focus.revision < 1 || !timestamp(focus.updatedAt)) throw new Error('重点プロジェクトが不正です') }
   if (settings.aiModel !== undefined && (typeof settings.aiModel !== 'string' || settings.aiModel.length > 120)) throw new Error('AIモデルIDが不正です')
   if (settings.daySectionMode !== undefined && !['halfday', 'category', 'timeblock', 'custom'].includes(settings.daySectionMode)) throw new Error('今日の表示区分が不正です')
+  if (settings.taskListLimit !== undefined && settings.taskListLimit !== null && ![5, 10, 20, 50].includes(settings.taskListLimit)) throw new Error('一覧の表示件数が不正です')
 }
