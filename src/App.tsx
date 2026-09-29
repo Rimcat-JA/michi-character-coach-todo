@@ -37,17 +37,18 @@ import TimeTargetsView from './TimeTargetsView'
 import { captureDayProgressBaseline } from './progress'
 import HabitsView from './HabitsView'
 import GoalsView from './GoalsView'
+import JournalView from './JournalView'
 import { FocusChoiceTools } from './FocusChoiceTools'
 import SuperFocusView from './SuperFocusView'
 import { setSpotlight } from './focus-tools'
 import { projectNextStepStatus } from './dependencies'
 import './App.css'
 
-type View = 'today' | 'tasks' | 'projects' | 'labels' | 'saved' | 'plan' | 'periods' | 'calendar' | 'coach' | 'focus' | 'history' | 'routines' | 'habits' | 'goals' | 'settings'
+type View = 'today' | 'tasks' | 'projects' | 'labels' | 'saved' | 'plan' | 'periods' | 'calendar' | 'coach' | 'focus' | 'history' | 'routines' | 'habits' | 'goals' | 'journal' | 'settings'
 const INITIAL_NOW = new Date()
 const nav: { view: View; label: string; icon: typeof Inbox }[] = [
   { view: 'today', label: '今日', icon: LayoutDashboard }, { view: 'tasks', label: 'すべてのタスク', icon: ListTodo }, { view: 'projects', label: 'カテゴリとプロジェクト', icon: FolderTree }, { view: 'labels', label: 'ラベル', icon: Tags }, { view: 'saved', label: 'テンプレート', icon: ArchiveRestore }, { view: 'plan', label: '計画', icon: CalendarDays }, { view: 'periods', label: '週・月・四半期', icon: CalendarDays }, { view: 'calendar', label: '時間枠と予定', icon: CalendarDays },
-  { view: 'coach', label: 'コーチ', icon: MessageCircle }, { view: 'focus', label: '集中', icon: Focus }, { view: 'history', label: '実績', icon: History }, { view: 'routines', label: 'ルーティン', icon: Repeat2 }, { view: 'habits', label: '習慣', icon: Repeat2 }, { view: 'goals', label: '目標', icon: Sparkles }, { view: 'settings', label: '設定とデータ', icon: Settings2 }
+  { view: 'coach', label: 'コーチ', icon: MessageCircle }, { view: 'focus', label: '集中', icon: Focus }, { view: 'history', label: '実績', icon: History }, { view: 'routines', label: 'ルーティン', icon: Repeat2 }, { view: 'habits', label: '習慣', icon: Repeat2 }, { view: 'goals', label: '目標', icon: Sparkles }, { view: 'journal', label: 'ノートと記録', icon: History }, { view: 'settings', label: '設定とデータ', icon: Settings2 }
 ]
 function dateLabel(date: string | null) { if (!date) return '日付なし'; const d = new Date(`${date}T12:00:00`); return `${d.getMonth() + 1}/${d.getDate()}` }
 function dateLong(date: string) { const d = new Date(`${date}T12:00:00`); return new Intl.DateTimeFormat('ja-JP', { month: 'long', day: 'numeric', weekday: 'short' }).format(d) }
@@ -147,6 +148,7 @@ function App() {
         {view === 'routines' && <RoutinesView routines={routines} run={run} />}
         {view === 'habits' && <HabitsView run={run} />}
         {view === 'goals' && <GoalsView run={run} />}
+        {view === 'journal' && <JournalView run={run} />}
         {view === 'settings' && <SettingsView settings={settings} run={run} />}
       </div>
     </main>

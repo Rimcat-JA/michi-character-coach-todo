@@ -89,3 +89,6 @@
 .goal-controls input { width: 90px; }
 .checkin-row { margin: 12px 0; padding: 12px; border: 1px solid var(--border, #e0e3e8); border-radius: 10px; }
 .checkin-row button { margin-right: 8px; }
+.tracker-row { border-top: 1px solid var(--border, #e0e3e8); padding: 12px 0; }
+.tracker-row strong, .tracker-row small { display: block; margin-bottom: 7px; }
+.tracker-row input { width: 115px; margin-right: 8px; }
