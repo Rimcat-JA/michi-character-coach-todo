@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react'
 import { useLiveQuery } from 'dexie-react-hooks'
-import { ArchiveRestore, CalendarDays, Check, CheckCircle2, ChevronDown, Clock3, CloudOff, Database, Download, Flame, Focus, FolderTree, History, Inbox, LayoutDashboard, ListTodo, LockKeyhole, Menu, MessageCircle, Moon, MoreHorizontal, Plus, Repeat2, Search, Settings2, ShieldCheck, Sparkles, Tags, Trash2, Upload, X } from 'lucide-react'
+import { ArchiveRestore, CalendarDays, Check, CheckCircle2, ChevronDown, Clock3, CloudOff, Database, Download, Focus, FolderTree, History, Inbox, LayoutDashboard, ListTodo, LockKeyhole, Menu, MessageCircle, Moon, MoreHorizontal, Plus, Repeat2, Search, Settings2, ShieldCheck, Sparkles, Tags, Trash2, Upload, X } from 'lucide-react'
 import { db, ensureSettings } from './db'
-import { bulkUpdateTasksAtomic, createRoutine, createTask, correctCompletion, expandRoutines, logSession, newTaskInput, restoreTask, setTaskFlag, trashTask, undoCompletion, updateTask, completeTask, type BulkTaskPatch, type TaskInput } from './commands'
+import { bulkUpdateTasksAtomic, createRoutine, createTask, correctCompletion, expandRoutines, newTaskInput, restoreTask, setTaskFlag, trashTask, undoCompletion, updateTask, completeTask, type BulkTaskPatch, type TaskInput } from './commands'
 import { addDays, calculateScore, emptyScore, scoreText, today, type ChecklistItem, type Completion, type Container, type LabelDefinition, type LabelGroup, type Routine, type SavedTemplate, type ScoreInput, type Settings, type SmartList, type Task, type TimeBlock, type WorkSession } from './domain'
 import { exportBackup, exportPortableJson, exportTasksCsv, exportTasksIcs, inspectBackup, restoreBackup } from './backup'
 import { unionSessionMinutes } from './time-tracking'
@@ -31,7 +31,8 @@ import { MatrixView } from './MatrixView'
 import { truncateTasks } from './list-view'
 import TaskStaleness from './TaskStaleness'
 import { FocusChoiceTools } from './FocusChoiceTools'
-import { setSpotlight, spotlightTasks } from './focus-tools'
+import SuperFocusView from './SuperFocusView'
+import { setSpotlight } from './focus-tools'
 import { projectNextStepStatus } from './dependencies'
 import './App.css'
 
@@ -133,7 +134,7 @@ function App() {
         {view === 'periods' && <PeriodPlanningView buckets={planningBuckets} tasks={tasks} ownerId={settings.profileId} run={run} />}
         {view === 'calendar' && <CalendarPlanningView blocks={timeBlocks} events={calendarEvents} tasks={tasks} projects={containers} sessions={sessions} ownerId={settings.profileId} run={run} />}
         {view === 'coach' && <CoachView tasks={open} settings={settings} onEdit={setEditor} onNew={() => setEditor('new')} />}
-        {view === 'focus' && <><FocusView tasks={open} sessions={sessions} onEdit={setEditor} run={run} /><FocusChoiceTools tasks={tasks} dependencies={dependencies} themes={themeRules.filter(rule => rule.ownerId === settings.profileId)} focusProjects={focusSelection?.projects ?? []} lists={smartLists} ownerId={settings.profileId} date={currentDate} now={nowIso} onEdit={setEditor} run={run} /></>}
+        {view === 'focus' && <><SuperFocusView tasks={open} sessions={sessions} onEdit={setEditor} onBack={() => go('today')} run={run} /><FocusChoiceTools tasks={tasks} dependencies={dependencies} themes={themeRules.filter(rule => rule.ownerId === settings.profileId)} focusProjects={focusSelection?.projects ?? []} lists={smartLists} ownerId={settings.profileId} date={currentDate} now={nowIso} onEdit={setEditor} run={run} /></>}
         {view === 'history' && <HistoryView completions={completions} ledger={ledger} sessions={sessions} tasks={tasks} onEdit={id => { const t = tasks.find(x => x.id === id); if (t) setEditor(t) }} run={run} />}
         {view === 'routines' && <RoutinesView routines={routines} run={run} />}
         {view === 'settings' && <SettingsView settings={settings} run={run} />}
@@ -432,18 +433,6 @@ function CoachView({ tasks, settings, onEdit, onNew }: { tasks: Task[]; settings
     </div>
   </>
 }
-function FocusView({ tasks, sessions, onEdit, run }: { tasks: Task[]; sessions: WorkSession[]; onEdit: (t: Task) => void; run: (fn: () => Promise<unknown>, success?: string) => Promise<boolean> }) {
-  const [selected, setSelected] = useState(''), [started, setStarted] = useState<string | null>(() => localStorage.getItem('michi-focus-start')), [tick, setTick] = useState(INITIAL_NOW.getTime())
-  useEffect(() => { const id = setInterval(() => setTick(Date.now()), 1000); return () => clearInterval(id) }, [])
-  const elapsed = started ? Math.max(0, Math.floor((tick - new Date(started).getTime()) / 1000)) : 0
-  const spotlight = spotlightTasks(tasks)
-  function start() { if (!selected || !spotlight.some(task => task.id === selected)) return; const at = new Date(tick).toISOString(); localStorage.setItem('michi-focus-start', at); localStorage.setItem('michi-focus-task', selected); setStarted(at) }
-  async function stop() { if (!started) return; const taskId = localStorage.getItem('michi-focus-task') || selected; if (!(await run(() => logSession(taskId, started, new Date().toISOString()), '作業時間を記録しました'))) return; localStorage.removeItem('michi-focus-start'); localStorage.removeItem('michi-focus-task'); setStarted(null) }
-  const currentTask = tasks.find(t => t.id === (localStorage.getItem('michi-focus-task') || selected))
-  const todayMinutes = unionSessionMinutes(sessions.filter(s => today(new Date(s.startedAt)) === today()))
-  return <><div className="page-heading"><div><span className="eyebrow">FOCUS MODE</span><h1>いまのひとつに集中</h1><p>時間を記録しても、タスクは自動で完了しません。</p></div></div><div className="focus-card card"><div className="focus-ring"><Flame size={30} /><strong>{String(Math.floor(elapsed / 3600)).padStart(2, '0')}:{String(Math.floor(elapsed % 3600 / 60)).padStart(2, '0')}:{String(elapsed % 60).padStart(2, '0')}</strong><small>集中時間</small></div>{started ? <><h2>{currentTask?.title ?? '作業中'}</h2><button className="primary-button" onClick={stop}>終了して時間を記録</button></> : <><label className="field focus-select">取り組むタスク<select value={selected} onChange={e => setSelected(e.target.value)}><option value="">{spotlight.length ? "選択してください" : "Spotlightへタスクを追加してください"}</option>{spotlight.map(t => <option key={t.id} value={t.id}>{t.title}</option>)}</select></label><button className="primary-button" disabled={!selected || !spotlight.some(task => task.id === selected)} onClick={start}>集中を始める</button></>}{currentTask && <button className="text-button" onClick={() => onEdit(currentTask)}>タスクを開く →</button>}</div><div className="card info-card"><Clock3 size={20} /><p>今日記録した作業時間は <strong>{todayMinutes}分</strong> です。ポイント実績とは別に保存しています。</p></div></>
-}
-
 function HistoryView({ completions, ledger, sessions, tasks, onEdit, run }: { completions: { taskId: string; title: string; currentAt: string | null; netPoints: number | null; scoreState: string }[]; ledger: { delta: number }[]; sessions: WorkSession[]; tasks: Task[]; onEdit: (id: string) => void; run: (fn: () => Promise<unknown>, success?: string) => Promise<boolean> }) {
   const valid = completions.filter(c => c.currentAt).sort((a, b) => b.currentAt!.localeCompare(a.currentAt!))
   const total = ledger.reduce((n, e) => n + e.delta, 0)
