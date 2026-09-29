@@ -1,4 +1,4 @@
-import { calculateScore, validateTaskInput, validateDate, type Assessment, type Audit, type CalendarEvent, type ChecklistItem, type CommandReceipt, type Completion, type Container, type FocusProjectSelection, type Goal, type GoalCheckIn, type Habit, type HabitLog, type LabelDefinition, type LabelGroup, type LedgerEntry, type PlanningBucket, type RolloverEntry, type Routine, type SavedTemplate, type Settings, type SmartList, type Task, type TaskAttachment, type TaskComment, type TaskDependency, type TaskNote, type ThemeRule, type TimeBlock, type WorkSession } from './domain'
+import { calculateScore, validateTaskInput, validateDate, type Assessment, type Audit, type CalendarEvent, type ChecklistItem, type CommandReceipt, type Completion, type Container, type DayNote, type FocusProjectSelection, type Goal, type GoalCheckIn, type Habit, type HabitLog, type LabelDefinition, type LabelGroup, type LedgerEntry, type PlanningBucket, type RolloverEntry, type Routine, type SavedTemplate, type Settings, type SmartList, type Task, type TaskAttachment, type TaskComment, type TaskDependency, type TaskNote, type ThemeRule, type TimeBlock, type TrackerDefinition, type TrackerEntry, type WorkSession } from './domain'
 import { validateLabelSelection } from './labels'
 import { validateDependencyGraph } from './dependencies'
 import { validatePlanningBuckets } from './period-planning'
@@ -29,6 +29,9 @@ export type Snapshot = {
   habitLogs?: HabitLog[]
   goals?: Goal[]
   goalCheckIns?: GoalCheckIn[]
+  trackerDefinitions?: TrackerDefinition[]
+  trackerEntries?: TrackerEntry[]
+  dayNotes?: DayNote[]
 }
 
 const tableNames = ['tasks', 'assessments', 'completions', 'ledger', 'routines', 'sessions', 'commands', 'audits', 'settings'] as const
@@ -299,6 +302,21 @@ export function validateSnapshot(input: unknown): asserts input is Snapshot {
   for (const checkIn of checkIns) {
     validateDate(checkIn.date, 'チェックイン日')
     if (!goalIds.has(checkIn.goalId) || !filled(checkIn.answer) || checkIn.answer.length > 10000 || !nullableString(checkIn.summary) || (checkIn.summary !== null && checkIn.summary.length > 10000) || ![null, 'ai', 'human'].includes(checkIn.summaryOrigin) || !Number.isInteger(checkIn.summaryRevision) || checkIn.summaryRevision < 1 || !Array.isArray(checkIn.history) || checkIn.history.length > 1000 || checkIn.history.some(item => !nullableString(item.summary) || !timestamp(item.at)) || !timestamp(checkIn.createdAt) || !timestamp(checkIn.updatedAt) || !nullableString(checkIn.deletedAt) || (checkIn.deletedAt !== null && !timestamp(checkIn.deletedAt))) throw new Error('チェックインが不正です')
+  }
+  if (input.trackerDefinitions !== undefined && !Array.isArray(input.trackerDefinitions)) throw new Error('記録項目が不正です')
+  if (input.trackerEntries !== undefined && !Array.isArray(input.trackerEntries)) throw new Error('記録値が不正です')
+  if (input.dayNotes !== undefined && !Array.isArray(input.dayNotes)) throw new Error('日記が不正です')
+  const trackers = (input.trackerDefinitions ?? []) as TrackerDefinition[], trackerEntries = (input.trackerEntries ?? []) as TrackerEntry[], dayNotes = (input.dayNotes ?? []) as DayNote[]
+  const trackerIds = unique(trackers, '記録項目', 'id')
+  const byTracker = new Map(trackers.map(tracker => [tracker.id, tracker]))
+  for (const tracker of trackers) if (tracker.ownerId !== settings.profileId || !filled(tracker.name) || tracker.name.length > 100 || !filled(tracker.unit) || tracker.unit.length > 30 || !Number.isFinite(tracker.min) || !Number.isFinite(tracker.max) || tracker.min >= tracker.max || tracker.min < -1000000 || tracker.max > 1000000 || tracker.private !== true || !timestamp(tracker.createdAt) || !timestamp(tracker.updatedAt)) throw new Error('記録項目が不正です')
+  unique(trackerEntries, '記録値', 'id')
+  for (const entry of trackerEntries) { const tracker = byTracker.get(entry.trackerId); if (!trackerIds.has(entry.trackerId) || !tracker || entry.value !== null && (!Number.isFinite(entry.value) || entry.value < tracker.min || entry.value > tracker.max) || !timestamp(entry.recordedAt) || !['user', 'device'].includes(entry.source) || typeof entry.note !== 'string' || entry.note.length > 1000) throw new Error('記録値が不正です') }
+  unique(dayNotes, '日記', 'id')
+  for (const note of dayNotes) {
+    validateDate(note.date, '日記の日付')
+    try { new Intl.DateTimeFormat('ja-JP', { timeZone: note.timezone }) } catch { throw new Error('日記のtimezoneが不正です') }
+    if (note.ownerId !== settings.profileId || note.id !== `${note.ownerId}:${note.date}:${note.timezone}` || typeof note.humanText !== 'string' || note.humanText.length > 50000 || !nullableString(note.aiSummary) || (note.aiSummary !== null && note.aiSummary.length > 10000) || ![null, 'ai', 'human'].includes(note.summaryOrigin) || !Number.isInteger(note.humanRevision) || note.humanRevision < 1 || !Number.isInteger(note.summaryRevision) || note.summaryRevision < 0 || note.summaryOfHumanRevision !== null && (!Number.isInteger(note.summaryOfHumanRevision) || note.summaryOfHumanRevision < 1 || note.summaryOfHumanRevision > note.humanRevision) || !Array.isArray(note.history) || note.history.length > 1000 || note.history.some(item => !['human', 'summary'].includes(item.kind) || !nullableString(item.text) || !timestamp(item.at) || !Number.isInteger(item.revision) || item.revision < 0) || !timestamp(note.createdAt) || !timestamp(note.updatedAt) || !nullableString(note.deletedAt) || (note.deletedAt !== null && !timestamp(note.deletedAt))) throw new Error('日記が不正です')
   }
   if (settings.timeTargets !== undefined) {
     if (!Array.isArray(settings.timeTargets) || settings.timeTargets.length > 100 || new Set(settings.timeTargets.map(target => target.id)).size !== settings.timeTargets.length) throw new Error('時間目標が不正です')
