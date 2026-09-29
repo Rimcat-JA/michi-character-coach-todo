@@ -6,9 +6,21 @@ export function reviewDueTasks(tasks: Task[], date: string): Task[] {
 }
 
 export function suggestedTasks(tasks: Task[], date: string, limit = 3): Task[] {
-  return tasks.filter(task => !task.deletedAt && task.status === 'open' && (!task.availableFrom || task.availableFrom <= date) && (!task.deferredUntil || task.deferredUntil <= date))
+  return tasks.filter(task => !task.deletedAt && task.status === 'open' && !task.backburner && (!task.availableFrom || task.availableFrom <= date) && (!task.deferredUntil || task.deferredUntil <= date))
     .sort((a, b) => (a.dueDate ?? '9999').localeCompare(b.dueDate ?? '9999') || b.importance - a.importance)
     .slice(0, limit)
+}
+
+export function urgency(task: Pick<Task, 'dueDate'>, date: string): '期限超過' | '今日' | '近日' | '先' | '期限なし' {
+  if (!task.dueDate) return '期限なし'
+  const days = Math.round((Date.parse(`${task.dueDate}T12:00:00Z`) - Date.parse(`${date}T12:00:00Z`)) / 86400000)
+  return days < 0 ? '期限超過' : days === 0 ? '今日' : days <= 3 ? '近日' : '先'
+}
+
+export function sortTasks(tasks: Task[], field: 'scheduled' | 'frog' | 'weight') {
+  const result = [...tasks]
+  if (field === 'scheduled') return result.sort((a, b) => (a.scheduledDate ?? '9999').localeCompare(b.scheduledDate ?? '9999') || b.updatedAt.localeCompare(a.updatedAt))
+  return result.sort((a, b) => (b[field] ?? -1) - (a[field] ?? -1) || b.updatedAt.localeCompare(a.updatedAt))
 }
 
 export function nextAvailableDate(task: Task): string | null {

@@ -19,8 +19,8 @@ async function receipt<T>(key: string, payload: unknown, run: () => Promise<T>):
     return result
   })
 }
-export type TaskInput = Pick<Task, 'title' | 'notes' | 'project' | 'labels' | 'scheduledDate' | 'dueDate' | 'targetDate' | 'reviewDate' | 'availableFrom' | 'importance' | 'score'> & { containerId?: string | null; deferredUntil?: string | null }
-export const newTaskInput = (): TaskInput => ({ title: '', notes: '', project: '', containerId: null, labels: [], scheduledDate: null, dueDate: null, targetDate: null, reviewDate: null, availableFrom: null, deferredUntil: null, importance: 1, score: emptyScore() })
+export type TaskInput = Pick<Task, 'title' | 'notes' | 'project' | 'labels' | 'scheduledDate' | 'dueDate' | 'targetDate' | 'reviewDate' | 'availableFrom' | 'importance' | 'score'> & { containerId?: string | null; deferredUntil?: string | null; frog?: number | null; weight?: number | null }
+export const newTaskInput = (): TaskInput => ({ title: '', notes: '', project: '', containerId: null, labels: [], scheduledDate: null, dueDate: null, targetDate: null, reviewDate: null, availableFrom: null, deferredUntil: null, importance: 1, frog: null, weight: null, score: emptyScore() })
 
 async function resolvedProject(input: TaskInput): Promise<string> {
   if (!input.containerId) return input.project
@@ -110,6 +110,18 @@ export async function updateTask(id: string, expectedRevision: number, input: Ta
     if (scoreChanged) await db.assessments.add({ id: assessmentId, taskId: id, score: { ...input.score }, result, createdAt: now(), origin: 'human', ruleVersion: 'v1' })
     await db.tasks.put({ ...old, ...input, project, title: input.title.trim(), labels: [...input.labels], score: { ...input.score }, assessmentId, effectivePoints: result.effective, revision: old.revision + 1, updatedAt: now() })
     await db.audits.add({ id: uid(), taskId: id, operation: 'update', at: now(), detail: '本人が編集' })
+    return id
+  })
+}
+export async function setTaskFlag(id: string, expectedRevision: number, flag: 'pinned' | 'backburner' | 'orbit', value: boolean, key: string = uid()) {
+  return receipt(key, { operation: 'set_flag', id, expectedRevision, flag, value }, async () => {
+    if (typeof value !== 'boolean') throw new Error('状態の値が不正です')
+    const task = await db.tasks.get(id)
+    if (!task || task.deletedAt) throw new Error('タスクが見つかりません')
+    if (task.revision !== expectedRevision) throw new ConflictError()
+    const at = now()
+    await db.tasks.put({ ...task, [flag]: value, revision: task.revision + 1, updatedAt: at })
+    await db.audits.add({ id: uid(), taskId: id, operation: 'set_flag', at, detail: `${flag}=${value}` })
     return id
   })
 }

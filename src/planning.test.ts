@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { emptyScore, type Task } from './domain'
-import { dayCapacity, filterTasksByDates, nextAvailableDate, reviewDueTasks, suggestedTasks } from './planning'
+import { dayCapacity, filterTasksByDates, nextAvailableDate, reviewDueTasks, sortTasks, suggestedTasks, urgency } from './planning'
 
 function task(id: string, overrides: Partial<Task> = {}): Task {
   return { id, generationKey: id, routineId: null, title: id, notes: '', project: '', labels: [], scheduledDate: null, dueDate: null, targetDate: null, reviewDate: null, availableFrom: null, importance: 1, score: emptyScore(), effectivePoints: null, assessmentId: id, status: 'open', revision: 1, createdAt: '2026-09-29T00:00:00.000Z', updatedAt: '2026-09-29T00:00:00.000Z', deletedAt: null, ...overrides }
@@ -35,5 +35,25 @@ describe('日付に基づく候補と見直し', () => {
     expect(reviewDueTasks([review], '2026-10-01').map(value => value.id)).toEqual(['review'])
     expect(review.status).toBe('open')
     expect(review.dueDate).toBe('2026-10-05')
+  })
+  it('期限が近づくと緊急表示だけ変わり、重要度と必要ポイントは不変', () => {
+    const item = task('deadline', { dueDate: '2026-10-05', importance: 2, effectivePoints: 25 })
+    expect(urgency(item, '2026-10-01')).toBe('先')
+    expect(urgency(item, '2026-10-04')).toBe('近日')
+    expect(urgency(item, '2026-10-06')).toBe('期限超過')
+    expect(item.importance).toBe(2)
+    expect(item.effectivePoints).toBe(25)
+  })
+  it('FrogとWeightを別々に並べ替える', () => {
+    const frog = task('frog', { frog: 4, weight: 1 })
+    const weight = task('weight', { frog: 1, weight: 4 })
+    expect(sortTasks([frog, weight], 'frog').map(value => value.id)).toEqual(['frog', 'weight'])
+    expect(sortTasks([frog, weight], 'weight').map(value => value.id)).toEqual(['weight', 'frog'])
+  })
+  it('保留は自動候補から除外し、Orbitだけでは日付を付けない', () => {
+    const held = task('held', { backburner: true, orbit: true })
+    expect(suggestedTasks([held], '2026-10-01')).toEqual([])
+    expect(held.scheduledDate).toBeNull()
+    expect(held.dueDate).toBeNull()
   })
 })

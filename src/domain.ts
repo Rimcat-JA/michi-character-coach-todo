@@ -15,7 +15,7 @@ export type Task = {
   id: string; generationKey: string; routineId: string | null; title: string; notes: string
   project: string; containerId?: string | null; labels: string[]; scheduledDate: string | null; dueDate: string | null
   targetDate: string | null; reviewDate: string | null; availableFrom: string | null; deferredUntil?: string | null
-  importance: number; score: ScoreInput; effectivePoints: number | null
+  importance: number; frog?: number | null; weight?: number | null; pinned?: boolean; backburner?: boolean; orbit?: boolean; score: ScoreInput; effectivePoints: number | null
   assessmentId: string; status: 'open' | 'completed'; revision: number
   createdAt: string; updatedAt: string; deletedAt: string | null
 }
@@ -65,11 +65,12 @@ export function calculateScore(s: ScoreInput): ScoreResult {
   const complete = s.minutes !== null && s.travelMinutes !== null && s.difficulty !== null && s.uncertainty !== null && s.coordination !== null && s.physical !== null && s.outing !== null
   return { effective: complete ? lower : null, lower, upper, label: complete ? '自動' : '推定範囲' }
 }
-export function validateTaskInput(input: Pick<Task, 'title' | 'notes' | 'importance' | 'score'>) {
+export function validateTaskInput(input: Pick<Task, 'title' | 'notes' | 'importance' | 'score'> & Partial<Pick<Task, 'frog' | 'weight'>>) {
   const title = input.title.trim()
   if (!title || title.length > 300) throw new Error('タイトルは1〜300文字で入力してください')
   if (input.notes.length > 50000) throw new Error('メモは50,000文字以内で入力してください')
   integer(input.importance, 0, 3, '重要度')
+  for (const [name, value] of [['frog', input.frog], ['weight', input.weight]] as const) if (value !== undefined && value !== null) integer(value, 0, 4, name)
   validateScore(input.score)
 }
 export function validateDate(date: string | null, label: string) {
