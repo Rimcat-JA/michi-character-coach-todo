@@ -129,6 +129,7 @@ export function validateSnapshot(input: unknown): asserts input is Snapshot {
     for (const flag of ['pinned', 'backburner', 'orbit'] as const) if (task[flag] !== undefined && typeof task[flag] !== 'boolean') throw new Error('タスクの分類が不正です')
     if (task.dayHalf !== undefined && task.dayHalf !== null && !['morning', 'afternoon'].includes(task.dayHalf)) throw new Error('午前午後の区分が不正です')
     if (task.customSection !== undefined && task.customSection !== null && (typeof task.customSection !== 'string' || !task.customSection.trim() || task.customSection.length > 60)) throw new Error('カスタム区分が不正です')
+    if (task.spotlightOrder !== undefined && task.spotlightOrder !== null && (!Number.isInteger(task.spotlightOrder) || task.spotlightOrder < 1)) throw new Error('Spotlightの順序が不正です')
     if (!nullableString(task.routineId) || (task.routineId !== null && !routineIds.has(task.routineId)) || (task.containerId !== undefined && (!nullableString(task.containerId) || (task.containerId !== null && !containerIds.has(task.containerId)))) || (task.planBucketId !== undefined && (!nullableString(task.planBucketId) || (task.planBucketId !== null && !planningBucketIds.has(task.planBucketId)))) || !nullableString(task.deletedAt) || !timestamp(task.createdAt) || !timestamp(task.updatedAt) || (task.deletedAt !== null && !timestamp(task.deletedAt))) throw new Error('タスクの履歴が不正です')
     for (const [name, value] of [['予定日', task.scheduledDate], ['締め切り', task.dueDate], ['目標日', task.targetDate], ['見直し日', task.reviewDate], ['開始可能日', task.availableFrom], ['延期終了日', task.deferredUntil ?? null], ['初回予定日', task.firstScheduledDate ?? null]] as const) dateOrNull(value, name)
     if (task.snoozedUntil !== undefined && task.snoozedUntil !== null && !timestamp(task.snoozedUntil)) throw new Error('スヌーズ時刻が不正です')
@@ -137,6 +138,8 @@ export function validateSnapshot(input: unknown): asserts input is Snapshot {
     const assessment = assessmentById.get(task.assessmentId)
     if (!assessment || assessment.taskId !== task.id) throw new Error('タスクの評価参照が不正です')
   }
+  const spotlight = (tables.tasks as Task[]).filter(task => !task.deletedAt && task.status === 'open' && task.spotlightOrder != null)
+  if (spotlight.length > 3 || new Set(spotlight.map(task => task.spotlightOrder)).size !== spotlight.length) throw new Error('Spotlightの件数・順序が不正です')
 
   for (const raw of tables.assessments) {
     const assessment = raw as Assessment
