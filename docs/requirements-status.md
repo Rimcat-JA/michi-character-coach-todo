@@ -55,7 +55,7 @@
 | D08 | Procrastination Count／Staleness | 受入確認済 | 初回予定日からの経過と最終更新からの経過を別表示。予定変更回数が異なっても初回日が同じなら11日で一致するunitを確認。 |
 | D09 | Reminders／Smart List Day Alerts | 受入未確認 | 受入試験を未実施。 |
 | D10 | Bug Me | 受入未確認 | 受入試験を未実施。 |
-| E01 | Duration Estimates | 一部実装 | 作業・移動分数を保存。専用の見積履歴は未実装。 |
+| E01 | Duration Estimates | 受入確認済 | 作業30分＋移動20分＝合計50分を別入力・画面表示し、式へ一度だけ反映するunitを確認。専用の見積履歴は未実装。 |
 | E02 | Time Tracking | 一部実装 | 元区間を保存・表示し重複union集計。中断・再開と複数端末同期は未実装。 |
 | E03 | Timers／Pomodoro／Tomato Tracker | 一部実装 | 壁時計から経過時間を復元。Pomodoro回数は未実装。 |
 | E04 | Time Targets | 受入未確認 | 受入試験を未実施。 |
