@@ -15,7 +15,7 @@ export type Task = {
   id: string; generationKey: string; routineId: string | null; title: string; notes: string
   project: string; containerId?: string | null; planBucketId?: string | null; labels: string[]; scheduledDate: string | null; dueDate: string | null
   targetDate: string | null; reviewDate: string | null; availableFrom: string | null; deferredUntil?: string | null; firstScheduledDate?: string | null; snoozedUntil?: string | null
-  importance: number; frog?: number | null; weight?: number | null; energyNeed?: number | null; focusNeed?: number | null; positiveFeeling?: number | null; dayHalf?: 'morning' | 'afternoon' | null; customSection?: string | null; pinned?: boolean; backburner?: boolean; orbit?: boolean; score: ScoreInput; effectivePoints: number | null
+  importance: number; frog?: number | null; weight?: number | null; energyNeed?: number | null; focusNeed?: number | null; positiveFeeling?: number | null; dayHalf?: 'morning' | 'afternoon' | null; customSection?: string | null; spotlightOrder?: number | null; pinned?: boolean; backburner?: boolean; orbit?: boolean; score: ScoreInput; effectivePoints: number | null
   assessmentId: string; status: 'open' | 'completed'; revision: number
   createdAt: string; updatedAt: string; deletedAt: string | null
 }

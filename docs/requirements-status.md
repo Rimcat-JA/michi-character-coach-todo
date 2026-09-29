@@ -45,13 +45,13 @@
 | C09 | Focus Picker／重要プロジェクト | 受入確認済 | コーチ候補Aの後に本人がBを選ぶと次の推薦でもBを維持し候補を再評価することをunitとWindows画面で確認。 |
 | C10 | Matrix | 受入確認済 | 重要度×緊急度など二軸とSmart List軸で区画表示。同一タスク重複入力でもIDとポイントを一回だけ集計するunitとWindows画面を確認。 |
 | C11 | Pinned Tasks／Fast Add | 受入確認済 | pinは既存タスクのflag更新だけで件数不変。テンプレートの「新規を追加」は別の発生回を作る。unitとWindows画面で確認。 |
-| D01 | Spotlight | 受入未確認 | 受入試験を未実施。 |
+| D01 | Spotlight | 受入確認済 | 今日10件から3件を既存IDの参照として選び、集中画面の選択肢を3件に限定。4件目を拒否し元タスク10件を維持するunitとWindows画面を確認。 |
 | D02 | Super Focus Mode | 受入未確認 | 受入試験を未実施。 |
 | D03 | Truncated List | 受入確認済 | 20件中5件表示で残り15件を示し、全件表示へ戻せることをunitとWindows画面で確認。 |
 | D04 | Procrastination Wizard／Task Breakdown | 受入未確認 | 受入試験を未実施。 |
-| D05 | This or That | 受入未確認 | 受入試験を未実施。 |
-| D06 | Suggested Task | 一部実装 | 登録済みタスクから次候補を表示。提案規則の全体は未実装。 |
-| D07 | Random Task／Task Jar | 受入未確認 | 受入試験を未実施。 |
+| D05 | This or That | 受入確認済 | 実行可能候補2件を重複なく表示。候補1件では一件だけと再計画案内をunitで確認。Windows画面でも二択を確認。 |
+| D06 | Suggested Task | 受入確認済 | 実行可能な登録済みIDだけを推薦。保存条件・依存解決・期限に一致する理由をunitで確認し、Windows画面で推薦を表示。 |
+| D07 | Random Task／Task Jar | 受入確認済 | 依存待ちを抽選対象から除き、seedと候補IDを監査へ保存。再現可能なunitとWindows画面を確認。 |
 | D08 | Procrastination Count／Staleness | 受入確認済 | 初回予定日からの経過と最終更新からの経過を別表示。予定変更回数が異なっても初回日が同じなら11日で一致するunitを確認。 |
 | D09 | Reminders／Smart List Day Alerts | 受入未確認 | 受入試験を未実施。 |
 | D10 | Bug Me | 受入未確認 | 受入試験を未実施。 |
@@ -130,6 +130,6 @@
 | N10 | サーバー不要の端末単独オフライン利用 | 一部実装 | Windows版とオフラインPWAあり。Android実機は未検証。 |
 | N11 | 既存アプリ内コーチを維持した任意のChatGPT／Claudeプラグイン | 受入未確認 | 受入試験を未実施。 |
 
-計: 121件（受入確認済 38、一部実装 20、受入未確認 63）。
+計: 121件（受入確認済 42、一部実装 19、受入未確認 60）。
 
 最終照合: 2026-09-29。実機・外部サービスの受入は継続して記録します。

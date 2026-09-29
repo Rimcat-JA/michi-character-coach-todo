@@ -16,6 +16,7 @@ import { createThemeRule } from './themes'
 import { assignDaySection, setDaySectionMode } from './day-sections'
 import { createSmartList } from './smart-lists'
 import { setFocusProjects } from './focus-projects'
+import { setSpotlight } from './focus-tools'
 import { inspectBackup, restoreBackup } from './backup'
 import { validateSnapshot, type Snapshot } from './backup-validation'
 
@@ -222,5 +223,14 @@ describe('バックアップの復元前検証', () => {
     await restoreBackup(saved)
     expect((await db.focusSelections.toArray())[0]).toMatchObject({ projects: ['B'], source: 'user' })
     expect((await db.settings.get('main'))?.taskListLimit).toBe(5)
+  })
+  it('Spotlight参照を復元してもタスクは増えない', async () => {
+    const id = await createTask({ ...newTaskInput(), title: '集中する作業' })
+    await setSpotlight(id, 1, true)
+    const saved = await snapshot()
+    await db.tasks.clear()
+    await restoreBackup(saved)
+    expect(await db.tasks.count()).toBe(1)
+    expect((await db.tasks.get(id))?.spotlightOrder).toBe(1)
   })
 })
