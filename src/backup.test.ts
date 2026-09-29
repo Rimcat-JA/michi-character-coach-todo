@@ -22,6 +22,7 @@ import { createHabit, recordHabitLog } from './habits'
 import { createGoal, createGoalCheckIn } from './goals'
 import { createTracker, recordTrackerEntry, saveDayNote } from './journal'
 import { recordPomodoro, startPomodoro } from './pomodoro'
+import { addWallTile } from './wall'
 import { inspectBackup, restoreBackup } from './backup'
 import { validateSnapshot, type Snapshot } from './backup-validation'
 
@@ -40,6 +41,18 @@ async function snapshot(): Promise<Snapshot> {
 }
 
 describe('バックアップの復元前検証', () => {
+  it('Wallの配置を復元し、不正な座標を拒否する', async () => {
+    const id = await createTask({ ...newTaskInput(), title: '付箋' })
+    await addWallTile(id, '準備')
+    const saved = await snapshot()
+    expect(() => validateSnapshot(saved)).not.toThrow()
+    const corrupt = structuredClone(saved)
+    corrupt.settings[0].wallTiles![0].x = 99
+    expect(() => validateSnapshot(corrupt)).toThrow('Wall')
+    await db.settings.update('main', { wallTiles: [] })
+    await restoreBackup(saved)
+    expect((await db.settings.get('main'))?.wallTiles).toEqual([{ taskId: id, x: 0, y: 0, group: '準備' }])
+  })
   it('有効な実績と取消履歴を復元できる', async () => {
     const input = { ...newTaskInput(), title: '復元するタスク', score: { ...emptyScore(), mode: 'manual' as const, manualPoints: 20 } }
     const id = await createTask(input)
