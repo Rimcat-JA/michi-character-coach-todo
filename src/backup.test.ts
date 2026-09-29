@@ -17,6 +17,7 @@ import { assignDaySection, setDaySectionMode } from './day-sections'
 import { createSmartList } from './smart-lists'
 import { setFocusProjects } from './focus-projects'
 import { setSpotlight } from './focus-tools'
+import { captureDayProgressBaseline, createTimeTarget } from './progress'
 import { inspectBackup, restoreBackup } from './backup'
 import { validateSnapshot, type Snapshot } from './backup-validation'
 
@@ -232,5 +233,17 @@ describe('バックアップの復元前検証', () => {
     await restoreBackup(saved)
     expect(await db.tasks.count()).toBe(1)
     expect((await db.tasks.get(id))?.spotlightOrder).toBe(1)
+  })
+  it('時間目標と当日進捗の固定基準を復元する', async () => {
+    const containerId = await createContainer({ kind: 'project', name: '学習', parentId: null })
+    const taskId = await createTask({ ...newTaskInput(), title: '練習', scheduledDate: '2026-10-01' })
+    await createTimeTarget(containerId, '2026-10-01', '2026-10-07', 180)
+    await captureDayProgressBaseline('2026-10-01')
+    const saved = await snapshot()
+    await db.settings.put({ ...(await db.settings.get('main'))!, timeTargets: [], dayProgressBaseline: undefined })
+    await restoreBackup(saved)
+    const settings = await db.settings.get('main')
+    expect(settings?.timeTargets?.[0].targetMinutes).toBe(180)
+    expect(settings?.dayProgressBaseline?.entries[0].taskId).toBe(taskId)
   })
 })

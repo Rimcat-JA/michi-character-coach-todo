@@ -44,9 +44,11 @@ export type Completion = { id: string; taskId: string; originalAt: string; curre
 export type LedgerEntry = { id: string; completionId: string; taskId: string; kind: 'award' | 'adjust' | 'reverse' | 'restore'; delta: number; at: string; reason: string }
 export type Routine = { id: string; title: string; cadence: 'daily' | 'weekly' | 'monthly' | 'after_completion'; interval: number; weekdays: number[]; monthDay: number; startDate: string; endDate: string | null; excludedDates?: string[]; afterTaskId: string | null; score: ScoreInput; project: string; active: boolean; revision: number; createdAt: string }
 export type WorkSession = { id: string; taskId: string; startedAt: string; endedAt: string; minutes: number }
+export type TimeTarget = { id: string; containerId: string; startDate: string; endDate: string; targetMinutes: number }
+export type DayProgressBaseline = { date: string; capturedAt: string; entries: { taskId: string; minutes: number | null; points: number | null }[] }
 export type CommandReceipt = { key: string; hash: string; resultId: string; at: string }
 export type Audit = { id: string; taskId: string | null; operation: string; at: string; detail: string }
-export type Settings = { id: 'main'; profileId: string; datasetId: string; createdAt: string; coachName: string; dailyMinutes: number; dailyPoints: number; notifications: boolean; aiEnabled: boolean; aiModel?: string; daySectionMode?: 'halfday' | 'category' | 'timeblock' | 'custom'; taskListLimit?: number | null; automation: 'A0' | 'A1' | 'A2'; lastBackupAt: string | null }
+export type Settings = { id: 'main'; profileId: string; datasetId: string; createdAt: string; coachName: string; dailyMinutes: number; dailyPoints: number; notifications: boolean; aiEnabled: boolean; aiModel?: string; daySectionMode?: 'halfday' | 'category' | 'timeblock' | 'custom'; taskListLimit?: number | null; automation: 'A0' | 'A1' | 'A2'; lastBackupAt: string | null; timeTargets?: TimeTarget[]; dayProgressBaseline?: DayProgressBaseline }
 
 export const emptyScore = (): ScoreInput => ({ mode: 'unset', manualPoints: null, minutes: null, travelMinutes: null, difficulty: null, uncertainty: null, coordination: null, physical: null, outing: null })
 export const today = (d = new Date()) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
