@@ -176,6 +176,8 @@ export async function createRoutine(input: Omit<Routine, 'id' | 'revision' | 'cr
     if (input.endDate && input.endDate < input.startDate) throw new Error('終了日は開始日以降にしてください')
     if (!Number.isInteger(input.monthDay) || input.monthDay < 1 || input.monthDay > 31) throw new Error('月の日は1〜31で指定してください')
     if (input.weekdays.some(d => !Number.isInteger(d) || d < 0 || d > 6)) throw new Error('曜日が不正です')
+    if (input.excludedDates && (input.excludedDates.length > 366 || new Set(input.excludedDates).size !== input.excludedDates.length)) throw new Error('除外日が不正です')
+    for (const date of input.excludedDates ?? []) validateDate(date, '除外日')
     calculateScore(input.score)
     const id = uid()
     await db.routines.add({ ...input, title: input.title.trim(), id, revision: 1, createdAt: now() })
@@ -183,7 +185,7 @@ export async function createRoutine(input: Omit<Routine, 'id' | 'revision' | 'cr
   })
 }
 function matchesRoutine(r: Routine, date: string) {
-  if (date < r.startDate || (r.endDate && date > r.endDate)) return false
+  if (date < r.startDate || (r.endDate && date > r.endDate) || r.excludedDates?.includes(date)) return false
   const start = new Date(`${r.startDate}T12:00:00`), current = new Date(`${date}T12:00:00`)
   const days = Math.round((current.getTime() - start.getTime()) / 86400000)
   if (r.cadence === 'daily') return days % r.interval === 0
@@ -203,13 +205,13 @@ export async function expandRoutines(from = addDays(today(), -30), days = 120) {
       const occurrences = await db.tasks.where('routineId').equals(r.id).toArray()
       if (occurrences.length === 0) {
         const key = `${r.id}:${r.startDate}`
-        await db.transaction('rw', db.tasks, db.assessments, db.audits, async () => { if (!(await db.tasks.where('generationKey').equals(key).first())) { await addTask({ ...newTaskInput(), title: r.title, project: r.project, scheduledDate: r.startDate, score: r.score }, key, r.id); count++ } })
+        if (!r.excludedDates?.includes(r.startDate)) await db.transaction('rw', db.tasks, db.assessments, db.audits, async () => { if (!(await db.tasks.where('generationKey').equals(key).first())) { await addTask({ ...newTaskInput(), title: r.title, project: r.project, scheduledDate: r.startDate, score: r.score }, key, r.id); count++ } })
       } else {
         const latest = occurrences.sort((a, b) => (b.scheduledDate ?? '').localeCompare(a.scheduledDate ?? ''))[0]
         const completed = await db.completions.where('taskId').equals(latest.id).first()
         if (completed?.currentAt) {
           const date = addDays(today(new Date(completed.currentAt)), r.interval), key = `${r.id}:${date}`
-          await db.transaction('rw', db.tasks, db.assessments, db.audits, async () => { if (!(await db.tasks.where('generationKey').equals(key).first())) { await addTask({ ...newTaskInput(), title: r.title, project: r.project, scheduledDate: date, score: r.score }, key, r.id); count++ } })
+          if (!r.excludedDates?.includes(date)) await db.transaction('rw', db.tasks, db.assessments, db.audits, async () => { if (!(await db.tasks.where('generationKey').equals(key).first())) { await addTask({ ...newTaskInput(), title: r.title, project: r.project, scheduledDate: date, score: r.score }, key, r.id); count++ } })
         }
       }
       continue

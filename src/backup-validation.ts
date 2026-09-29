@@ -102,6 +102,8 @@ export function validateSnapshot(input: unknown): asserts input is Snapshot {
     const routine = raw as Routine
     if (!filled(routine.title) || !['daily', 'weekly', 'monthly', 'after_completion'].includes(routine.cadence) || !Number.isInteger(routine.interval) || routine.interval < 1 || routine.interval > 365 || !Array.isArray(routine.weekdays) || routine.weekdays.some(day => !Number.isInteger(day) || day < 0 || day > 6) || !Number.isInteger(routine.monthDay) || routine.monthDay < 1 || routine.monthDay > 31 || typeof routine.project !== 'string' || typeof routine.active !== 'boolean' || !Number.isInteger(routine.revision) || routine.revision < 1 || !timestamp(routine.createdAt) || !nullableString(routine.afterTaskId) || !filled(routine.startDate)) throw new Error('ルーティンが不正です')
     dateOrNull(routine.startDate, 'ルーティン開始日'); dateOrNull(routine.endDate, 'ルーティン終了日')
+    if (routine.excludedDates !== undefined && (!Array.isArray(routine.excludedDates) || routine.excludedDates.length > 366 || new Set(routine.excludedDates).size !== routine.excludedDates.length)) throw new Error('除外日が不正です')
+    for (const date of routine.excludedDates ?? []) validateDate(date, '除外日')
     if (routine.afterTaskId && !taskIds.has(routine.afterTaskId)) throw new Error('ルーティンの参照先がありません')
     calculateScore(routine.score)
   }

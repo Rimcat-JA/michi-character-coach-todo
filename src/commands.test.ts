@@ -2,7 +2,7 @@ import 'fake-indexeddb/auto'
 import { beforeEach, describe, expect, it } from 'vitest'
 import { db } from './db'
 import { bulkUpdateTasksAtomic, completeTask, createRoutine, createTask, createTasksAtomic, correctCompletion, expandRoutines, logSession, newTaskInput, trashTask, undoCompletion, updateTask } from './commands'
-import { emptyScore, today } from './domain'
+import { addDays, emptyScore, today } from './domain'
 
 beforeEach(async () => { await db.delete(); await db.open() })
 
@@ -51,6 +51,25 @@ describe('ローカル正式保存と台帳', () => {
     await expandRoutines(today(), 3)
     await expandRoutines(today(), 3)
     expect(await db.tasks.count()).toBe(3)
+  })
+  it('月末・除外日・今回だけ編集・完了後3日を正しく展開する', async () => {
+    const monthlyId = await createRoutine({ title: '月末確認', cadence: 'monthly', interval: 1, weekdays: [], monthDay: 31, startDate: '2026-01-31', endDate: '2026-04-30', excludedDates: ['2026-03-31'], afterTaskId: null, score: emptyScore(), project: '', active: true })
+    await expandRoutines('2026-01-01', 120)
+    const monthly = await db.tasks.where('routineId').equals(monthlyId).toArray()
+    expect(monthly.map(task => task.scheduledDate).sort()).toEqual(['2026-01-31', '2026-02-28', '2026-04-30'])
+    const feb = monthly.find(task => task.scheduledDate === '2026-02-28')!
+    await updateTask(feb.id, feb.revision, { ...newTaskInput(), title: '今回だけ短くする', scheduledDate: feb.scheduledDate })
+    await expandRoutines('2026-01-01', 120)
+    expect((await db.tasks.get(feb.id))?.title).toBe('今回だけ短くする')
+    expect(await db.tasks.where('routineId').equals(monthlyId).count()).toBe(3)
+
+    const afterId = await createRoutine({ title: '完了後の次回', cadence: 'after_completion', interval: 3, weekdays: [], monthDay: 1, startDate: today(), endDate: null, excludedDates: [], afterTaskId: null, score: emptyScore(), project: '', active: true })
+    await expandRoutines(today(), 1)
+    const first = (await db.tasks.where('routineId').equals(afterId).first())!
+    await completeTask(first.id, first.revision)
+    await expandRoutines(today(), 1)
+    const occurrences = await db.tasks.where('routineId').equals(afterId).toArray()
+    expect(occurrences.map(task => task.scheduledDate).sort()).toEqual([today(), addDays(today(), 3)])
   })
   it('一括登録の途中で不正行があれば全てロールバックする', async () => {
     const good = { ...newTaskInput(), title: '有効' }
