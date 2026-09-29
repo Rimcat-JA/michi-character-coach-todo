@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it } from 'vitest'
 import { db, ensureSettings } from './db'
 import { completeTask, createTask, newTaskInput } from './commands'
 import { emptyScore } from './domain'
-import { allGoalsPoints, createGoal, createGoalCheckIn, currentCheckInContext, deleteGoalCheckIn, goalProgress, reviseGoalCheckIn } from './goals'
+import { allGoalsPoints, createGoal, createGoalCheckIn, currentCheckInContext, deleteGoalCheckIn, goalProgress, reviseGoalCheckIn, setGoalCheckInAiSummary } from './goals'
 
 beforeEach(async () => { await db.delete(); await db.open(); await ensureSettings() })
 
@@ -33,5 +33,16 @@ describe('目標とチェックイン', () => {
     expect((await db.goalCheckIns.get(id))?.history[0].summary).toBe('何もしなかった')
     await deleteGoalCheckIn(id, 2)
     expect(currentCheckInContext(await db.goalCheckIns.toArray(), goalId)).toEqual([])
+  })
+
+  it('AI要約を別保存し、本人の訂正後は旧要約を次の文脈へ渡さない', async () => {
+    const taskId = await createTask({ ...newTaskInput(), title: '練習' })
+    const goalId = await createGoal(goalInput('学習', taskId))
+    const id = await createGoalCheckIn(goalId, '2026-10-01', '30分取り組んだ')
+    await setGoalCheckInAiSummary(id, 1, '30分取り組んだ', '何もしなかった')
+    expect((await db.goalCheckIns.get(id))?.summaryOrigin).toBe('ai')
+    await reviseGoalCheckIn(id, 2, '30分取り組んだ', '30分練習した')
+    await expect(setGoalCheckInAiSummary(id, 2, '30分取り組んだ', '古い応答')).rejects.toThrow('別の画面')
+    expect(JSON.stringify(currentCheckInContext(await db.goalCheckIns.toArray(), goalId))).not.toContain('何もしなかった')
   })
 })

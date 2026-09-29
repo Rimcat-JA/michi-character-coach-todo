@@ -29,4 +29,13 @@ describe('任意記録と日記', () => {
     expect(currentDayNoteContext(latest)).toEqual({ humanText: '訂正したメモ', summary: '訂正後の要約', summaryStale: false })
     expect(latest.history.map(item => item.kind)).toEqual(['summary', 'human', 'summary'])
   })
+
+  it('AI応答中に本文が変わった場合は古い本文の要約を保存しない', async () => {
+    const id = await saveDayNote('2026-10-01', 'Asia/Tokyo', '元の本文')
+    await saveDayNote('2026-10-01', 'Asia/Tokyo', '新しい本文')
+    await expect(setDayNoteSummary(id, 0, '元の本文を要約', 'ai', 1)).rejects.toThrow('別の画面')
+    expect((await db.dayNotes.get(id))?.aiSummary).toBeNull()
+    await setDayNoteSummary(id, 0, '新しい本文を要約', 'ai', 2)
+    expect((await db.dayNotes.get(id))?.summaryOrigin).toBe('ai')
+  })
 })

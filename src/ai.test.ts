@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { selectedTaskContext } from './ai'
-import { emptyScore, type Task } from './domain'
+import { selectedGoalContext, selectedTaskContext } from './ai'
+import { emptyScore, type Goal, type GoalCheckIn, type Task } from './domain'
 
 const task: Task = {
   id: 'private-id', generationKey: 'private-generation', routineId: null,
@@ -30,4 +30,13 @@ describe('AIへ送るタスク情報', () => {
   it('長いメモを送信上限に収める', () => {
     expect(selectedTaskContext({ ...task, notes: 'a'.repeat(10000) })!.length).toBeLessThanOrEqual(5000)
   })
+})
+
+it('目標の次回会話には訂正後の要約だけを渡す', () => {
+  const goal: Goal = { id: 'goal-1', ownerId: 'owner', title: '読書', description: '', parentId: null, dueDate: null, containerId: null, taskIds: [], habitIds: [], manualPercent: null, checkInCadence: 'weekly', checkInQuestion: 'どうでしたか？', revision: 1, createdAt: '2026-10-01T00:00:00.000Z', updatedAt: '2026-10-01T00:00:00.000Z', deletedAt: null }
+  const checkIn: GoalCheckIn = { id: 'checkin-1', goalId: goal.id, date: '2026-10-01', answer: '30分読んだ', summary: '30分読んだ', summaryOrigin: 'human', summaryRevision: 2, history: [{ summary: '何もしなかった', at: '2026-10-01T00:00:00.000Z' }], createdAt: '2026-10-01T00:00:00.000Z', updatedAt: '2026-10-01T00:00:00.000Z', deletedAt: null }
+  const context = selectedGoalContext(goal, [checkIn])!
+  expect(context).toContain('30分読んだ')
+  expect(context).not.toContain('何もしなかった')
+  expect(context).not.toContain('checkin-1')
 })
