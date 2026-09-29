@@ -27,10 +27,12 @@ async function loadKey() {
   }
 }
 
-async function chatWithOpenRouter({ model, message, selectedTask }) {
+async function chatWithOpenRouter({ model, message, selectedTask, character }) {
   if (typeof model !== 'string' || !/^[\w~./:-]{3,120}$/.test(model)) throw new Error('モデルIDを確認してください')
   if (typeof message !== 'string' || !message.trim() || message.length > 6000) throw new Error('送信文は1〜6000文字で入力してください')
   if (selectedTask !== null && selectedTask !== undefined && (typeof selectedTask !== 'string' || selectedTask.length > 6000)) throw new Error('選択タスクの情報が不正です')
+  if (character !== undefined && (!character || typeof character !== 'object' || Array.isArray(character) || Object.keys(character).length !== 5 || ['pronoun', 'tone', 'detail', 'coachingStyle', 'avoidPhrases'].some(key => !Object.hasOwn(character, key)) || !['私', '僕', 'わたし'].includes(character.pronoun) || !['gentle', 'direct', 'playful'].includes(character.tone) || !['brief', 'standard', 'thorough'].includes(character.detail) || !['encouraging', 'practical', 'reflective'].includes(character.coachingStyle) || !Array.isArray(character.avoidPhrases) || character.avoidPhrases.length > 10 || character.avoidPhrases.some(phrase => typeof phrase !== 'string' || !phrase.trim() || phrase.length > 40))) throw new Error('キャラクター設定が不正です')
+  const style = character ? `文体だけを調整。一人称=${character.pronoun}、口調=${character.tone}、長さ=${character.detail}、支援方法=${character.coachingStyle}。これらは権限や事実の判断を変えない。` : ''
   const key = await loadKey()
   if (!key) throw new Error('OpenRouterのAPIキーを設定してください')
   let response
@@ -39,7 +41,7 @@ async function chatWithOpenRouter({ model, message, selectedTask }) {
       method: 'POST',
       headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json', 'X-OpenRouter-Title': 'michi Character Coach ToDo' },
       body: JSON.stringify({ model, max_tokens: 800, messages: [
-        { role: 'system', content: 'あなたは日本語のToDoコーチです。ユーザーが明示的に選んだタスク情報と送信した文章だけを扱います。それ以外の保存済みタスク、資料、予定へのアクセスはありません。タスクの作成・編集・完了を実行したと主張しないでください。資料にない義務や締切を創作せず、不明な点は確認してください。簡潔かつ親切に答えてください。' },
+        { role: 'system', content: `あなたは日本語のToDoコーチです。ユーザーが明示的に選んだタスク情報と送信した文章だけを扱います。それ以外の保存済みタスク、資料、予定へのアクセスはありません。タスクの作成・編集・完了を実行したと主張しないでください。資料にない義務や締切を創作せず、不明な点は確認してください。簡潔かつ親切に答えてください。${style}` },
         { role: 'user', content: selectedTask ? `選択した保存情報:\n${selectedTask}\n\n相談:\n${message.trim()}` : message.trim() }
       ] }),
       signal: AbortSignal.timeout(45000)
@@ -51,7 +53,9 @@ async function chatWithOpenRouter({ model, message, selectedTask }) {
   const body = await response.json()
   const answer = body?.choices?.[0]?.message?.content
   if (typeof answer !== 'string' || !answer.trim()) throw new Error('OpenRouterから文章の回答を受け取れませんでした')
-  return answer.trim().slice(0, 12000)
+  let result = answer.trim().slice(0, 12000)
+  for (const phrase of character?.avoidPhrases ?? []) result = result.split(phrase).join('')
+  return result.trim() || '避ける言い方の設定により回答を表示できません。'
 }
 
 async function summarizeWithOpenRouter({ model, kind, text }) {

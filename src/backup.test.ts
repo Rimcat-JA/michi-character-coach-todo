@@ -27,6 +27,7 @@ import { saveWorkflowPreset } from './workflows'
 import { saveAppearance } from './appearance'
 import { createReminder, dispatchDueReminders } from './reminders'
 import { saveKeybinding } from './shortcuts'
+import { saveCharacterProfile } from './character'
 import { inspectBackup, restoreBackup } from './backup'
 import { validateSnapshot, type Snapshot } from './backup-validation'
 
@@ -45,6 +46,17 @@ async function snapshot(): Promise<Snapshot> {
 }
 
 describe('バックアップの復元前検証', () => {
+  it('キャラクター設定を復元し、権限項目の混入を拒否する', async () => {
+    await saveCharacterProfile({ tone: 'direct', avoidPhrases: ['急いで'] })
+    const saved = await snapshot()
+    expect(() => validateSnapshot(saved)).not.toThrow()
+    const corrupt = structuredClone(saved)
+    Object.assign(corrupt.settings[0].characterProfile!, { notifications: true })
+    expect(() => validateSnapshot(corrupt)).toThrow('キャラクター設定')
+    await db.settings.update('main', { characterProfile: undefined })
+    await restoreBackup(saved)
+    expect((await db.settings.get('main'))?.characterProfile?.tone).toBe('direct')
+  })
   it('キー設定を復元し、重複割り当てを拒否する', async () => {
     await saveKeybinding('newTask', 'Ctrl+Shift+N')
     const saved = await snapshot()
