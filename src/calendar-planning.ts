@@ -23,12 +23,13 @@ export async function createTimeBlock(input: Pick<TimeBlock, 'kind' | 'category'
   })
 }
 
-export async function assignTaskToTimeBlock(blockId: string, expectedRevision: number, taskId: string) {
+export async function assignTaskToTimeBlock(blockId: string, expectedRevision: number, taskId: string, expectedTaskRevision?: number) {
   const settings = await ensureSettings()
   await db.transaction('rw', db.timeBlocks, db.tasks, db.audits, async () => {
     const block = await db.timeBlocks.get(blockId), task = await db.tasks.get(taskId)
     if (!block || block.ownerId !== settings.profileId || !task || task.deletedAt || task.status !== 'open') throw new Error('時間枠またはタスクにアクセスできません')
     if (block.revision !== expectedRevision) throw new Error('別の画面で時間枠が更新されました')
+    if (expectedTaskRevision !== undefined && task.revision !== expectedTaskRevision) throw new Error('別の画面でタスクが更新されました')
     if (block.closed) throw new Error('終了した時間枠は編集できません')
     if (block.taskIds.includes(taskId)) return
     const at = new Date().toISOString()
