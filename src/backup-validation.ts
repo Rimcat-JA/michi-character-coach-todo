@@ -13,6 +13,16 @@ import { validateCharacterProfile } from './character'
 import { validateCustomScreen, validateDashboardWidgets } from './dashboard'
 import type { ReviewRecord } from './review-coach'
 import { validateReviewRecords } from './review-validation'
+import { validateTripBundleRecord, type TripBundle } from './trip-bundles'
+import type { CoachMemory, MemoryTombstone } from './coach-memory'
+import { validateMemoryRecords } from './memory-validation'
+import { validateChangePolicy } from './change-set'
+import { validateSourceRecords } from './source-validation'
+import type { ContextSource, ContextSnapshot, SourceSummary, SourceArtifact } from './source-library'
+import type { CoachConversation, CoachMessage } from './chat-history'
+import { validateChatHistoryRecords } from './chat-history-validation'
+import type { CalendarRulesState } from './calendar-resolver'
+import { validateCalendarRulesRecords } from './calendar-rules-validation'
 
 export type Snapshot = {
   format: 'coachbundle'; version: 1; exportedAt: string
@@ -43,6 +53,16 @@ export type Snapshot = {
   dayNotes?: DayNote[]
   pomodoroCycles?: PomodoroCycle[]
   reviewRecords?: ReviewRecord[]
+  tripBundles?: TripBundle[]
+  coachMemories?: CoachMemory[]
+  memoryTombstones?: MemoryTombstone[]
+  contextSources?: ContextSource[]
+  contextSnapshots?: ContextSnapshot[]
+  sourceSummaries?: SourceSummary[]
+  sourceArtifacts?: SourceArtifact[]
+  coachConversations?: CoachConversation[]
+  coachMessages?: CoachMessage[]
+  calendarRules?: CalendarRulesState[]
 }
 
 const tableNames = ['tasks', 'assessments', 'completions', 'ledger', 'routines', 'sessions', 'commands', 'audits', 'settings'] as const
@@ -284,7 +304,7 @@ export function validateSnapshot(input: unknown): asserts input is Snapshot {
     if (!taskIds.has(attachment.taskId) || attachment.ownerId !== settings.profileId || !filled(attachment.name) || attachment.name.length > 200 || [...attachment.name].some(char => char.charCodeAt(0) < 32 || '\\/:*?"<>|'.includes(char)) || typeof attachment.mediaType !== 'string' || attachment.mediaType.length > 120 || !Number.isInteger(attachment.size) || attachment.size < 1 || attachment.size > 5 * 1024 * 1024 || !/^[a-f0-9]{64}$/.test(attachment.sha256) || !timestamp(attachment.createdAt) || typeof attachment.contentBase64 !== 'string' || !/^[A-Za-z0-9+/]*={0,2}$/.test(attachment.contentBase64) || attachment.contentBase64.length > Math.ceil(attachment.size / 3) * 4) throw new Error('添付が不正です')
   }
   if (containers.some(raw => (raw as Container).ownerId !== settings.profileId)) throw new Error('カテゴリ・プロジェクトの所有者が不正です')
-  const allowedSettings = new Set(['id', 'profileId', 'datasetId', 'createdAt', 'coachName', 'dailyMinutes', 'dailyPoints', 'notifications', 'aiEnabled', 'aiModel', 'daySectionMode', 'taskListLimit', 'automation', 'lastBackupAt', 'timeTargets', 'dayProgressBaseline', 'wallTiles', 'navDesktop', 'navMobile', 'hiddenFeatures', 'workflowPresets', 'appearance', 'reminderState', 'keybindings', 'characterProfile', 'dashboardWidgets', 'customScreen'])
+  const allowedSettings = new Set(['id', 'profileId', 'datasetId', 'createdAt', 'coachName', 'dailyMinutes', 'dailyPoints', 'notifications', 'aiEnabled', 'aiModel', 'daySectionMode', 'taskListLimit', 'automation', 'lastBackupAt', 'timeTargets', 'dayProgressBaseline', 'wallTiles', 'navDesktop', 'navMobile', 'hiddenFeatures', 'workflowPresets', 'appearance', 'reminderState', 'keybindings', 'characterProfile', 'dashboardWidgets', 'customScreen', 'changePolicy'])
   if (Object.keys(settings).some(key => !allowedSettings.has(key))) throw new Error('設定に未対応の項目があります')
   if (!filled(settings.profileId) || !filled(settings.datasetId) || !timestamp(settings.createdAt) || typeof settings.coachName !== 'string' || !Number.isInteger(settings.dailyMinutes) || settings.dailyMinutes < 0 || !Number.isInteger(settings.dailyPoints) || settings.dailyPoints < 0 || typeof settings.aiEnabled !== 'boolean' || typeof settings.notifications !== 'boolean' || !['A0', 'A1', 'A2'].includes(settings.automation) || !nullableString(settings.lastBackupAt) || (settings.lastBackupAt !== null && !timestamp(settings.lastBackupAt))) throw new Error('設定が不正です')
   for (const rule of themeRules) { if (rule.ownerId !== settings.profileId || !timestamp(rule.createdAt)) throw new Error('重点テーマが不正です'); validateThemeRule(rule) }
@@ -333,6 +353,24 @@ export function validateSnapshot(input: unknown): asserts input is Snapshot {
   for (const entry of trackerEntries) { const tracker = byTracker.get(entry.trackerId); if (!trackerIds.has(entry.trackerId) || !tracker || entry.value !== null && (!Number.isFinite(entry.value) || entry.value < tracker.min || entry.value > tracker.max) || !timestamp(entry.recordedAt) || !['user', 'device'].includes(entry.source) || typeof entry.note !== 'string' || entry.note.length > 1000) throw new Error('記録値が不正です') }
   unique(dayNotes, '日記', 'id')
   validateReviewRecords(input.reviewRecords, settings.profileId)
+  validateMemoryRecords(input.coachMemories, input.memoryTombstones, settings.profileId)
+  if (settings.changePolicy !== undefined) validateChangePolicy(settings.changePolicy)
+  validateSourceRecords(input.contextSources, input.contextSnapshots, input.sourceSummaries, input.sourceArtifacts, settings.profileId, settings.changePolicy)
+  validateChatHistoryRecords(input.coachConversations, input.coachMessages, settings.profileId)
+  validateCalendarRulesRecords(input.calendarRules ?? [], input.tasks as Task[], (input.calendarEvents ?? []) as CalendarEvent[], input.settings as Settings[])
+  if (input.tripBundles !== undefined) {
+    if (!Array.isArray(input.tripBundles) || input.tripBundles.length > 10000) throw new Error('共通外出の一覧が不正です')
+    unique(input.tripBundles, '共通外出', 'id')
+    const tripTaskIds = new Set<string>()
+    for (const bundle of input.tripBundles) {
+      validateTripBundleRecord(bundle, input.tasks as Task[], settings.profileId)
+      for (const member of bundle.members) {
+        if (tripTaskIds.has(member.taskId)) throw new Error('共通外出に同じタスクが重複しています')
+        tripTaskIds.add(member.taskId)
+        if (member.previousCompletion !== undefined && !(input.completions as Completion[]).some(completion => completion.id === member.previousCompletion!.completionId && completion.taskId === member.taskId)) throw new Error('共通外出の以前の完了記録が一致しません')
+      }
+    }
+  }
   for (const note of dayNotes) {
     validateDate(note.date, '日記の日付')
     try { new Intl.DateTimeFormat('ja-JP', { timeZone: note.timezone }) } catch { throw new Error('日記のtimezoneが不正です') }

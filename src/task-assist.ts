@@ -2,6 +2,7 @@ import { createTasksAtomic, newTaskInput, type TaskInput } from './commands'
 import { addDays, emptyScore, uid, validateDate, validateTaskInput } from './domain'
 import { db } from './db'
 import { contentDigest } from './canonical'
+import Dexie from 'dexie'
 
 export type AssistedDraft = { input: TaskInput; notices: string[] }
 export type SourcedDraft = AssistedDraft & { source: string }
@@ -95,7 +96,7 @@ export async function prepareAssistedTasks(drafts: SourcedDraft[], origin: 'manu
 export async function applyAssistedTasks(prepared: PreparedAssistedTasks, confirmedDigest: string): Promise<string[]> {
   const { digest, ...payload } = prepared
   if (!prepared.inputs.length || prepared.inputs.length > 20 || prepared.sources.length !== prepared.inputs.length || !['manual', 'ai'].includes(prepared.origin)) throw new Error('確認した候補の形式が不正です')
-  if (digest !== confirmedDigest || digest !== await contentDigest(payload)) throw new Error('確認後に内容が変わりました。もう一度確認してください')
+  if (digest !== confirmedDigest || digest !== await Dexie.waitFor(contentDigest(payload))) throw new Error('確認後に内容が変わりました。もう一度確認してください')
   if (!Number.isFinite(Date.parse(prepared.expiresAt)) || Date.parse(prepared.expiresAt) <= Date.now()) throw new Error('確認の有効期限が切れました')
   return db.transaction('rw', [db.tasks, db.assessments, db.commands, db.audits, db.containers, db.settings, db.labelGroups, db.labelDefinitions], async () => {
     const settings = await db.settings.get('main')

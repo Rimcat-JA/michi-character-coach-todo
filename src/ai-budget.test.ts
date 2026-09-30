@@ -40,6 +40,15 @@ afterEach(async () => {
 })
 
 describe('OpenRouterの事前利用予約', () => {
+  it('一時的なWindowsファイルロックを待って保存し、予約を一回だけ計上する', async () => {
+    await budget.usage()
+    const nativeRename = nativeFs.rename
+    const rename = vi.spyOn(nativeFs, 'rename').mockRejectedValueOnce(Object.assign(new Error('locked'), { code: 'EPERM' })).mockRejectedValueOnce(Object.assign(new Error('busy'), { code: 'EBUSY' })).mockImplementation(nativeRename)
+    await budget.reserve({ kind: 'chat', reservedTokens: 100 })
+    expect(rename).toHaveBeenCalledTimes(3)
+    expect((await budget.usage()).daily).toMatchObject({ requests: 1, tokens: 100, pendingRequests: 1 })
+    expect(JSON.parse(await readFile(filePath, 'utf8')).entries).toHaveLength(1)
+  })
   it('20件の同時予約でも回数とトークン上限を超えず、応答前に永続化する', async () => {
     await budget.setLimits(limits({ dailyRequests: 5, dailyTokens: 450 }))
     const results = await Promise.allSettled(Array.from({ length: 20 }, () => budget.reserve({ kind: 'chat', reservedTokens: 100 })))

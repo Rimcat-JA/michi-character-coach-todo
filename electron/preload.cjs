@@ -8,6 +8,9 @@ contextBridge.exposeInMainWorld('michiAI', {
   summarize: request => ipcRenderer.invoke('michi:ai-summarize', request),
   assistTask: request => ipcRenderer.invoke('michi:ai-assist-task', request),
   assessScore: request => ipcRenderer.invoke('michi:ai-assess-score', request),
+  proposeTaskChange: request => ipcRenderer.invoke('michi:ai-propose-task-change', request),
+  detectObligations: request => ipcRenderer.invoke('michi:ai-detect-obligations', request),
+  verifyObligations: request => ipcRenderer.invoke('michi:ai-verify-obligations', request),
   usage: () => ipcRenderer.invoke('michi:ai-usage'),
   setUsageLimits: limits => ipcRenderer.invoke('michi:ai-usage-limits', limits)
 })

@@ -27,7 +27,7 @@ export async function toggleChecklistItem(id: string, done: boolean): Promise<vo
 
 export async function convertChecklistItem(id: string, expectedParentRevision: number, points: number): Promise<string> {
   if (!Number.isInteger(points) || points < 0 || points > 100000) throw new Error('配分ポイントは0〜100000の整数で指定してください')
-  return db.transaction('rw', [db.tasks, db.assessments, db.checklistItems, db.audits], async () => {
+  return db.transaction('rw', [db.tasks, db.assessments, db.checklistItems, db.audits, db.tripBundles], async () => {
     const item = await db.checklistItems.get(id)
     if (!item) throw new Error('チェック項目がありません')
     if (item.convertedTaskId) return item.convertedTaskId
@@ -37,6 +37,7 @@ export async function convertChecklistItem(id: string, expectedParentRevision: n
     if (!['manual', 'allocated'].includes(parent.score.mode) || parent.score.manualPoints === null || parent.score.manualPoints < points) throw new Error('親の確定ポイントから配分してください')
     const at = now(), childId = uid(), parentAssessmentId = uid(), childAssessmentId = uid()
     const parentScore = { ...parent.score, manualPoints: parent.score.manualPoints - points }
+    assertTripTaskScoreChangeAllowed(parent.id, parent.score, parentScore, await db.tripBundles.toArray())
     const childScore = { ...emptyScore(), mode: 'allocated' as const, manualPoints: points }
     const parentResult = calculateScore(parentScore), childResult = calculateScore(childScore)
     const child: Task = { ...newTaskInput(), id: childId, generationKey: `checklist:${item.id}`, routineId: null, title: item.text, notes: '', project: parent.project, containerId: parent.containerId ?? null, labels: [], scheduledDate: parent.scheduledDate, dueDate: parent.dueDate, targetDate: parent.targetDate, reviewDate: null, availableFrom: parent.availableFrom, importance: parent.importance, score: childScore, effectivePoints: childResult.effective, assessmentId: childAssessmentId, status: 'open', revision: 1, createdAt: at, updatedAt: at, deletedAt: null }
@@ -60,3 +61,4 @@ export function checklistProgress(items: ChecklistItem[]): { done: number; total
   const active = items.filter(item => !item.convertedTaskId)
   return { done: active.filter(item => item.done).length, total: active.length }
 }
+import { assertTripTaskScoreChangeAllowed } from './trip-bundles'

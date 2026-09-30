@@ -29,7 +29,7 @@ export async function applyBreakdownProposal(proposal: BreakdownProposal): Promi
   const steps = proposal.steps.map(step => ({ title: step.title.trim(), points: step.points }))
   if (steps.some(step => !step.title || step.title.length > 300 || !Number.isInteger(step.points) || step.points < 0 || step.points > 100000)) throw new Error('各手順の名前と配分ポイントを確認してください')
   const hash = JSON.stringify({ operation: 'breakdown', proposal: { ...proposal, steps } })
-  return db.transaction('rw', [db.tasks, db.assessments, db.checklistItems, db.audits, db.commands], async () => {
+  return db.transaction('rw', [db.tasks, db.assessments, db.checklistItems, db.audits, db.commands, db.tripBundles], async () => {
     const prior = await db.commands.get(`breakdown:${proposal.id}`)
     if (prior) {
       if (prior.hash !== hash) throw new Error('同じ分割案を変更して再採用できません')
@@ -43,6 +43,7 @@ export async function applyBreakdownProposal(proposal: BreakdownProposal): Promi
     if (total !== parent.score.manualPoints) throw new Error(`配分合計を親の残り${parent.score.manualPoints}ptに合わせてください`)
     const at = new Date().toISOString()
     const parentScore = { ...parent.score, manualPoints: 0 }
+    assertTripTaskScoreChangeAllowed(parent.id, parent.score, parentScore, await db.tripBundles.toArray())
     const parentAssessmentId = uid()
     const parentAssessment: Assessment = { id: parentAssessmentId, taskId: parent.id, score: parentScore, result: calculateScore(parentScore), createdAt: at, origin: 'human', ruleVersion: 'v1' }
     const ids: string[] = []
@@ -64,3 +65,4 @@ export async function applyBreakdownProposal(proposal: BreakdownProposal): Promi
     return ids
   })
 }
+import { assertTripTaskScoreChangeAllowed } from './trip-bundles'
