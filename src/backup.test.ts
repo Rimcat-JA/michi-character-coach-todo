@@ -31,6 +31,7 @@ import { saveCharacterProfile } from './character'
 import { saveCustomScreen, saveDashboardWidgets } from './dashboard'
 import { inspectBackup, restoreBackup } from './backup'
 import { validateSnapshot, type Snapshot } from './backup-validation'
+import { saveReviewAnswer, setReviewSummary } from './review-coach'
 
 beforeEach(async () => { await db.delete(); await db.open(); await ensureSettings() })
 
@@ -47,6 +48,41 @@ async function snapshot(): Promise<Snapshot> {
 }
 
 describe('バックアップの復元前検証', () => {
+  it('本人回答・計画・実績・要約を別々に復元し、古い形式ではレビューを空にする', async () => {
+    const id = await saveReviewAnswer({ date: '2026-09-30', timezone: 'Asia/Tokyo', kind: 'evening', answer: '明日に再計画する' })
+    await setReviewSummary(id, 0, '保存済み実績は0件', 'human', 1, 1)
+    const saved = await snapshot()
+    saved.reviewRecords = await db.reviewRecords.toArray()
+    validateSnapshot(saved)
+    await db.reviewRecords.clear()
+    await restoreBackup(saved)
+    expect(await db.reviewRecords.get(id)).toEqual(saved.reviewRecords[0])
+    expect(await db.ledger.count()).toBe(0)
+    delete saved.reviewRecords
+    await restoreBackup(saved)
+    expect(await db.reviewRecords.count()).toBe(0)
+  })
+  it('見直し通知の日付・対象版を復元し、不正値と履歴の付替えを拒否する', async () => {
+    const taskId = await createTask({ ...newTaskInput(), title: '見直し通知の保存', reviewDate: '2026-09-29' })
+    const start = new Date(2026, 8, 29, 8)
+    await createReminder('review', taskId, '09:00', ['in-app'], start)
+    await dispatchDueReminders(new Date(2026, 8, 29, 9))
+    const saved = await snapshot()
+    expect(() => validateSnapshot(saved)).not.toThrow()
+    const invalidDate = structuredClone(saved)
+    invalidDate.settings[0].reminderState!.rules[0].reviewDate = '2026-02-30'
+    expect(() => validateSnapshot(invalidDate)).toThrow('見直し')
+    const invalidRevision = structuredClone(saved)
+    invalidRevision.settings[0].reminderState!.events[0].reviewRevision = 0
+    expect(() => validateSnapshot(invalidRevision)).toThrow('見直し')
+    const detached = structuredClone(saved)
+    detached.settings[0].reminderState!.events[0].targetId = 'other'
+    expect(() => validateSnapshot(detached)).toThrow('通知履歴')
+    await db.settings.update('main', { reminderState: undefined })
+    await restoreBackup(saved)
+    expect((await db.settings.get('main'))!.reminderState!.events[0]).toMatchObject({ kind: 'review', reviewDate: '2026-09-29', reviewRevision: 1 })
+    expect(await dispatchDueReminders(new Date(2026, 8, 29, 10))).toEqual([])
+  })
   it('Smart List削除後も停止した毎日通知の履歴を安全に書き出せる', async () => {
     const id = await createSmartList('消す一覧', { type: 'condition', field: 'status', operator: 'eq', value: 'open' })
     await createReminder('smart-daily', id, '09:00')

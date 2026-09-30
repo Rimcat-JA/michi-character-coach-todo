@@ -16,4 +16,8 @@ describe('必要ポイント', () => {
     expect(calculateScore(score).effective).toBeNull()
     expect(calculateScore(score).upper).toBeNull()
   })
+  it('作業時間が不明でも既知の移動時間を下限に含める', () => {
+    const score = { ...emptyScore(), mode: 'formula' as const, travelMinutes: 45, difficulty: 0, uncertainty: 0, coordination: 0, physical: 0, outing: false }
+    expect(calculateScore(score)).toMatchObject({ lower: 6, upper: null, effective: null })
+  })
 })

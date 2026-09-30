@@ -1,5 +1,5 @@
 import { db } from './db'
-import { addDays, today, uid, type ReminderEvent, type ReminderRule, type ReminderState, type Settings } from './domain'
+import { addDays, today, uid, validateDate, type ReminderEvent, type ReminderRule, type ReminderState, type Settings } from './domain'
 import { querySmartList } from './smart-lists'
 
 export const defaultReminderState = (): ReminderState => ({ quietStart: '22:00', quietEnd: '08:00', dailyCap: 6, rules: [], events: [] })
@@ -25,13 +25,13 @@ export async function setReminderPolicy(patch: Partial<Pick<ReminderState, 'quie
 }
 
 export async function createReminder(kind: ReminderRule['kind'], targetId: string, schedule: string, channels: ReminderRule['channels'] = ['in-app'], now = new Date()) {
-  if (!['once', 'smart-daily', 'bug-me'].includes(kind) || !targetId) throw new Error('通知の対象が不正です')
+  if (!['once', 'smart-daily', 'bug-me', 'review'].includes(kind) || !targetId) throw new Error('通知の対象が不正です')
   if (!Array.isArray(channels) || !channels.length || new Set(channels).size !== channels.length || channels.some(channel => !['in-app', 'os'].includes(channel))) throw new Error('通知先が不正です')
   let nextAt: string, timeOfDay: string | null = null
-  if (kind === 'smart-daily') {
+  if (kind === 'smart-daily' || kind === 'review') {
     assertTime(schedule); timeOfDay = schedule
     nextAt = atLocal(today(now), schedule)
-    if (nextAt <= now.toISOString()) nextAt = nextDaily(now, schedule)
+    if (kind === 'smart-daily' && nextAt <= now.toISOString()) nextAt = nextDaily(now, schedule)
   } else if (kind === 'bug-me') {
     nextAt = new Date(now.getTime() + 30 * 60000).toISOString()
   } else {
@@ -42,16 +42,24 @@ export async function createReminder(kind: ReminderRule['kind'], targetId: strin
   const at = now.toISOString()
   return db.transaction('rw', db.settings, db.tasks, db.smartLists, async () => {
     const settings = await db.settings.get('main'); if (!settings) throw new Error('設定がありません')
+    let reviewDate: string | null = null
     if (kind === 'smart-daily') {
       const list = await db.smartLists.get(targetId)
       if (!list || list.ownerId !== settings.profileId) throw new Error('Smart Listがありません')
     } else {
       const task = await db.tasks.get(targetId)
       if (!task || task.deletedAt || task.status !== 'open') throw new Error('未完了タスクを選んでください')
+      if (kind === 'review') {
+        if (!task.reviewDate) throw new Error('タスクに見直し日を設定してください')
+        validateDate(task.reviewDate, '見直し日')
+        reviewDate = task.reviewDate
+        nextAt = atLocal(reviewDate, timeOfDay!)
+      }
     }
     const current = state(settings)
+    if (kind === 'review' && current.rules.some(rule => rule.kind === 'review' && rule.targetId === targetId && rule.enabled)) throw new Error('このタスクの見直し通知は予約済みです')
     if (current.rules.length >= 500) throw new Error('通知予約は500件までです')
-    const rule: ReminderRule = { id: uid(), kind, targetId, nextAt, timeOfDay, intervalMinutes: kind === 'bug-me' ? 30 : 0, maxCount: kind === 'bug-me' ? 3 : kind === 'once' ? 1 : 0, sentCount: 0, endDate: kind === 'bug-me' ? today(now) : null, channels, enabled: true, createdAt: at, updatedAt: at }
+    const rule: ReminderRule = { id: uid(), kind, targetId, nextAt, timeOfDay, ...(kind === 'review' ? { reviewDate } : {}), intervalMinutes: kind === 'bug-me' ? 30 : 0, maxCount: kind === 'bug-me' ? 3 : kind === 'once' || kind === 'review' ? 1 : 0, sentCount: 0, endDate: kind === 'bug-me' ? today(now) : null, channels, enabled: true, createdAt: at, updatedAt: at }
     await db.settings.update('main', { reminderState: { ...current, rules: [...current.rules, rule] } })
     return rule
   })
@@ -83,9 +91,21 @@ export async function dispatchDueReminders(now = new Date()): Promise<ReminderEv
     const events = [...current.events], emitted: ReminderEvent[] = []
     const rules = current.rules.map(rule => ({ ...rule }))
     for (const rule of rules) {
-      if (!rule.enabled || rule.nextAt > stamp) continue
+      if (!rule.enabled) continue
       const task = rule.kind === 'smart-daily' ? null : tasks.find(item => item.id === rule.targetId)
       const list = rule.kind === 'smart-daily' ? lists.find(item => item.id === rule.targetId && item.ownerId === settings.profileId) : null
+      if (rule.kind === 'review') {
+        if (!task || task.deletedAt || task.status !== 'open') { rule.enabled = false; rule.updatedAt = stamp; continue }
+        if (rule.reviewDate !== task.reviewDate) {
+          rule.reviewDate = task.reviewDate; rule.sentCount = 0; rule.updatedAt = stamp
+        }
+        if (task.reviewDate) {
+          const nextAt = atLocal(task.reviewDate, rule.timeOfDay!)
+          if (rule.nextAt !== nextAt) { rule.nextAt = nextAt; rule.updatedAt = stamp }
+        }
+        if (!rule.reviewDate || rule.sentCount >= rule.maxCount) continue
+      }
+      if (rule.nextAt > stamp) continue
       if (rule.kind === 'smart-daily' ? !list : !task || task.deletedAt || task.status !== 'open') { rule.enabled = false; rule.updatedAt = stamp; continue }
       if (rule.endDate && day > rule.endDate) { rule.enabled = false; rule.updatedAt = stamp; continue }
       if (rule.kind === 'smart-daily' && list && !querySmartList(list, tasks, settings.profileId).some(item => item.status === 'open')) { rule.nextAt = nextDaily(now, rule.timeOfDay!); rule.updatedAt = stamp; continue }
@@ -96,13 +116,14 @@ export async function dispatchDueReminders(now = new Date()): Promise<ReminderEv
       const title = task?.title ?? list?.name ?? ''
       const channels = rule.channels.filter(channel => channel === 'in-app' || settings.notifications)
       if (!channels.length) continue
-      const event: ReminderEvent = { id: uid(), ruleId: rule.id, targetId: rule.targetId, kind: rule.kind, title, at: stamp, channels, readAt: null }
+      const event: ReminderEvent = { id: uid(), ruleId: rule.id, targetId: rule.targetId, kind: rule.kind, title, ...(rule.kind === 'review' && task ? { reviewDate: task.reviewDate!, reviewRevision: task.revision } : {}), at: stamp, channels, readAt: null }
       events.push(event); emitted.push(event); rule.sentCount++; rule.updatedAt = stamp
       if (rule.kind === 'smart-daily') rule.nextAt = nextDaily(now, rule.timeOfDay!)
+      else if (rule.kind === 'review') continue
       else if (rule.sentCount >= rule.maxCount) rule.enabled = false
       else rule.nextAt = new Date(now.getTime() + rule.intervalMinutes * 60000).toISOString()
     }
-    if (emitted.length || rules.some((rule, index) => rule.updatedAt !== current.rules[index].updatedAt)) await db.settings.update('main', { reminderState: { ...current, rules, events: events.slice(-1000) } })
+    if (emitted.length || rules.some((rule, index) => rule.updatedAt !== current.rules[index].updatedAt || rule.reviewDate !== current.rules[index].reviewDate || rule.nextAt !== current.rules[index].nextAt || rule.enabled !== current.rules[index].enabled || rule.sentCount !== current.rules[index].sentCount)) await db.settings.update('main', { reminderState: { ...current, rules, events: events.slice(-1000) } })
     return emitted
   })
 }
@@ -120,5 +141,9 @@ export async function pendingOSReminder(event: ReminderEvent, now = new Date()):
     return { title: 'michi リマインダー', body: list.name }
   }
   const task = await db.tasks.get(event.targetId)
+  if (event.kind === 'review') {
+    if (!rule.enabled || rule.kind !== 'review' || rule.targetId !== event.targetId || !task || task.deletedAt || task.status !== 'open' || task.reviewDate !== event.reviewDate || rule.reviewDate !== event.reviewDate || task.revision !== event.reviewRevision) return null
+    return { title: 'michi 見直し通知', body: `見直し: ${task.title}` }
+  }
   return task && !task.deletedAt && task.status === 'open' ? { title: 'michi リマインダー', body: task.title } : null
 }

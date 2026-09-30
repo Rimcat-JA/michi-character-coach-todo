@@ -49,8 +49,8 @@ export type WallTile = { taskId: string; x: number; y: number; group: string }
 export type WorkflowConfig = { navDesktop: string[]; navMobile: string[]; hiddenFeatures: string[]; daySectionMode: 'halfday' | 'category' | 'timeblock' | 'custom'; taskListLimit: number | null; dailyMinutes: number; dailyPoints: number }
 export type WorkflowPreset = { id: string; name: string; version: number; config: WorkflowConfig; createdAt: string; updatedAt: string }
 export type Appearance = { theme: 'light' | 'soft' | 'high-contrast'; accent: 'violet' | 'blue' | 'green' | 'rose'; fontScale: 90 | 100 | 110 | 120; iconStyle: 'outline' | 'bold' }
-export type ReminderRule = { id: string; kind: 'once' | 'smart-daily' | 'bug-me'; targetId: string; nextAt: string; timeOfDay: string | null; intervalMinutes: number; maxCount: number; sentCount: number; endDate: string | null; channels: ('in-app' | 'os')[]; enabled: boolean; createdAt: string; updatedAt: string }
-export type ReminderEvent = { id: string; ruleId: string; targetId: string; kind: ReminderRule['kind']; title: string; at: string; channels: ('in-app' | 'os')[]; readAt: string | null }
+export type ReminderRule = { id: string; kind: 'once' | 'smart-daily' | 'bug-me' | 'review'; targetId: string; nextAt: string; timeOfDay: string | null; reviewDate?: string | null; intervalMinutes: number; maxCount: number; sentCount: number; endDate: string | null; channels: ('in-app' | 'os')[]; enabled: boolean; createdAt: string; updatedAt: string }
+export type ReminderEvent = { id: string; ruleId: string; targetId: string; kind: ReminderRule['kind']; title: string; reviewDate?: string; reviewRevision?: number; at: string; channels: ('in-app' | 'os')[]; readAt: string | null }
 export type ReminderState = { quietStart: string; quietEnd: string; dailyCap: number; rules: ReminderRule[]; events: ReminderEvent[] }
 export type Keybindings = { newTask: string; quickJump: string; settings: string }
 export type CharacterProfile = { pronoun: '私' | '僕' | 'わたし'; tone: 'gentle' | 'direct' | 'playful'; detail: 'brief' | 'standard' | 'thorough'; coachingStyle: 'encouraging' | 'practical' | 'reflective'; avoidPhrases: string[] }
@@ -88,7 +88,7 @@ export function calculateScore(s: ScoreInput): ScoreResult {
   validateScore(s)
   if (s.mode === 'unset') return { effective: null, lower: null, upper: null, label: '未設定' }
   if (s.mode === 'manual' || s.mode === 'allocated') return { effective: s.manualPoints, lower: s.manualPoints, upper: s.manualPoints, label: s.mode === 'manual' ? '手動' : '配分' }
-  const base = (s.minutes === null ? 0 : s.minutes + (s.travelMinutes ?? 0))
+  const base = (s.minutes ?? 0) + (s.travelMinutes ?? 0)
   const low = 2 * Math.ceil(base / 15) + 4 * (s.difficulty ?? 0) + 3 * (s.uncertainty ?? 0) + 3 * (s.coordination ?? 0) + 2 * (s.physical ?? 0) + (s.outing ? 10 : 0)
   const high = s.minutes === null || s.travelMinutes === null ? null : 2 * Math.ceil((s.minutes + s.travelMinutes) / 15) + 4 * (s.difficulty ?? 4) + 3 * (s.uncertainty ?? 3) + 3 * (s.coordination ?? 3) + 2 * (s.physical ?? 3) + (s.outing === false ? 0 : 10)
   const lower = Math.max(s.outing === true ? 20 : 1, low)
