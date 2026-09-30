@@ -48,7 +48,6 @@ describe('selected web capture capsule', () => {
     expect(() => parseWebCaptureCapsule(change(capsule()))).toThrow()
   })
 })
-
 describe('bounded read-only local .eml decoding', () => {
   it('decodes folded RFC2047 adjacent B/Q headers and quoted printable soft breaks', async () => {
     const raw = eml('one=20line=\r\n=E8=B3=87=E6=96=99_underscore', 'Content-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: quoted-printable\r\n')
@@ -163,4 +162,3 @@ describe('native reviewed import and immutable local provenance', () => {
     expect((await db.contextSources.get(source.id))?.allowedModels).toEqual(['deepseek/deepseek-v4.1-flash'])
   })
 })
-
