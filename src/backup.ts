@@ -12,6 +12,10 @@ import { restoreCoachNotificationState } from './coach-notifications'
 import { purgeExpiredSources } from './source-library'
 import { purgeExpiredMemories } from './coach-memory'
 import { purgeExpiredConversations } from './chat-history'
+import { purgeExpiredCalendarOriginals } from './calendar-import-retention'
+import { redactExpiredICSRecords } from './calendar-import-redaction'
+import { changePolicyFor } from './change-set'
+import { verifyCalendarOriginalDigests } from './calendar-import'
 
 type Envelope = { format: 'coachbundle-encrypted'; version: 1; kdf: 'PBKDF2-SHA256'; iterations: 250000; cipher: 'AES-256-GCM'; salt: string; iv: string; data: string }
 const bytes = (s: string) => new TextEncoder().encode(s)
@@ -32,6 +36,7 @@ export async function captureSnapshot(): Promise<Snapshot> {
   await purgeExpiredSources()
   await purgeExpiredMemories()
   await purgeExpiredConversations()
+  await purgeExpiredCalendarOriginals()
   let attachmentRows: TaskAttachment[] = []
   const snapshot: Snapshot = await db.transaction('r', [db.tasks, db.assessments, db.completions, db.ledger, db.routines, db.sessions, db.commands, db.audits, db.settings, db.containers, db.checklistItems, db.labelGroups, db.labelDefinitions, db.savedTemplates, db.taskNotes, db.taskComments, db.taskAttachments, db.taskDependencies, db.planningBuckets, db.timeBlocks, db.calendarEvents, db.rollovers, db.themeRules, db.smartLists, db.focusSelections, db.habits, db.habitLogs, db.goals, db.goalCheckIns, db.trackerDefinitions, db.trackerEntries, db.dayNotes, db.pomodoroCycles, db.reviewRecords, db.tripBundles, db.coachMemories, db.memoryTombstones, db.contextSources, db.contextSnapshots, db.sourceSummaries, db.sourceArtifacts, db.coachConversations, db.coachMessages, db.calendarRules], async () => {
     attachmentRows = await db.taskAttachments.toArray()
@@ -41,6 +46,7 @@ export async function captureSnapshot(): Promise<Snapshot> {
   })
   snapshot.taskAttachments = await Promise.all(attachmentRows.map(async ({ blob, ...metadata }) => ({ ...metadata, contentBase64: b64(new Uint8Array(await blob.arrayBuffer())) })))
   validateSnapshot(snapshot)
+  await verifyCalendarOriginalDigests(snapshot.calendarRules ?? [])
   return snapshot
 }
 export async function exportBackup(password: string) {
@@ -79,11 +85,21 @@ export async function inspectBackup(file: File, password: string): Promise<Snaps
 export async function restoreBackup(snapshot: Snapshot) {
   validateSnapshot(snapshot)
   await verifySourceDigests(snapshot.contextSnapshots, snapshot.sourceSummaries)
+  await verifyCalendarOriginalDigests(snapshot.calendarRules ?? [])
   const names = snapshot.containers === undefined ? [...new Set(snapshot.tasks.map(task => task.project.trim()).filter(Boolean))] : []
   const at = new Date().toISOString(), ownerId = snapshot.settings[0].profileId
   const legacyContainers = names.map(name => ({ id: crypto.randomUUID(), parentId: null, kind: 'project' as const, name, ownerId, revision: 1, createdAt: at, updatedAt: at, deletedAt: null }))
   const byName = new Map(legacyContainers.map(container => [container.name, container.id]))
-  const restorable: Snapshot = { ...snapshot, commands: snapshot.commands.filter(command => !command.key.startsWith('filebridge:scope:')), settings: snapshot.settings.map(settings => settings.notificationState ? { ...settings, notificationState: restoreCoachNotificationState(settings.notificationState, settings.profileId, settings.datasetId, at) } : settings) }
+  const clean = redactExpiredICSRecords({ calendarRules: snapshot.calendarRules ?? [], calendarEvents: snapshot.calendarEvents ?? [], audits: snapshot.audits, commands: snapshot.commands }, at)
+  const restorable: Snapshot = { ...snapshot, calendarRules: clean.calendarRules, calendarEvents: clean.calendarEvents, audits: clean.audits, commands: clean.commands.filter(command => !command.key.startsWith('filebridge:scope:')), settings: snapshot.settings.map(settings => {
+    let next = settings.notificationState ? { ...settings, notificationState: restoreCoachNotificationState(settings.notificationState, settings.profileId, settings.datasetId, at) } : settings
+    if (clean.expiredSourceIds.length) {
+      const policy = changePolicyFor(next)
+      if (!Number.isSafeInteger(policy.epoch + 1) || !Number.isSafeInteger(policy.sourcePermissionRevision + 1)) throw new Error('資料の権限版が上限に達しています')
+      next = { ...next, changePolicy: { ...policy, epoch: policy.epoch + 1, sourcePermissionRevision: policy.sourcePermissionRevision + 1 } }
+    }
+    return next
+  }) }
   const prepared: Snapshot = snapshot.containers === undefined ? { ...restorable, containers: legacyContainers, tasks: snapshot.tasks.map(task => ({ ...task, containerId: task.project.trim() ? byName.get(task.project.trim()) : null })) } : restorable
   validateSnapshot(prepared)
   const attachments: TaskAttachment[] = await Promise.all((prepared.taskAttachments ?? []).map(async ({ contentBase64, ...metadata }) => {
@@ -107,4 +123,5 @@ export async function restoreBackup(snapshot: Snapshot) {
   await purgeExpiredSources()
   await purgeExpiredMemories()
   await purgeExpiredConversations()
+  await purgeExpiredCalendarOriginals()
 }

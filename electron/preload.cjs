@@ -17,6 +17,7 @@ function fileBridgeNativeCall(method, kind, reference, request) {
   return ipcRenderer.invoke(`michi:filebridge-${method}`, { request, proofNonce: proof.nonce })
 }
 contextBridge.exposeInMainWorld('michiFileBridge', {
+  mcpConfiguration: () => ipcRenderer.invoke('michi:filebridge-mcpConfiguration'),
   status: () => ipcRenderer.invoke('michi:filebridge-status'),
   configure: request => fileBridgeNativeCall('configure', 'configure', '', request),
   disconnect: request => fileBridgeNativeCall('disconnect', 'disconnect', request?.clientId, request),

@@ -5,7 +5,9 @@ export type CalendarContext = { id: string; name: string; domain: 'education' | 
 export type ParticipationBinding = { id: string; contextId: string; personId: string; personRef: string | null; activityIds: string[]; weekdays: number[]; validFrom: string; validTo: string; confirmed: boolean; revision: number }
 export type BusinessCalendar = { id: string; contextId: string; name: string; weekdays: number[]; validFrom: string; validTo: string; revision: number }
 export type CalendarActivity = { id: string; contextId: string; bindingId: string; calendarId: string; title: string; eventKind: 'class' | 'meeting' | 'other'; weekdays: number[]; startTime: string; endTime: string; endDayOffset: number; validFrom: string; validTo: string; revision: number }
-export type ScheduleSource = { id: string; contextId: string; title: string; authorityScope: 'calendar' | 'activity' | 'roster'; coverageFrom: string; coverageTo: string; status: 'current' | 'stale'; revision: number; importedAt: string; bodyHash: string }
+export type ICSComponentVersion = { uid: string; recurrenceId: string | null; sequence: number; dtstamp: string; lastModified: string | null; digest: string }
+export type ICSImportMetadata = { feedId: string; readOnly: true; retentionUntil: string | null; snapshots: { revision: number; sha256: string; originalText: string | null; importedAt: string; fromDate: string; toDate: string }[]; components: ICSComponentVersion[] }
+export type ScheduleSource = { id: string; contextId: string; title: string; authorityScope: 'calendar' | 'activity' | 'roster'; coverageFrom: string; coverageTo: string; status: 'current' | 'stale'; revision: number; importedAt: string; bodyHash: string; ics?: ICSImportMetadata }
 type FactBase = { id: string; sourceId: string; contextId: string; revision: number; validity: 'active' | 'withdrawn'; supersedes: string[] }
 export type ScheduleFact = FactBase & (
   { kind: 'open'; calendarId: string; date: string } |
@@ -13,7 +15,8 @@ export type ScheduleFact = FactBase & (
   { kind: 'substitute_pattern'; calendarId: string; date: string; patternWeekday: number; mode: 'replace' | 'add' } |
   { kind: 'reschedule'; activityId: string; originalDate: string; newDate: string } |
   { kind: 'cancel'; activityId: string; originalDate: string } |
-  { kind: 'roster_assignment'; activityId: string; externalId: string; personRef: string; published: boolean; status: 'scheduled' | 'cancelled'; startAt: string; endAt: string }
+  { kind: 'roster_assignment'; activityId: string; externalId: string; personRef: string; published: boolean; status: 'scheduled' | 'cancelled'; startAt: string; endAt: string } |
+  { kind: 'external_event'; activityId: string; externalId: string; status: 'scheduled' | 'cancelled'; startAt: string; endAt: string; timezone: string; allDay: boolean; title: string }
 )
 export type CalendarRuleStep = { key: string; title: string; kind: 'task' | 'event'; scheduledOffsetDays: number; dueOffsetDays: number | null; score: ScoreInput | null; durationMinutes: number | null }
 export type CalendarRule = { id: string; contextId: string; bindingId: string; calendarId: string; title: string; originBasis: 'user_instruction' | 'user_approved_rule'; enabled: boolean; validFrom: string; validTo: string; revision: number; steps: CalendarRuleStep[]; trigger:
@@ -81,6 +84,7 @@ function applicable(state: CalendarRulesState, contextId: string, bindingId: str
 }
 
 export function resolveCalendarOccurrences(state: CalendarRulesState, from: string, to: string, retainedKeys: string[] = []): ResolverResult {
+  const evaluatedAt = new Date().toISOString()
   dates(from, to)
   const versions = state.rules.flatMap(base => [{ base, editionIndex: -1, rule: base }, ...(base.editions ?? []).map((edition, editionIndex) => ({ base, editionIndex, rule: { ...base, ...edition.definition } }))])
   const offsets = versions.flatMap(({ rule }) => rule.steps.map(step => step.scheduledOffsetDays + (rule.trigger.kind === 'activity_relative' ? rule.trigger.offsetDays + Math.ceil(Math.abs(rule.trigger.offsetMinutes) / 1440) * Math.sign(rule.trigger.offsetMinutes) : 0)))
@@ -95,7 +99,9 @@ export function resolveCalendarOccurrences(state: CalendarRulesState, from: stri
     const ownBinding = state.bindings.find(item => item.id === activity.bindingId && item.contextId === context.id)
     if (!ownBinding?.confirmed || ownBinding.personId !== state.ownerId || !ownBinding.activityIds.includes(activity.id)) { blocked.add(`activity:${activity.id}`); conflict(`activity:${activity.id}`, activity.contextId, '活動と本人の適用条件を確認してください'); continue }
     const facts = activeFacts(state, activity.contextId)
-    if (state.sources.some(source => source.contextId === activity.contextId && source.status === 'stale')) { blocked.add(`activity:${activity.id}`); conflict(`activity:${activity.id}`, activity.contextId, '資料の取得状態が古いため、休業・取消と判断しません'); continue }
+    if (state.sources.some(source => source.contextId === activity.contextId && source.status === 'stale' && !source.ics)) { blocked.add(`activity:${activity.id}`); conflict(`activity:${activity.id}`, activity.contextId, '資料の取得状態が古いため、休業・取消と判断しません'); continue }
+    const externalForActivity = state.facts.filter((fact): fact is Extract<ScheduleFact, { kind: 'external_event' }> => fact.kind === 'external_event' && fact.activityId === activity.id)
+    if (externalForActivity.some(fact => state.sources.some(source => source.id === fact.sourceId && (source.status === 'stale' || source.ics?.retentionUntil !== null && source.ics?.retentionUntil !== undefined && source.ics.retentionUntil <= evaluatedAt)))) { blocked.add(`activity:${activity.id}`); conflict(`activity:${activity.id}`, activity.contextId, 'ICSの保持期限・取得状態を確認してください。予定の取消とは判断しません'); continue }
     function emit(triggerKey: string, date: string, selectedFacts: ScheduleFact[], explicitTimes?: { startAt: string; endAt: string }) {
       const retained = retainedKeys.includes(`calendar:activity:${activity.id}:${triggerKey}`) || state.rules.some(rule => rule.trigger.kind === 'activity_relative' && rule.trigger.activityId === activity.id && rule.steps.some(step => retainedKeys.includes(`calendar:rule:${rule.id}:${triggerKey}:${step.key}`)))
       if (!inRange(date, expandedFrom, expandedTo) && !retained) return
@@ -146,6 +152,20 @@ export function resolveCalendarOccurrences(state: CalendarRulesState, from: stri
       if (!inRange(date, expandedFrom, expandedTo) && !retainedKeys.some(key => key.includes(`:${triggerKey}`))) continue
       if (fact.status === 'cancelled') cancel(triggerKey, '本人の公開勤務割当が取消された', candidates)
       else emit(triggerKey, date, candidates, fact)
+    }
+    const externalFacts = facts.filter((fact): fact is Extract<ScheduleFact, { kind: 'external_event' }> => fact.kind === 'external_event' && fact.activityId === activity.id)
+    for (const identity of new Set(externalFacts.map(fact => `${fact.sourceId}:${fact.externalId}`))) {
+      const candidates = unsuperseded(externalFacts.filter(fact => `${fact.sourceId}:${fact.externalId}` === identity)), fact = candidates[0]
+      if (!fact) continue
+      const triggerKey = `external:${identity}`, generationKey = `calendar:activity:${activity.id}:${triggerKey}`
+      if (new Set(candidates.map(candidate => canonicalJSON({ status: candidate.status, startAt: candidate.startAt, endAt: candidate.endAt, timezone: candidate.timezone, allDay: candidate.allDay, title: candidate.title }))).size > 1) { blocked.add(`activity:${activity.id}`); conflict(triggerKey, context.id, '同じ外部予定の日時・版・取消が矛盾しています', candidates); continue }
+      const date = calendarDateAt(fact.startAt, context.timezone), retained = retainedKeys.includes(generationKey)
+      if (!inRange(date, expandedFrom, expandedTo) && !retained) continue
+      if (fact.status === 'cancelled') { cancel(triggerKey, 'ICSに明示された予定の取消', candidates); continue }
+      if (!applicable(state, activity.contextId, activity.bindingId, date) || !inRange(date, activity.validFrom, activity.validTo)) { blocked.add(`activity:${activity.id}`); conflict(triggerKey, context.id, 'ICS予定の本人適用・有効期間を確認してください', candidates); continue }
+      // A real imported meeting is independent of workday/holiday defaults.
+      const spec: ResolvedCalendarSpec = { generationKey, triggerKey, stepKey: 'activity', contextId: context.id, bindingId: activity.bindingId, activityId: activity.id, ruleId: null, kind: 'event', title: fact.allDay ? `${fact.title}（終日）` : fact.title, scheduledDate: null, dueDate: null, score: null, startAt: fact.startAt, endAt: fact.endAt, eventKind: activity.eventKind, timezone: context.timezone, sourceRefs: refs(candidates), originBasis: 'activity' }
+      activityOccurrences.push(spec); if (inRange(date, from, to) || retained) occurrences.push(spec)
     }
   }
 

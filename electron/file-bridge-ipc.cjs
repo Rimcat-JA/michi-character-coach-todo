@@ -21,6 +21,12 @@ function installFileBridgeIPC({ ipcMain, win, app, safeStorage }) {
     return readAppDatabase(win, table, key)
   }
   let servicePromise = null
+  ipcMain.handle('michi:filebridge-mcpConfiguration', async event => {
+    assertMain(event)
+    const current = await (await service()).status()
+    if (!current.connected || !current.root || !current.snapshot) throw new Error('選択したタスクを書き出してからMCP設定を確認してください')
+    return { mcpServers: { michi: { command: process.execPath, args: [path.join(app.getAppPath(), 'scripts', 'michi-mcp.mjs'), '--bridge', current.root], env: { ELECTRON_RUN_AS_NODE: '1' } } } }
+  })
   async function service() {
     servicePromise ??= (async () => {
       if (!safeStorage.isEncryptionAvailable()) throw new Error('この端末では外部接続の署名鍵を安全に保存できません')
