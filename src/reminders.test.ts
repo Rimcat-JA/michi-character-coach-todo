@@ -21,7 +21,7 @@ describe('ローカルリマインダー', () => {
     await createReminder('review', taskId, '12:00', ['in-app', 'os'], clock(11))
     const [event] = await dispatchDueReminders(clock(12))
     expect(event).toMatchObject({ kind: 'review', reviewDate: '2026-09-29', reviewRevision: 1, channels: ['in-app', 'os'] })
-    expect(await pendingOSReminder(event, clock(12))).toEqual({ title: 'michi 見直し通知', body: '見直し: 返答待ち' })
+    expect(await pendingOSReminder(event, clock(12))).toMatchObject({ title: 'michi 通知', body: '見直し: 返答待ち', attemptId: expect.any(String), notificationId: event.id, destinationId: 'os', provenance: 'factual-template' })
     expect(await dispatchDueReminders(clock(13))).toEqual([])
     expect(await db.tasks.get(taskId)).toEqual(original)
     expect(await db.completions.count()).toBe(0)

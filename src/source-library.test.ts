@@ -6,6 +6,7 @@ import { defaultSourcePermissions, deleteSource, importLocalSource, purgeExpired
 import { availableMemoryContext, createCoachMemory, memorySourceFromOption } from './coach-memory'
 import { validateMemoryRecords } from './memory-validation'
 import { validateSourceRecords, verifySourceDigests } from './source-validation'
+import { beginCoachNotificationDelivery, emptyCoachNotificationState, reserveCoachNotification, settleCoachNotificationDelivery, validateCoachNotificationState, type NotificationGuard, type NotificationRequest } from './coach-notifications'
 
 const model = 'deepseek/deepseek-v4.1-flash'
 let ownerId: string
@@ -19,6 +20,23 @@ const input = (change: Partial<SourceImport> = {}): SourceImport => ({ title: '�
 async function saved() { return { sources: await sourceDb.contextSources.toArray(), snapshots: await sourceDb.contextSnapshots.toArray(), summaries: await sourceDb.sourceSummaries.toArray(), artifacts: await sourceDb.sourceArtifacts.toArray() } }
 
 describe('本人が選んだ資料と7項目の許可', () => {
+  it('選択したタイムゾーンを保存し、外側のatomic取込でもdigest待機中にtransactionを失効させない', async () => {
+    const id = await db.transaction('rw', db.contextSources, db.contextSnapshots, db.sourceArtifacts, db.settings, async () => {
+      const id = await importLocalSource(input({ timezone: 'America/New_York' }))
+      await db.sourceArtifacts.add({ id: 'import-provenance', sourceId: id, ownerId, sourceRevision: 1, permissionRevision: 1, kind: 'cache', payload: 'synthetic immutable import provenance', createdAt: new Date().toISOString() })
+      return id
+    })
+    expect((await db.contextSources.get(id))?.timezone).toBe('America/New_York')
+    expect(await db.sourceArtifacts.count()).toBe(1)
+    const count = await db.contextSources.count()
+    await expect(importLocalSource(input({ timezone: 'Invalid/Timezone' }))).rejects.toThrow('タイムゾーン')
+    expect(await db.contextSources.count()).toBe(count)
+    await expect(db.transaction('rw', db.contextSources, db.contextSnapshots, db.settings, async () => {
+      await importLocalSource(input({ externalId: 'other', timezone: 'Asia/Tokyo' }))
+      throw new Error('import provenance failed')
+    })).rejects.toThrow('provenance failed')
+    expect(await db.contextSources.count()).toBe(count)
+  })
   it('読取許可だけのSlack資料をAIへ送らず、資料内命令も実行しない', async () => {
     const id = await importLocalSource(input({ permissions: { ...defaultSourcePermissions(), notify: true } }))
     const send = vi.fn(async () => '送ってはいけない')
@@ -120,6 +138,33 @@ describe('本人が選んだ資料と7項目の許可', () => {
     expect((await sourceDb.contextSources.get(expiring))?.deletedAt).not.toBeNull()
     expect(await sourceDb.contextSnapshots.count()).toBe(0)
     expect((await searchSources('資料', '2026-09-01', '2026-10-03')).hits).toEqual([])
+  })
+
+  it.each(['許可取消', '削除', '期限'] as const)('資料の%sは予約通知を停止し、配信済みの通知本文も除去する', async mode => {
+    const id = await importLocalSource(input({ permissions: { ...defaultSourcePermissions(), notify: true }, retentionUntil: mode === '期限' ? '2026-10-02T00:00:00.000Z' : null }))
+    const settings = (await db.settings.get('main'))!, at = new Date().toISOString(), policy = settings.changePolicy!
+    let state = emptyCoachNotificationState(ownerId, settings.datasetId, 'Asia/Tokyo')
+    for (const delivered of [false, true]) {
+      const request: NotificationRequest = { id: `source-notice:${id}:${delivered}`, purpose: delivered ? 'direct_reply' : 'grounded_obligation_detected', category: delivered ? 'reply' : 'proactive', target: { kind: 'source', id, revision: 1 }, ruleId: `fixture:${delivered}`, ruleRevision: '1', ruleWindow: `2026-10-01:${delivered}`, notBefore: at, expiresAt: '2026-10-01T04:00:00.000Z', destinationIds: ['in-app'], sourceRefs: [{ id, revision: 1, permissionRevision: 1 }], text: { factual: '秘密資料由来の通知', savedAI: '秘密要約の通知' }, intervalMinutes: null, maxCount: null, endDate: null }
+      const guard: NotificationGuard = { ownerId, datasetId: settings.datasetId, authorityEpoch: policy.epoch, sourcePermissionRevision: policy.sourcePermissionRevision, aiEnabled: true, target: { ...request.target, active: true }, rule: { id: request.ruleId, revision: '1', active: true, sentCount: 0 }, sources: [{ ...request.sourceRefs[0], active: true, notify: true, disclose: false }], availableDestinationIds: ['in-app'] }
+      const reserved = reserveCoachNotification(state, request, guard, at)
+      expect(reserved.decision).toEqual({ allowed: true }); state = reserved.state
+      if (delivered) {
+        const sending = beginCoachNotificationDelivery(state, request.id, 'in-app', 'accepted-attempt', guard, at)
+        expect(sending.payload?.body).toBe('秘密要約の通知')
+        state = settleCoachNotificationDelivery(sending.state, request.id, 'in-app', 'accepted-attempt', 'accepted_by_provider', at)
+      }
+    }
+    await db.settings.update('main', { notificationState: state })
+    if (mode === '許可取消') await setSourcePermissions(id, 1, defaultSourcePermissions(), [], null)
+    else if (mode === '削除') await deleteSource(id, 1)
+    else { vi.setSystemTime(new Date('2026-10-03T00:00:00.000Z')); await purgeExpiredSources() }
+    const current = (await db.settings.get('main'))!.notificationState!
+    expect(current.intents[0].deliveries[0].state).toBe('canceled')
+    expect(current.intents[1].deliveries[0].state).toBe('accepted_by_provider')
+    expect(current.intents.every(intent => intent.text.factual === '削除・権限変更した資料の通知' && intent.text.savedAI === null)).toBe(true)
+    expect(JSON.stringify(current)).not.toContain('秘密')
+    expect(() => validateCoachNotificationState(current, ownerId, settings.datasetId)).not.toThrow()
   })
 
   it('バックアップの偽造引用・owner・hash・派生provenanceを拒否する', async () => {

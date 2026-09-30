@@ -5,6 +5,10 @@ const { pathToFileURL } = require('node:url')
 const { createAIBudget, estimateReservationTokens } = require('./ai-budget.cjs')
 const { scoreAssistMessages } = require('./score-assist.cjs')
 const { detectionMessages } = require('./detection.cjs')
+const { installFileBridgeIPC } = require('./file-bridge-ipc.cjs')
+const { installLocalActionIPC } = require('./local-action-ipc.cjs')
+const { readNotificationContext } = require('./app-db-reader.cjs')
+const { createOSNotificationGuard } = require('./notification-delivery.cjs')
 
 const hasInstanceLock = app.requestSingleInstanceLock()
 if (!hasInstanceLock) app.quit()
@@ -151,11 +155,14 @@ async function detectWithOpenRouter({ model, request, change }, verify) {
 
 if (hasInstanceLock) app.whenReady().then(() => {
   let miniWin = null
-  ipcMain.handle('michi:notify', (event, payload) => {
+  const validateOSAttempt = createOSNotificationGuard()
+  ipcMain.handle('michi:notify', async (event, payload) => {
     assertAppFrame(event)
-    if (!Notification.isSupported()) return false
-    if (!payload || typeof payload.title !== 'string' || typeof payload.body !== 'string' || payload.title.length > 200 || payload.body.length > 300) throw new Error('通知内容が不正です')
-    new Notification({ title: payload.title, body: payload.body }).show()
+    if (win.isDestroyed() || event.sender !== win.webContents || event.senderFrame !== win.webContents.mainFrame || !Notification.isSupported()) return false
+    const context = await readNotificationContext(win, payload?.notificationId)
+    const content = validateOSAttempt(context, payload)
+    if (!content) return false
+    new Notification(content).show()
     return true
   })
   ipcMain.handle('michi:ai-status', async event => {
@@ -251,6 +258,8 @@ if (hasInstanceLock) app.whenReady().then(() => {
   win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
   win.webContents.on('will-navigate', (event, url) => { if (!url.startsWith('michi://app/')) event.preventDefault() })
   win.loadURL('michi://app/index.html')
+  installFileBridgeIPC({ ipcMain, win, app, safeStorage })
+  installLocalActionIPC({ ipcMain, win, app, safeStorage })
   ipcMain.handle('michi:open-top-of-mind', event => {
     assertAppFrame(event)
     if (miniWin && !miniWin.isDestroyed()) { miniWin.show(); miniWin.focus(); return true }

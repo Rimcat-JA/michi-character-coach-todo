@@ -5,8 +5,11 @@ import { createTask, newTaskInput } from './commands'
 import { createGoal, createGoalCheckIn } from './goals'
 import { updateAIConnection } from './ai-connection'
 import { defaultSourcePermissions, deleteSource, importLocalSource, setSourcePermissions } from './source-library'
-import { appendCoachReply, beginCoachTurn, cancelCoachTurn, clearCoachTurnAuthority, createCoachConversation, deleteCoachConversation, readCoachConversation, saveCoachDraft, searchCoachHistory } from './chat-history'
+import { appendCoachReply, beginCoachTurn, cancelCoachTurn, clearCoachTurnAuthority, createCoachConversation, deleteCoachConversation, previewCoachTurnContext, purgeExpiredConversations, readCoachConversation, saveCoachDraft, searchCoachHistory, setConversationRetention } from './chat-history'
 import { validateChatHistoryRecords } from './chat-history-validation'
+import { availableMemoryContext, createCoachMemory, deleteCoachMemory, editCoachMemory, memorySourceFromOption, purgeExpiredMemories, setMemoryRetention } from './coach-memory'
+import { validateMemoryRecords } from './memory-validation'
+import { saveDayNote, setDayNoteSummary } from './journal'
 
 const model = 'deepseek/deepseek-v4.1-flash'
 let ownerId: string
@@ -157,5 +160,84 @@ describe('ローカルのコーチ会話履歴', () => {
       (data: typeof snapshot) => { data.conversations[0].pendingMessageId = data.messages[0].id },
     ]
     for (const mutate of mutations) { const data = structuredClone(snapshot); mutate(data); expect(() => validateChatHistoryRecords(data.conversations, data.messages, ownerId)).toThrow('不正') }
+  })
+
+  it('本人が選んだ明示/推測だけをラベル付きで送り、未選択記憶と過去会話を送らない', async () => {
+    await updateAIConnection(true, model)
+    const explicit = await createCoachMemory({ kind: 'explicit', text: '朝は短い提案を希望する' }), inferred = await createCoachMemory({ kind: 'inferred', text: '夕方なら集中できるかもしれない' })
+    await createCoachMemory({ kind: 'explicit', text: '未選択の秘密のメモ' })
+    const id = await createCoachConversation(), first = await beginCoachTurn(id, 1, { text: '過去の秘密の会話', mode: 'local' }); await appendCoachReply(first, '過去の定型応答', 'template')
+    const preview = await previewCoachTurnContext({ mode: 'ai', memoryIds: [explicit, inferred] })
+    expect(preview.context).toContain('本人が明示したメモ'); expect(preview.context).toContain('推測・未確認、事実として断定しない')
+    expect(preview.context).not.toContain('未選択'); expect(preview.context).not.toContain('過去の秘密')
+    const row = (await readCoachConversation(id)).conversation, turn = await beginCoachTurn(id, row.revision, { text: '選択した情報だけ相談', mode: 'ai', memoryIds: [explicit, inferred], expectedContextDigest: preview.digest })
+    expect(turn.selectedContext).toBe(preview.context); expect(turn.selectedSources.map(ref => ref.kind)).toEqual(['memory', 'memory'])
+    await appendCoachReply(turn, '選択した記憶へのAI応答', 'live_ai')
+    const snapshot = await saved(); expect(() => validateChatHistoryRecords(snapshot.conversations, snapshot.messages, ownerId)).not.toThrow()
+  })
+
+  it('訂正後に古いプレビューを拒否し、送信中の記憶削除で応答を無効化する', async () => {
+    await updateAIConnection(true, model)
+    const memoryId = await createCoachMemory({ kind: 'inferred', text: '毎日出社するかもしれない' }), id = await createCoachConversation(), preview = await previewCoachTurnContext({ mode: 'ai', memoryIds: [memoryId] })
+    await editCoachMemory(memoryId, 1, 'explicit', '出社は週2日です')
+    await expect(beginCoachTurn(id, 1, { text: '訂正前の情報で相談', mode: 'ai', memoryIds: [memoryId], expectedContextDigest: preview.digest })).rejects.toThrow('別の画面')
+    expect(await db.coachMessages.count()).toBe(0)
+    const turn = await beginCoachTurn(id, 1, { text: '本人相談', mode: 'ai', memoryIds: [memoryId] })
+    await deleteCoachMemory(memoryId, 2)
+    await expect(appendCoachReply(turn, '削除記憶からの遅い回答', 'live_ai')).rejects.toThrow('別の画面')
+    expect((await readCoachConversation(id)).conversation.pendingMessageId).toBeNull()
+  })
+
+  it('記憶経由でも資料のモデル送信許可を確認し、資料削除はそのAI応答を除去する', async () => {
+    await updateAIConnection(true, model)
+    const sourceId = await source(false), ref = await memorySourceFromOption({ kind: 'library', refId: sourceId, summary: false, label: '本人が選択した資料' }, ownerId), memoryId = await createCoachMemory({ kind: 'explicit', text: '資料から本人が保存したメモ', sources: [ref] }), id = await createCoachConversation()
+    await expect(beginCoachTurn(id, 1, { text: '送信しない', mode: 'ai', memoryIds: [memoryId] })).rejects.toThrow('AI送信')
+    await setSourcePermissions(sourceId, 1, { ...defaultSourcePermissions(), aiEgress: true }, [model], null)
+    // Changing source permission purges the old derived memory; select a fresh one.
+    const newRef = await memorySourceFromOption({ kind: 'library', refId: sourceId, summary: false, label: '現行資料' }, ownerId), currentMemory = await createCoachMemory({ kind: 'explicit', text: '許可済み資料メモ', sources: [newRef] })
+    const turn = await beginCoachTurn(id, 1, { text: '許可済みメモで相談', mode: 'ai', memoryIds: [currentMemory] }); await appendCoachReply(turn, '資料メモからの秘密応答', 'live_ai')
+    await deleteSource(sourceId, 2)
+    expect((await readCoachConversation(id)).messages.map(row => row.text)).toEqual(['許可済みメモで相談'])
+    expect(JSON.stringify(await saved())).not.toContain('秘密応答')
+  })
+
+  it('出典本文が同じ版のまま変わってもdigestで古い記憶応答を拒否する', async () => {
+    await updateAIConnection(true, model)
+    const noteId = await saveDayNote('2026-10-01', 'Asia/Tokyo', '本人が週2日と回答'), ref = await memorySourceFromOption({ kind: 'day-note', refId: noteId, summary: false, label: '本人本文' }, ownerId), memoryId = await createCoachMemory({ kind: 'explicit', text: '週2日のメモ', sources: [ref] }), id = await createCoachConversation()
+    const turn = await beginCoachTurn(id, 1, { text: '現在のメモで相談', mode: 'ai', memoryIds: [memoryId] })
+    await db.dayNotes.update(noteId, { humanText: '本文が書き換わった（版の改変fixture）' })
+    await expect(appendCoachReply(turn, '改変前の本人本文からの応答', 'live_ai')).rejects.toThrow('別の画面')
+  })
+
+  it('AI要約由来の記憶は要約digestと現行版を確認し、要約訂正後に旧応答を再利用しない', async () => {
+    await updateAIConnection(true, model)
+    const noteId = await saveDayNote('2026-10-01', 'Asia/Tokyo', '本人回答は週2日'), id = await createCoachConversation()
+    await setDayNoteSummary(noteId, 0, '週2日という要約', 'ai', 1)
+    const ref = await memorySourceFromOption({ kind: 'day-note', refId: noteId, summary: true, label: '本人回答の要約' }, ownerId), memoryId = await createCoachMemory({ kind: 'inferred', text: '要約に基づいた未確認メモ', sources: [ref] })
+    const first = await beginCoachTurn(id, 1, { text: '選んだ要約メモで相談', mode: 'ai', memoryIds: [memoryId] }); await appendCoachReply(first, '旧要約メモからの応答', 'live_ai')
+    const next = await beginCoachTurn(id, 3, { text: '現行メモを使う相談', mode: 'ai', memoryIds: [memoryId] })
+    await setDayNoteSummary(noteId, 1, '本人が要約を訂正', 'human', 1)
+    await expect(appendCoachReply(next, '訂正前の遅い応答', 'live_ai')).rejects.toThrow('別の画面')
+    expect((await readCoachConversation(id)).messages.every(row => row.text !== '旧要約メモからの応答')).toBe(true)
+  })
+
+  it('期限後の読込は即除外し、native cleanupで記憶本文/history/派生replyと会話本文/draftを物理消去する', async () => {
+    await updateAIConnection(true, model)
+    const memoryId = await createCoachMemory({ kind: 'inferred', text: '期限付きの秘密記憶' }), id = await createCoachConversation()
+    await editCoachMemory(memoryId, 1, 'explicit', '訂正した秘密記憶'); await setMemoryRetention(memoryId, 2, '2026-10-01T03:01:00.000Z')
+    const turn = await beginCoachTurn(id, 1, { text: '本人の相談を残す', mode: 'ai', memoryIds: [memoryId] }); await appendCoachReply(turn, '記憶由来の秘密応答', 'live_ai')
+    const expiring = await createCoachConversation(); await saveCoachDraft(expiring, 1, '期限付きの秘密draft'); const local = await beginCoachTurn(expiring, 1, { text: '期限付きの秘密会話', mode: 'local' }); await appendCoachReply(local, '期限付きの秘密reply', 'template'); await setConversationRetention(expiring, 3, '2026-10-01T03:01:00.000Z')
+    vi.setSystemTime(new Date('2026-10-01T03:02:00.000Z'))
+    expect(await availableMemoryContext(ownerId)).toEqual({ explicit: [], inferred: [] })
+    await expect(readCoachConversation(expiring)).rejects.toThrow('本人の会話')
+    expect((await db.coachMemories.get(memoryId))!.text).toBe('訂正した秘密記憶')
+    expect((await db.coachConversations.get(expiring))!.draft).toBe('期限付きの秘密draft')
+    await purgeExpiredMemories(); await purgeExpiredConversations()
+    const snapshot = await saved(), memory = (await db.coachMemories.get(memoryId))!
+    expect(memory).toMatchObject({ text: '', history: [], contentPurged: 'retention', deletedAt: expect.any(String) })
+    expect(JSON.stringify(snapshot)).not.toContain('秘密'); expect((await readCoachConversation(id)).messages.map(row => row.text)).toEqual(['本人の相談を残す'])
+    expect(() => validateMemoryRecords([memory], [], ownerId)).toThrow()
+    const tombstones = await db.memoryTombstones.toArray(); expect(() => validateMemoryRecords([memory], tombstones, ownerId)).not.toThrow()
+    expect(() => validateChatHistoryRecords(snapshot.conversations, snapshot.messages, ownerId)).not.toThrow()
   })
 })

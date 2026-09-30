@@ -10,6 +10,8 @@
     "lint": "oxlint",
     "preview": "vite preview",
     "test": "vitest run",
+    "check:electron": "node scripts/electron-checks.mjs syntax",
+    "test:electron": "node scripts/electron-checks.mjs test",
     "desktop": "npm run build && electron .",
     "package:win": "npm run build && powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package-portable.ps1"
   },

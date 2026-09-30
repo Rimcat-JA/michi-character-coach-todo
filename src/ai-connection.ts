@@ -3,6 +3,7 @@ import { changePolicyFor, clearChangeSetAuthority, validateChangePolicy } from '
 import { clearDetectionAuthority } from './detection-run'
 import { clearCoachTurnAuthority } from './chat-history'
 import { clearCalendarRulesAuthority } from './calendar-rules-save'
+import { invalidateExternalConnection } from './external-connection'
 
 export async function updateAIConnection(enabled: boolean, model?: string) {
   if (model !== undefined && !/^[\w~./:-]{3,120}$/.test(model)) throw new Error('モデルIDを確認してください')
@@ -18,4 +19,5 @@ export async function updateAIConnection(enabled: boolean, model?: string) {
   clearDetectionAuthority()
   clearCoachTurnAuthority()
   clearCalendarRulesAuthority()
+  await invalidateExternalConnection()
 }

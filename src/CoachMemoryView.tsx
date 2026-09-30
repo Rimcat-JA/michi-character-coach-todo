@@ -2,15 +2,18 @@ import { useEffect, useState } from 'react'
 import { useLiveQuery } from 'dexie-react-hooks'
 import { db } from './db'
 import type { Settings } from './domain'
-import { createCoachMemory, deleteCoachMemory, editCoachMemory, memorySourceFromOption, type CoachMemory, type MemoryKind, type MemorySourceOption, type MemorySourceRef } from './coach-memory'
+import { createCoachMemory, deleteCoachMemory, editCoachMemory, memorySourceFromOption, setMemoryRetention, type CoachMemory, type MemoryKind, type MemorySourceOption, type MemorySourceRef } from './coach-memory'
 import { sourceDb } from './source-library'
+import { purgeExpiredCoachContext } from './context-retention'
 
 type Run = (fn: () => Promise<unknown>, success?: string) => Promise<boolean>
 const kindLabel = (kind: MemoryKind) => kind === 'explicit' ? '本人が明示したメモ' : '推測・未確認'
 const sourceKind = (kind: string) => kind === 'human' ? '本人入力' : kind === 'derived-summary' ? '要約の出典' : kind === 'library' ? '保存済み資料本文' : kind === 'day-note' ? '日記の本人本文' : kind === 'review' ? 'レビューの本人回答' : '目標チェックイン'
+const localTime = (at: string | null | undefined) => { if (!at) return ''; const date = new Date(at); return new Date(date.getTime() - date.getTimezoneOffset() * 60000).toISOString().slice(0, 16) }
 
 function MemoryItem({ memory, execute, sourceText }: { memory: CoachMemory; execute: Run; sourceText: (source: MemorySourceRef) => string }) {
   const [editing, setEditing] = useState(false), [text, setText] = useState(memory.text), [kind, setKind] = useState(memory.kind), [revision, setRevision] = useState(memory.revision)
+  const [retention, setRetention] = useState(() => localTime(memory.retentionUntil))
   return <article className="card setting-section">
     <div className="card-heading"><strong>{kindLabel(memory.kind)}</strong><small>版 {memory.revision}</small></div>
     {editing ? <>
@@ -19,13 +22,14 @@ function MemoryItem({ memory, execute, sourceText }: { memory: CoachMemory; exec
       <div className="export-buttons"><button className="secondary-button" disabled={!text.trim()} onClick={async () => { if (await execute(() => editCoachMemory(memory.id, revision, kind, text), '記憶を訂正しました')) setEditing(false) }}>訂正を保存</button><button className="text-button" onClick={() => setEditing(false)}>閉じる</button></div>
     </> : <><p style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{memory.text}</p><div className="export-buttons"><button className="secondary-button" onClick={() => { setText(memory.text); setKind(memory.kind); setRevision(memory.revision); setEditing(true) }}>訂正する</button><button className="text-button" onClick={() => execute(() => deleteCoachMemory(memory.id, memory.revision), '記憶を削除し、同じ出典の再登録を止めました')}>削除する</button></div></>}
     <details><summary>出典と変更履歴</summary>{memory.sources.map((source, index) => <div key={index}><p className="muted" style={{ overflowWrap: 'anywhere' }}>{sourceKind(source.kind)} · {source.kind === 'human' ? '本人が保存したメモ' : source.refId} · 出典版 {source.revision}{source.digest ? ` · 要約識別 ${source.digest.slice(0, 12)}…` : ''}</p><p style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{sourceText(source)}</p></div>)}{memory.history.map(event => <div className="setting-line" key={event.revision}><div><strong>{kindLabel(event.kind)} 版{event.revision}</strong><small>{new Date(event.at).toLocaleString('ja-JP')}</small><p>{event.text}</p></div></div>)}</details>
+    <details><summary>保持期限を設定する</summary><p>現在: {memory.retentionUntil ? new Date(memory.retentionUntil).toLocaleString('ja-JP') : '期限なし'}。期限到達後は利用を停止します。画面を開く・戻る時と60秒ごとの確認、書出し時に本文・変更履歴・記憶由来の応答を消去します。再登録防止の出典情報は残します。</p><label className="field">新しい保持期限（端末の時刻、空欄で期限なし）<input type="datetime-local" value={retention} onChange={event => setRetention(event.target.value)} /></label><button className="secondary-button" onClick={() => execute(() => setMemoryRetention(memory.id, memory.revision, retention ? new Date(retention).toISOString() : null), '記憶の保持期限を保存しました')}>保持期限を保存</button></details>
   </article>
 }
 
 export default function CoachMemoryView({ settings, run }: { settings: Settings; run?: Run }) {
   const [clock, setClock] = useState(() => Date.now())
-  useEffect(() => { const refresh = () => setClock(Date.now()), timer = window.setInterval(refresh, 60000); window.addEventListener('focus', refresh); return () => { window.clearInterval(timer); window.removeEventListener('focus', refresh) } }, [])
   const [text, setText] = useState(''), [kind, setKind] = useState<MemoryKind>('explicit'), [sourceChoice, setSourceChoice] = useState('manual'), [notice, setNotice] = useState(''), [busy, setBusy] = useState(false)
+  useEffect(() => { const refresh = () => { setClock(Date.now()); void purgeExpiredCoachContext().catch(error => setNotice(error instanceof Error ? error.message : String(error))) }, timer = window.setInterval(refresh, 60000); refresh(); window.addEventListener('focus', refresh); return () => { window.clearInterval(timer); window.removeEventListener('focus', refresh) } }, [settings.profileId, settings.datasetId])
   const memories = useLiveQuery(() => db.coachMemories.where('ownerId').equals(settings.profileId).toArray(), [settings.profileId]) ?? []
   const tombstones = useLiveQuery(() => db.memoryTombstones.where('ownerId').equals(settings.profileId).count(), [settings.profileId]) ?? 0
   const notes = useLiveQuery(() => db.dayNotes.where('ownerId').equals(settings.profileId).toArray(), [settings.profileId]) ?? []
@@ -44,7 +48,7 @@ export default function CoachMemoryView({ settings, run }: { settings: Settings;
     ...permittedLibrary.flatMap(source => [{ label: `${source.date} 資料 ${source.title}`, kind: 'library' as const, refId: source.id, summary: false }, ...(source.permissions.aiEgress && librarySummaries.some(summary => summary.sourceId === source.id && summary.sourceRevision === source.latestRevision && summary.permissionRevision === source.permissionRevision && summary.policyEpoch === (settings.changePolicy?.epoch ?? 0) && summary.sourcePermissionRevision === (settings.changePolicy?.sourcePermissionRevision ?? 0)) ? [{ label: `${source.date} 資料要約 ${source.title}`, kind: 'library' as const, refId: source.id, summary: true }] : [])])
   ].sort((left, right) => right.label.localeCompare(left.label)).slice(0, 200)
   const optionKey = (option: MemorySourceOption) => JSON.stringify([option.kind, option.refId, option.summary])
-  const own = memories.filter(memory => !memory.deletedAt).sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
+  const own = memories.filter(memory => !memory.deletedAt && (!memory.retentionUntil || Date.parse(memory.retentionUntil) > clock)).sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
   function sourceText(source: MemorySourceRef): string {
     if (source.kind === 'human') return '本人が保存ボタンで入力したメモです。'
     const summary = source.kind === 'derived-summary', split = source.refId.indexOf(':')
@@ -89,7 +93,7 @@ export default function CoachMemoryView({ settings, run }: { settings: Settings;
     <div className="form-grid"><label className="field">種類<select aria-label="記憶の種類" value={kind} disabled={busy} onChange={event => setKind(event.target.value as MemoryKind)}><option value="explicit">本人が明示したメモ</option><option value="inferred">推測・未確認</option></select></label><label className="field">出典<select aria-label="記憶の出典" value={sourceChoice} disabled={busy} onChange={event => setSourceChoice(event.target.value)}><option value="manual">この本人入力</option>{options.map(option => <option key={optionKey(option)} value={optionKey(option)}>{option.label}</option>)}</select></label></div>
     <label className="field">記憶として残す内容<textarea aria-label="記憶として残す内容" rows={3} maxLength={2000} value={text} disabled={busy} onChange={event => setText(event.target.value)} placeholder="例：朝は短い提案を希望する" /></label>
     <button className="secondary-button" disabled={busy || !text.trim()} onClick={save}>本人が選んだ記憶を保存</button>
-    <p className="muted">この画面で保存した内容は端末内に保存します。AIへの送信はありません。資料の文章から本人属性を自動で追加する処理もありません。</p>
+    <p className="muted">この画面で保存した内容は端末内に保存します。ここではAIへ送信しません。コーチ会話で本人が選んだ記憶だけをプレビューして送信できます。資料の文章から本人属性を自動で追加する処理はありません。</p>
     <p className="muted">削除・訂正した推測は、同じ出典と同じ版から別の内容で再登録できません。再利用防止の出典記録は{tombstones}件です。削除した内容と変更履歴はローカル保存に残り、現在の記憶から除外します。</p>
     {own.map(memory => <MemoryItem key={memory.id} memory={memory} execute={execute} sourceText={sourceText} />)}
     {own.length === 0 && <p className="muted">保存した記憶はまだありません。</p>}

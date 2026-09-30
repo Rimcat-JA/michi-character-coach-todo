@@ -15,6 +15,10 @@ Windows用ポータブル版を作る場合は `npm run package:win` を実行�
 
 開発時は `npm run dev`。型検査とビルドは `npm run build`、自動テストは `npm test`、静的検査は `npm run lint`。ブラウザ版は初回の読み込み後、同じブラウザの保存領域にデータを保持します。デスクトップ版とは別の保存領域です。
 
+Electronのローカル接続・PC操作・通知の検証は `npm run test:electron`、全CJS構文検査は `npm run check:electron`。UbuntuとWindowsのCIでも実行します。
+
+記憶の選択送信・保持期限、資料と会話の統合文字検索、端末内読み上げ・本人音源、共通通知、承認付きファイル接続・固定PC操作を追加しました。確認範囲と未接続機能は[今回の検証記録](docs/verification-2026-10-01-local-bridge.md)と[121要件の進捗](docs/requirements-status.md)を参照してください。
+
 ## 実装済み
 
 - 手動タスク作成・編集・検索、Inbox相当の一覧、予定日と締め切りの分離、階層プロジェクト・ラベルグループ・重要度、ゴミ箱と復元

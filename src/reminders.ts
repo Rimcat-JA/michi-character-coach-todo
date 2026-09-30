@@ -1,16 +1,13 @@
 import { db } from './db'
 import { addDays, today, uid, validateDate, type ReminderEvent, type ReminderRule, type ReminderState, type Settings } from './domain'
 import { querySmartList } from './smart-lists'
+import { coachNotificationGuardFor, coachNotificationStateFor, prepareCoachNotificationDelivery, setCoachNotificationPolicy } from './coach-notification-save'
+import { cancelPendingCoachNotifications, notificationDedupeKey, notificationLocalClock, reserveCoachNotification, settleCoachNotificationDelivery, type CoachNotificationState, type NotificationRequest } from './coach-notifications'
 
 export const defaultReminderState = (): ReminderState => ({ quietStart: '22:00', quietEnd: '08:00', dailyCap: 6, rules: [], events: [] })
 
 function state(settings: Settings) { return settings.reminderState ?? defaultReminderState() }
-function localTime(date: Date) { return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}` }
 function atLocal(date: string, time: string) { return new Date(`${date}T${time}:00`).toISOString() }
-function withinQuietHours(time: string, start: string, end: string) {
-  if (start === end) return false
-  return start < end ? time >= start && time < end : time >= start || time < end
-}
 function nextDaily(now: Date, time: string) { return atLocal(addDays(today(now), 1), time) }
 function assertTime(time: string) { if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(time)) throw new Error('時刻を確認してください') }
 
@@ -18,10 +15,7 @@ export async function setReminderPolicy(patch: Partial<Pick<ReminderState, 'quie
   if (patch.quietStart !== undefined) assertTime(patch.quietStart)
   if (patch.quietEnd !== undefined) assertTime(patch.quietEnd)
   if (patch.dailyCap !== undefined && (!Number.isInteger(patch.dailyCap) || patch.dailyCap < 0 || patch.dailyCap > 50)) throw new Error('通知の1日上限は0〜50件で指定してください')
-  await db.transaction('rw', db.settings, async () => {
-    const settings = await db.settings.get('main'); if (!settings) throw new Error('設定がありません')
-    await db.settings.update('main', { reminderState: { ...state(settings), ...patch } })
-  })
+  await setCoachNotificationPolicy(patch)
 }
 
 export async function createReminder(kind: ReminderRule['kind'], targetId: string, schedule: string, channels: ReminderRule['channels'] = ['in-app'], now = new Date()) {
@@ -71,7 +65,7 @@ export async function stopReminder(id: string) {
     const current = state(settings)
     if (!current.rules.some(rule => rule.id === id)) throw new Error('通知予約がありません')
     const at = new Date().toISOString()
-    await db.settings.update('main', { reminderState: { ...current, rules: current.rules.map(rule => rule.id === id ? { ...rule, enabled: false, updatedAt: at } : rule) } })
+    await db.settings.update('main', { reminderState: { ...current, rules: current.rules.map(rule => rule.id === id ? { ...rule, enabled: false, updatedAt: at } : rule) }, notificationState: cancelPendingCoachNotifications(coachNotificationStateFor(settings), '予約を停止しました', at, intent => intent.ruleId === id) })
   })
 }
 
@@ -88,6 +82,16 @@ export async function dispatchDueReminders(now = new Date()): Promise<ReminderEv
   return db.transaction('rw', db.settings, db.tasks, db.smartLists, async () => {
     const settings = await db.settings.get('main'); if (!settings) return []
     const current = state(settings), tasks = await db.tasks.toArray(), lists = await db.smartLists.toArray()
+    let notifications = coachNotificationStateFor(settings)
+    // Existing accepted events participate in the shared cap after upgrading.
+    for (const event of current.events) {
+      if (notifications.intents.some(intent => intent.id === event.id)) continue
+      const rule = current.rules.find(item => item.id === event.ruleId)
+      if (!rule) continue
+      const request: NotificationRequest = { id: event.id, purpose: event.kind === 'once' ? 'reminder' : event.kind, category: 'proactive', target: { kind: event.kind === 'smart-daily' ? 'smart-list' : 'task', id: event.targetId, revision: event.reviewRevision ?? (event.kind === 'smart-daily' ? lists.find(item => item.id === event.targetId)?.revision : tasks.find(item => item.id === event.targetId)?.revision) ?? 0 }, ruleId: event.ruleId, ruleRevision: event.at, ruleWindow: event.kind === 'review' ? event.reviewDate ?? event.at : event.at, notBefore: event.at, expiresAt: new Date(Date.parse(event.at) + 86400000).toISOString(), destinationIds: [...event.channels], sourceRefs: [], text: { factual: event.kind === 'review' ? `見直し: ${event.title}` : event.title, savedAI: null }, intervalMinutes: event.kind === 'bug-me' ? rule.intervalMinutes : null, maxCount: event.kind === 'bug-me' ? rule.maxCount : null, endDate: event.kind === 'bug-me' ? rule.endDate : null }
+      notifications.intents.push({ ...request, ownerId: settings.profileId, datasetId: settings.datasetId, policyEpoch: notifications.policy.epoch, authorityEpoch: coachNotificationGuardFor(settings, { ...request.target, active: true }, { id: rule.id, revision: event.at, active: true, sentCount: rule.sentCount }).authorityEpoch, sourcePermissionRevision: settings.changePolicy?.sourcePermissionRevision ?? 0, dedupeKey: notificationDedupeKey(settings.profileId, request), reservedAt: event.at, reservedDay: notificationLocalClock(event.at, notifications.policy.timezone).day, deliveries: event.channels.map(destinationId => ({ destinationId, state: destinationId === 'in-app' ? 'accepted_by_provider' : 'canceled', attemptId: `legacy:${event.id}`, at: event.at })), reason: '以前の通知履歴' })
+    }
+    const previousNotificationCount = settings.notificationState?.intents.length ?? 0
     const events = [...current.events], emitted: ReminderEvent[] = []
     const rules = current.rules.map(rule => ({ ...rule }))
     for (const rule of rules) {
@@ -106,44 +110,54 @@ export async function dispatchDueReminders(now = new Date()): Promise<ReminderEv
         if (!rule.reviewDate || rule.sentCount >= rule.maxCount) continue
       }
       if (rule.nextAt > stamp) continue
-      if (rule.kind === 'smart-daily' ? !list : !task || task.deletedAt || task.status !== 'open') { rule.enabled = false; rule.updatedAt = stamp; continue }
+      if (rule.kind === 'smart-daily' ? !list : !task || task.deletedAt || task.status !== 'open') { rule.enabled = false; rule.updatedAt = stamp; notifications = cancelPendingCoachNotifications(notifications, '対象が完了・削除されました', stamp, intent => intent.ruleId === rule.id); continue }
       if (rule.endDate && day > rule.endDate) { rule.enabled = false; rule.updatedAt = stamp; continue }
       if (rule.kind === 'smart-daily' && list && !querySmartList(list, tasks, settings.profileId).some(item => item.status === 'open')) { rule.nextAt = nextDaily(now, rule.timeOfDay!); rule.updatedAt = stamp; continue }
-      if (withinQuietHours(localTime(now), current.quietStart, current.quietEnd)) continue
-      if (events.filter(event => today(new Date(event.at)) === day).length >= current.dailyCap) continue
-      const lastForTarget = [...events].reverse().find(event => event.targetId === rule.targetId)
-      if (lastForTarget && now.getTime() - Date.parse(lastForTarget.at) < (rule.kind === 'bug-me' ? rule.intervalMinutes : 60) * 60000) continue
       const title = task?.title ?? list?.name ?? ''
       const channels = rule.channels.filter(channel => channel === 'in-app' || settings.notifications)
       if (!channels.length) continue
       const event: ReminderEvent = { id: uid(), ruleId: rule.id, targetId: rule.targetId, kind: rule.kind, title, ...(rule.kind === 'review' && task ? { reviewDate: task.reviewDate!, reviewRevision: task.revision } : {}), at: stamp, channels, readAt: null }
+      const request: NotificationRequest = { id: event.id, purpose: rule.kind === 'once' ? 'reminder' : rule.kind, category: 'proactive', target: { kind: list ? 'smart-list' : 'task', id: rule.targetId, revision: task?.revision ?? list!.revision }, ruleId: rule.id, ruleRevision: stamp, ruleWindow: rule.kind === 'review' ? rule.reviewDate! : rule.nextAt, notBefore: stamp, expiresAt: new Date(now.getTime() + 86400000).toISOString(), destinationIds: channels, sourceRefs: [], text: { factual: rule.kind === 'review' ? `見直し: ${title}` : title, savedAI: null }, intervalMinutes: rule.kind === 'bug-me' ? rule.intervalMinutes : null, maxCount: rule.kind === 'bug-me' ? rule.maxCount : null, endDate: rule.endDate }
+      const reservation = reserveCoachNotification(notifications, request, coachNotificationGuardFor(settings, { ...request.target, active: true }, { id: rule.id, revision: stamp, active: true, sentCount: rule.sentCount }), stamp)
+      if (!reservation.intent) continue
+      notifications = reservation.state
+      if (channels.includes('in-app')) notifications = acceptInApp(notifications, event.id, stamp)
       events.push(event); emitted.push(event); rule.sentCount++; rule.updatedAt = stamp
       if (rule.kind === 'smart-daily') rule.nextAt = nextDaily(now, rule.timeOfDay!)
       else if (rule.kind === 'review') continue
       else if (rule.sentCount >= rule.maxCount) rule.enabled = false
       else rule.nextAt = new Date(now.getTime() + rule.intervalMinutes * 60000).toISOString()
     }
-    if (emitted.length || rules.some((rule, index) => rule.updatedAt !== current.rules[index].updatedAt || rule.reviewDate !== current.rules[index].reviewDate || rule.nextAt !== current.rules[index].nextAt || rule.enabled !== current.rules[index].enabled || rule.sentCount !== current.rules[index].sentCount)) await db.settings.update('main', { reminderState: { ...current, rules, events: events.slice(-1000) } })
+    if (emitted.length || notifications.intents.length !== previousNotificationCount || rules.some((rule, index) => rule.updatedAt !== current.rules[index].updatedAt || rule.reviewDate !== current.rules[index].reviewDate || rule.nextAt !== current.rules[index].nextAt || rule.enabled !== current.rules[index].enabled || rule.sentCount !== current.rules[index].sentCount)) await db.settings.update('main', { reminderState: { ...current, rules, events: events.slice(-1000) }, notificationState: notifications })
     return emitted
   })
 }
 
-export async function pendingOSReminder(event: ReminderEvent, now = new Date()): Promise<{ title: string; body: string } | null> {
+export async function pendingOSReminder(event: ReminderEvent, now = new Date()) {
   if (!event.channels.includes('os')) return null
   const settings = await db.settings.get('main')
   if (!settings?.notifications) return null
   const current = state(settings), rule = current.rules.find(item => item.id === event.ruleId)
-  if (!rule || rule.updatedAt !== event.at || !current.events.some(item => item.id === event.id) || withinQuietHours(localTime(now), current.quietStart, current.quietEnd)) return null
-  if (current.events.filter(item => today(new Date(item.at)) === today(now)).length > current.dailyCap) return null
+  if (!rule || rule.updatedAt !== event.at || !current.events.some(item => item.id === event.id)) return null
   if (event.kind === 'smart-daily') {
     const list = await db.smartLists.get(event.targetId)
     if (!list || list.ownerId !== settings.profileId || !querySmartList(list, await db.tasks.toArray(), settings.profileId).some(item => item.status === 'open')) return null
-    return { title: 'michi リマインダー', body: list.name }
+    const payload = await prepareCoachNotificationDelivery(event.id, 'os', now.toISOString())
+    return payload
   }
   const task = await db.tasks.get(event.targetId)
   if (event.kind === 'review') {
     if (!rule.enabled || rule.kind !== 'review' || rule.targetId !== event.targetId || !task || task.deletedAt || task.status !== 'open' || task.reviewDate !== event.reviewDate || rule.reviewDate !== event.reviewDate || task.revision !== event.reviewRevision) return null
-    return { title: 'michi 見直し通知', body: `見直し: ${task.title}` }
+    const payload = await prepareCoachNotificationDelivery(event.id, 'os', now.toISOString())
+    return payload
   }
-  return task && !task.deletedAt && task.status === 'open' ? { title: 'michi リマインダー', body: task.title } : null
+  if (!task || task.deletedAt || task.status !== 'open') return null
+  const payload = await prepareCoachNotificationDelivery(event.id, 'os', now.toISOString())
+  return payload
+}
+
+function acceptInApp(state: CoachNotificationState, id: string, at: string): CoachNotificationState {
+  const intent = state.intents.find(item => item.id === id)!, attemptId = `in-app:${id}`
+  const sending: CoachNotificationState = { ...state, intents: state.intents.map(item => item.id === id ? { ...intent, deliveries: item.deliveries.map(delivery => delivery.destinationId === 'in-app' ? { ...delivery, state: 'sending', attemptId, at } : delivery) } : item) }
+  return settleCoachNotificationDelivery(sending, id, 'in-app', attemptId, 'accepted_by_provider', at)
 }
