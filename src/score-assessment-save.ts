@@ -23,7 +23,7 @@ export function assessmentProvenance(audits: Audit[], assessmentId: string | und
 }
 
 export async function saveTaskWithScoreProvenance(task: Task | null, input: TaskInput, accepted: ScoreAcceptanceProvenance | null): Promise<string> {
-  return db.transaction('rw', [db.tasks, db.assessments, db.completions, db.ledger, db.routines, db.sessions, db.commands, db.audits, db.containers, db.settings, db.labelGroups, db.labelDefinitions], async () => {
+  return db.transaction('rw', [db.tasks, db.assessments, db.completions, db.ledger, db.routines, db.sessions, db.commands, db.audits, db.containers, db.settings, db.labelGroups, db.labelDefinitions, db.tripBundles], async () => {
     const id = task ? await updateTask(task.id, task.revision, input) : await createTask(input)
     if (accepted) {
       const saved = await db.tasks.get(id)

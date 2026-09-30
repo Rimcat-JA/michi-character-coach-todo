@@ -116,14 +116,16 @@ export async function setGoalCheckInAiSummary(id: string, expectedRevision: numb
 }
 
 export async function deleteGoalCheckIn(id: string, expectedRevision: number): Promise<void> {
-  await db.transaction('rw', db.goalCheckIns, async () => {
+  await db.transaction('rw', [db.goalCheckIns, db.coachMemories, db.memoryTombstones, db.settings], async () => {
     const current = await db.goalCheckIns.get(id)
     if (!current || current.deletedAt) return
     if (current.summaryRevision !== expectedRevision) throw new ConflictError()
     await db.goalCheckIns.put({ ...current, deletedAt: new Date().toISOString(), summaryRevision: current.summaryRevision + 1 })
+    await invalidateMemoriesForSource('goal-checkin', id)
   })
 }
 
 export function currentCheckInContext(checkIns: GoalCheckIn[], goalId: string): { answer: string; summary: string | null; date: string }[] {
   return checkIns.filter(item => item.goalId === goalId && !item.deletedAt).sort((a, b) => b.date.localeCompare(a.date) || b.updatedAt.localeCompare(a.updatedAt)).map(item => ({ answer: item.answer, summary: item.summary, date: item.date }))
 }
+import { invalidateMemoriesForSource } from './coach-memory'

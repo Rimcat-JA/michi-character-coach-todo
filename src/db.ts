@@ -1,5 +1,10 @@
 import Dexie, { type EntityTable } from 'dexie'
 import type { ReviewRecord } from './review-coach'
+import type { TripBundle } from './trip-bundles'
+import type { CoachMemory, MemoryTombstone } from './coach-memory'
+import type { ContextSource, ContextSnapshot, SourceSummary, SourceArtifact } from './source-library'
+import type { CalendarRulesState } from './calendar-resolver'
+import type { CoachConversation, CoachMessage } from './chat-history'
 import type { Assessment, Audit, CalendarEvent, ChecklistItem, CommandReceipt, Completion, Container, DayNote, FocusProjectSelection, Goal, GoalCheckIn, Habit, HabitLog, LabelDefinition, LabelGroup, LedgerEntry, PlanningBucket, PomodoroCycle, RolloverEntry, Routine, SavedTemplate, Settings, SmartList, Task, TaskAttachment, TaskComment, TaskDependency, TaskNote, ThemeRule, TimeBlock, TrackerDefinition, TrackerEntry, WorkSession } from './domain'
 
 export const db = new Dexie('character-coach-v1') as Dexie & {
@@ -37,6 +42,16 @@ export const db = new Dexie('character-coach-v1') as Dexie & {
   dayNotes: EntityTable<DayNote, 'id'>
   pomodoroCycles: EntityTable<PomodoroCycle, 'id'>
   reviewRecords: EntityTable<ReviewRecord, 'id'>
+  tripBundles: EntityTable<TripBundle, 'id'>
+  coachMemories: EntityTable<CoachMemory, 'id'>
+  memoryTombstones: EntityTable<MemoryTombstone, 'id'>
+  contextSources: EntityTable<ContextSource, 'id'>
+  contextSnapshots: EntityTable<ContextSnapshot, 'id'>
+  sourceSummaries: EntityTable<SourceSummary, 'id'>
+  sourceArtifacts: EntityTable<SourceArtifact, 'id'>
+  calendarRules: EntityTable<CalendarRulesState, 'id'>
+  coachConversations: EntityTable<CoachConversation, 'id'>
+  coachMessages: EntityTable<CoachMessage, 'id'>
 }
 db.version(1).stores({
   tasks: 'id, &generationKey, status, scheduledDate, dueDate, project, routineId, deletedAt, updatedAt',
@@ -164,6 +179,11 @@ db.version(14).stores({ goals: 'id, ownerId, parentId, deletedAt', goalCheckIns:
 db.version(15).stores({ trackerDefinitions: 'id, ownerId, name', trackerEntries: 'id, trackerId, recordedAt', dayNotes: 'id, ownerId, date, deletedAt' })
 db.version(16).stores({ pomodoroCycles: 'id, taskId, finishedAt' })
 db.version(17).stores({ reviewRecords: 'id, ownerId, date, kind, deletedAt' })
+db.version(18).stores({ tripBundles: 'id, ownerId, frozenAt' })
+db.version(19).stores({ coachMemories: 'id, ownerId, kind, deletedAt', memoryTombstones: 'id, ownerId, sourceKey' })
+db.version(20).stores({ contextSources: 'id, ownerId, provider, latestRevision, deletedAt', contextSnapshots: 'id, sourceId, ownerId, revision', sourceSummaries: 'id, sourceId, ownerId, sourceRevision, permissionRevision', sourceArtifacts: 'id, sourceId, ownerId, kind' })
+db.version(21).stores({ coachConversations: 'id, ownerId, deletedAt, updatedAt', coachMessages: 'id, conversationId, ownerId, [conversationId+sequence], replyTo, createdAt' })
+db.version(22).stores({ calendarRules: 'id, ownerId, datasetId, revision' })
 
 export async function ensureSettings() {
   const current = await db.settings.get('main')

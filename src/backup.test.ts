@@ -32,6 +32,14 @@ import { saveCustomScreen, saveDashboardWidgets } from './dashboard'
 import { inspectBackup, restoreBackup } from './backup'
 import { validateSnapshot, type Snapshot } from './backup-validation'
 import { saveReviewAnswer, setReviewSummary } from './review-coach'
+import { createCoachMemory, deleteCoachMemory } from './coach-memory'
+import { applyTripBundle } from './trip-bundle-save'
+import { prepareTripBundle } from './trip-bundles'
+import { applyChangeSet, prepareTaskChanges, type ChangeContext } from './change-set'
+import { defaultSourcePermissions, importLocalSource } from './source-library'
+import { appendCoachReply, beginCoachTurn, createCoachConversation, saveCoachDraft } from './chat-history'
+import { calendarFixture, monthlyRule } from './calendar-test-fixtures'
+import { applyCalendarProposalFromUI, prepareCalendarConfiguration, prepareCalendarGeneration } from './calendar-rules-save'
 
 beforeEach(async () => { await db.delete(); await db.open(); await ensureSettings() })
 
@@ -39,6 +47,8 @@ async function snapshot(): Promise<Snapshot> {
   const attachments = await Promise.all((await db.taskAttachments.toArray()).map(async ({ blob, ...item }) => ({ ...item, contentBase64: btoa(Array.from(new Uint8Array(await blob.arrayBuffer()), value => String.fromCharCode(value)).join('')) })))
   return {
     format: 'coachbundle', version: 1, exportedAt: new Date().toISOString(),
+    contextSources: await db.contextSources.toArray(), contextSnapshots: await db.contextSnapshots.toArray(), sourceSummaries: await db.sourceSummaries.toArray(), sourceArtifacts: await db.sourceArtifacts.toArray(),
+    coachConversations: await db.coachConversations.toArray(), coachMessages: await db.coachMessages.toArray(), calendarRules: await db.calendarRules.toArray(),
     tasks: await db.tasks.toArray(), assessments: await db.assessments.toArray(),
     completions: await db.completions.toArray(), ledger: await db.ledger.toArray(),
     routines: await db.routines.toArray(), sessions: await db.sessions.toArray(),
@@ -48,6 +58,93 @@ async function snapshot(): Promise<Snapshot> {
 }
 
 describe('バックアップの復元前検証', () => {
+  it('共通カレンダーと完了実績を復元し、古い承認案と対応先の欠落を拒否する', async () => {
+    const current = (await db.settings.get('main'))!, state = calendarFixture()
+    state.ownerId = current.profileId; state.datasetId = current.datasetId
+    state.bindings.forEach(binding => { binding.personId = current.profileId })
+    state.activities = []; state.bindings[0].activityIds = []
+    state.rules = [monthlyRule()]
+    const event = new Event('click'); Object.defineProperty(event, 'isTrusted', { value: true })
+    const { contexts, bindings, calendars, activities, sources, facts, rules } = state
+    await applyCalendarProposalFromUI(await prepareCalendarConfiguration({ contexts, bindings, calendars, activities, sources, facts, rules }, 1, '2026-10-01', '2026-11-30'), event)
+    await applyCalendarProposalFromUI(await prepareCalendarGeneration('2026-10-01', '2026-11-30'), event)
+    const task = (await db.tasks.toArray())[0]; await completeTask(task.id, task.revision)
+    const pending = await prepareCalendarGeneration('2026-10-01', '2026-11-30'), saved = await snapshot()
+    const invalid = structuredClone(saved); invalid.calendarRules![0].instances[0].entityId = 'missing-task'
+    await expect(restoreBackup(invalid)).rejects.toThrow('カレンダー')
+    expect(await db.tasks.get(task.id)).toBeDefined()
+    await restoreBackup(saved)
+    expect(await db.calendarRules.toArray()).toEqual(saved.calendarRules)
+    expect(await db.ledger.toArray()).toEqual(saved.ledger)
+    await expect(applyCalendarProposalFromUI(pending, event)).rejects.toThrow('登録済み')
+    const fresh = await prepareCalendarGeneration('2026-10-01', '2026-11-30')
+    expect(fresh.plan).toMatchObject({ creates: [], updates: [], cancels: [], skippedCompleted: 1 })
+  })
+  it('会話と下書きを復元し、復元前の応答権限は失効する', async () => {
+    const id = await createCoachConversation('復元する会話', 'Asia/Tokyo')
+    await saveCoachDraft(id, 1, '本人の送信文')
+    const initial = (await db.coachConversations.get(id))!
+    const first = await beginCoachTurn(id, initial.revision, { text: '本人の送信文', mode: 'local' })
+    await appendCoachReply(first, '端末内の定型応答', 'template')
+    const current = (await db.coachConversations.get(id))!
+    await saveCoachDraft(id, current.draftRevision, '入力途中の本人文章')
+    const pending = await beginCoachTurn(id, current.revision, { text: '追加の本人文章', mode: 'local' })
+    const saved = await snapshot()
+    await restoreBackup(saved)
+    expect((await db.coachConversations.get(id))?.draft).toBe('入力途中の本人文章')
+    expect(await db.coachMessages.count()).toBe(3)
+    await expect(appendCoachReply(pending, '復元前の応答は採用しない', 'template')).rejects.toThrow()
+    expect(await db.coachMessages.count()).toBe(3)
+    const invalid = structuredClone(saved)
+    invalid.coachMessages![0].ownerId = 'another-owner'
+    await expect(restoreBackup(invalid)).rejects.toThrow('コーチ会話')
+    expect(await db.coachMessages.count()).toBe(3)
+  })
+  it('資料を復元し、本文ハッシュ偽装は既存データを残して拒否する', async () => {
+    const sourceId = await importLocalSource({ title: '本人が選んだ会話', provider: 'line', externalId: '17200000000000000001', conversation: '本人の会話', author: null, sourceUrl: null, date: '2026-10-01', fromDate: '2026-09-01', toDate: '2026-10-01', text: '本人: 返却を済ませます\r\n別の資料', permissions: defaultSourcePermissions(), allowedModels: [], retentionUntil: null })
+    const saved = await snapshot()
+    await db.contextSnapshots.clear(); await db.contextSources.clear()
+    await restoreBackup(saved)
+    expect((await db.contextSources.get(sourceId))?.externalId).toBe('17200000000000000001')
+    expect((await db.contextSnapshots.toArray())[0].originalText).toContain('\r\n')
+    const taskId = await createTask({ ...newTaskInput(), title: '破損復元でも残すタスク' })
+    const invalid = structuredClone(saved)
+    invalid.contextSnapshots![0].sha256 = '0'.repeat(64)
+    await expect(restoreBackup(invalid)).rejects.toThrow('資料')
+    expect(await db.tasks.get(taskId)).toBeDefined()
+    const legacy = structuredClone(saved)
+    delete legacy.contextSources; delete legacy.contextSnapshots; delete legacy.sourceSummaries; delete legacy.sourceArtifacts
+    await restoreBackup(legacy)
+    expect(await db.contextSources.count()).toBe(0)
+    expect(await db.contextSnapshots.count()).toBe(0)
+  })
+  it('配分した外出と推測の削除記録を復元し、復元前の変更許可は失効する', async () => {
+    const first = await createTask({ ...newTaskInput(), title: '外出1', score: { ...emptyScore(), mode: 'manual', manualPoints: 5 } })
+    const second = await createTask({ ...newTaskInput(), title: '外出2' })
+    const attributes = { minutes: 0, difficulty: 0, uncertainty: 0, coordination: 0, physical: 0 }
+    const proposal = await prepareTripBundle(await db.tasks.toArray(), { title: '復元する外出', travelMinutes: 0, members: [{ taskId: first, attributes }, { taskId: second, attributes }] })
+    await applyTripBundle(proposal, [first])
+    const memoryId = await createCoachMemory({ kind: 'inferred', text: '本人が入力した未確認の推測' })
+    await deleteCoachMemory(memoryId, 1)
+    const settings = (await db.settings.get('main'))!
+    const context: ChangeContext = { principal: { id: settings.profileId, kind: 'human' }, ownerId: settings.profileId, datasetId: settings.datasetId, allowedFields: ['notes', 'scheduledDate'], sourceRevisions: [] }
+    const task = (await db.tasks.get(first))!
+    const pending = await prepareTaskChanges([{ taskId: first, expectedRevision: task.revision, patch: { notes: '復元後は適用しない' } }], context)
+    const saved = await snapshot()
+    saved.tripBundles = await db.tripBundles.toArray()
+    saved.coachMemories = await db.coachMemories.toArray()
+    saved.memoryTombstones = await db.memoryTombstones.toArray()
+    validateSnapshot(saved)
+    const duplicate = structuredClone(saved)
+    duplicate.tripBundles!.push({ ...duplicate.tripBundles![0], id: 'duplicate-bundle' })
+    expect(() => validateSnapshot(duplicate)).toThrow('重複')
+    await restoreBackup(saved)
+    expect(await db.tripBundles.toArray()).toEqual(saved.tripBundles)
+    expect(await db.coachMemories.toArray()).toEqual(saved.coachMemories)
+    expect(await db.memoryTombstones.toArray()).toEqual(saved.memoryTombstones)
+    await expect(applyChangeSet(pending, null, context, 'restored')).rejects.toMatchObject({ code: 'UNVERIFIED_CHANGE_SET' })
+    expect(await db.ledger.count()).toBe(0)
+  })
   it('本人回答・計画・実績・要約を別々に復元し、古い形式ではレビューを空にする', async () => {
     const id = await saveReviewAnswer({ date: '2026-09-30', timezone: 'Asia/Tokyo', kind: 'evening', answer: '明日に再計画する' })
     await setReviewSummary(id, 0, '保存済み実績は0件', 'human', 1, 1)

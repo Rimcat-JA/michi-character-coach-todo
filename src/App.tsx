@@ -11,11 +11,22 @@ import { containerPath, containerPointTotals, createContainer, moveContainer, re
 import { addChecklistItem, checklistProgress, convertChecklistItem, toggleChecklistItem } from './checklist'
 import { createLabelDefinition, createLabelGroup } from './labels'
 import { instantiateTemplate, saveProjectTemplate, saveTaskTemplate } from './templates'
-import { selectedGoalContext, selectedTaskContext, type AIStatus } from './ai'
+import type { AIStatus } from './ai'
 import Braindump from './Braindump'
 import TaskAssistView from './TaskAssistView'
 import ScoreAssistView from './ScoreAssistView'
 import AIUsageView from './AIUsageView'
+import ChangePolicySettingsView from './ChangePolicySettingsView'
+import CoachTaskChangeView from './CoachTaskChangeView'
+import CoachMemoryView from './CoachMemoryView'
+import SourceLibraryView from './SourceLibraryView'
+import DetectionInboxView from './DetectionInboxView'
+import SavedCoachConversation from './SavedCoachConversation'
+import { CalendarRulesView } from './CalendarRulesView'
+import { applyCalendarProposalFromUI, loadCalendarRulesState, prepareCalendarConfiguration, prepareCalendarGeneration, prepareCalendarScheduleImport } from './calendar-rules-save'
+import TripBundlesView from './TripBundlesView'
+import { applyTripBundle, removeTripBundle } from './trip-bundle-save'
+import { updateAIConnection } from './ai-connection'
 import { assessmentProvenance, saveTaskWithScoreProvenance } from './score-assessment-save'
 import type { ScoreAcceptanceProvenance } from './score-assist'
 import TaskMaterials from './TaskMaterials'
@@ -95,6 +106,7 @@ function App() {
   const completions = useLiveQuery(() => db.completions.toArray(), []) ?? []
   const ledger = useLiveQuery(() => db.ledger.toArray(), []) ?? []
   const sessions = useLiveQuery(() => db.sessions.toArray(), []) ?? []
+  const tripBundles = useLiveQuery(() => db.tripBundles.toArray(), []) ?? []
   const routines = useLiveQuery(() => db.routines.toArray(), []) ?? []
   const containers = useLiveQuery(() => db.containers.toArray(), []) ?? []
   const labelGroups = useLiveQuery(() => db.labelGroups.toArray(), []) ?? []
@@ -110,6 +122,7 @@ function App() {
   const goals = useLiveQuery(() => db.goals.toArray(), []) ?? []
   const goalCheckIns = useLiveQuery(() => db.goalCheckIns.toArray(), []) ?? []
   const settings = useLiveQuery(() => db.settings.get('main'), [])
+  const calendarRulesState = useLiveQuery(() => settings ? loadCalendarRulesState() : null, [settings?.profileId, settings?.datasetId])
   const active = tasks.filter(t => !t.deletedAt)
   const open = active.filter(t => t.status === 'open')
   const currentDate = today()
@@ -212,16 +225,16 @@ function App() {
         {view === 'projects' && <ContainersView containers={containers} tasks={tasks} completions={completions} dependencies={dependencies} ownerId={settings.profileId} run={run} />}
         {view === 'labels' && <LabelsView groups={labelGroups} definitions={labelDefinitions} ownerId={settings.profileId} run={run} />}
         {view === 'saved' && <SavedItemsView templates={savedTemplates} containers={containers} tasks={active} ownerId={settings.profileId} run={run} />}
-        {view === 'plan' && <><PlanView tasks={open} blocks={timeBlocks} settings={settings} onEdit={setEditor} /><ThemeRulesView tasks={active} rules={themeRules} ownerId={settings.profileId} run={run} /><AutoSchedulePanel tasks={tasks} dependencies={dependencies} blocks={timeBlocks} settings={settings} run={run} /></>}
+        {view === 'plan' && <><TripBundlesView tasks={tasks} bundles={tripBundles.filter(bundle => bundle.ownerId === settings.profileId)} onApply={async (proposal, confirmed) => { const id = await applyTripBundle(proposal, confirmed); setToast('共通外出の配分を保存しました'); return id }} onRemove={async bundle => { const id = await removeTripBundle(bundle.id, bundle.revision); setToast('元の点数に戻しました'); return id }} /><PlanView tasks={open} blocks={timeBlocks} settings={settings} onEdit={setEditor} /><ThemeRulesView tasks={active} rules={themeRules} ownerId={settings.profileId} run={run} /><AutoSchedulePanel tasks={tasks} dependencies={dependencies} blocks={timeBlocks} settings={settings} run={run} /></>}
         {view === 'periods' && <PeriodPlanningView buckets={planningBuckets} tasks={tasks} ownerId={settings.profileId} run={run} />}
         {view === 'calendar' && <CalendarPlanningView blocks={timeBlocks} events={calendarEvents} tasks={tasks} projects={containers} sessions={sessions} ownerId={settings.profileId} run={run} />}
         {view === 'coach' && <CoachView tasks={open} goals={goals.filter(goal => goal.ownerId === settings.profileId && !goal.deletedAt)} checkIns={goalCheckIns} settings={settings} onEdit={setEditor} onNew={() => setEditor('new')} />}
         {view === 'focus' && <><SuperFocusView tasks={open} sessions={sessions} onEdit={setEditor} onBack={() => go('today')} run={run} /><PomodoroPanel tasks={open} run={run} /><FocusChoiceTools tasks={tasks} dependencies={dependencies} themes={themeRules.filter(rule => rule.ownerId === settings.profileId)} focusProjects={focusSelection?.projects ?? []} lists={smartLists} ownerId={settings.profileId} date={currentDate} now={nowIso} onEdit={setEditor} run={run} /></>}
         {view === 'history' && <><HistoryView completions={completions} ledger={ledger} sessions={sessions} tasks={tasks} onEdit={id => { const t = tasks.find(x => x.id === id); if (t) setEditor(t) }} run={run} /><TimeTargetsView settings={settings} containers={containers} tasks={tasks} sessions={sessions} run={run} /><AnalyticsView completions={completions} sessions={sessions} /><SessionCorrectionView sessions={sessions} tasks={tasks} run={run} /></>}
-        {view === 'routines' && <RoutinesView routines={routines} run={run} />}
+        {view === 'routines' && <><RoutinesView routines={routines} run={run} />{calendarRulesState && <CalendarRulesView key={`${calendarRulesState.ownerId}:${calendarRulesState.datasetId}`} state={calendarRulesState} onPrepareConfiguration={prepareCalendarConfiguration} onPrepareImport={prepareCalendarScheduleImport} onPrepareGeneration={prepareCalendarGeneration} onApply={applyCalendarProposalFromUI} />}</>}
         {view === 'habits' && <HabitsView run={run} />}
         {view === 'goals' && <GoalsView run={run} />}
-        {view === 'journal' && <><ReviewCoachView settings={settings} tasks={tasks} onEdit={setEditor} run={run} /><JournalView run={run} /></>}
+        {view === 'journal' && <><ReviewCoachView settings={settings} tasks={tasks} onEdit={setEditor} run={run} /><JournalView run={run} /><SourceLibraryView settings={settings} run={run} /><DetectionInboxView settings={settings} tasks={tasks} onEdit={setEditor} /></>}
         {view === 'settings' && <SettingsView settings={settings} tasks={tasks} lists={smartLists} run={run} />}
         </>}
       </div>
@@ -450,21 +463,16 @@ function fixedCoachAnswer(text: string, next: Task | undefined) {
 }
 
 function CoachView({ tasks, goals, checkIns, settings, onEdit, onNew }: { tasks: Task[]; goals: Goal[]; checkIns: GoalCheckIn[]; settings: Settings; onEdit: (t: Task) => void; onNew: () => void }) {
-  const [message, setMessage] = useState('')
-  const [chat, setChat] = useState<{ who: 'you' | 'coach'; text: string }[]>([])
   const [aiStatus, setAiStatus] = useState<AIStatus | null>(null)
   const [keyInput, setKeyInput] = useState('')
   const [modelInput, setModelInput] = useState(settings.aiModel || 'deepseek/deepseek-v4.1-flash')
-  const [selectedId, setSelectedId] = useState('')
-  const [selectedGoalId, setSelectedGoalId] = useState('')
+  const [changeTaskId, setChangeTaskId] = useState('')
   const [connectionError, setConnectionError] = useState('')
   const [connectionNotice, setConnectionNotice] = useState('')
   const [testing, setTesting] = useState(false)
   const [sending, setSending] = useState(false)
   const bridge = window.michiAI
   const next = [...tasks].sort((a, b) => (a.dueDate ?? '9999').localeCompare(b.dueDate ?? '9999') || b.importance - a.importance)[0]
-  const selectedTask = tasks.find(t => t.id === selectedId)
-  const selectedContext = [selectedTaskContext(selectedTask), selectedGoalContext(goals.find(goal => goal.id === selectedGoalId), checkIns)].filter(Boolean).join('\n\n').slice(0, 6000) || null
   const aiReady = Boolean(bridge && aiStatus?.configured && settings.aiEnabled && settings.aiModel)
 
   useEffect(() => {
@@ -480,7 +488,7 @@ function CoachView({ tasks, goals, checkIns, settings, onEdit, onNew }: { tasks:
       if (!/^[\w~./:-]{3,120}$/.test(model)) throw new Error('モデルIDを入力してください')
       if (!aiStatus?.configured && !keyInput) throw new Error('APIキーを入力してください')
       if (keyInput) await bridge.saveKey(keyInput.trim())
-      await db.settings.update('main', { aiEnabled: true, aiModel: model })
+      await updateAIConnection(true, model)
       setKeyInput('')
       setAiStatus(await bridge.status())
     } catch (e) {
@@ -492,13 +500,19 @@ function CoachView({ tasks, goals, checkIns, settings, onEdit, onNew }: { tasks:
     if (!bridge) return
     setConnectionError('')
     try {
+      await updateAIConnection(false)
       await bridge.deleteKey()
-      await db.settings.update('main', { aiEnabled: false })
       setAiStatus(await bridge.status())
       setKeyInput('')
     } catch (e) {
       setConnectionError(e instanceof Error ? e.message : String(e))
     }
+  }
+
+  async function pauseAI() {
+    setConnectionError('')
+    try { await updateAIConnection(false); setConnectionNotice('AIをOFFにしました。APIキーは端末内に残っています。') }
+    catch (error) { setConnectionError(error instanceof Error ? error.message : String(error)) }
   }
 
   async function testConnection() {
@@ -511,51 +525,13 @@ function CoachView({ tasks, goals, checkIns, settings, onEdit, onNew }: { tasks:
     finally { setTesting(false) }
   }
 
-  async function send() {
-    const text = message.trim()
-    if (!text || sending) return
-    setChat(c => [...c, { who: 'you', text }])
-    setMessage('')
-    if (aiReady && bridge && navigator.onLine) {
-      setSending(true)
-      try {
-        const answer = await bridge.chat({ model: settings.aiModel!, message: text, selectedTask: selectedContext, character: settings.characterProfile ?? DEFAULT_CHARACTER })
-        setChat(c => [...c, { who: 'coach', text: answer }])
-      } catch (e) {
-        const error = e instanceof Error ? e.message : String(e)
-        const answer = error.includes('OpenRouterへ接続できませんでした') ? `接続できないため端末内の定型応答を表示します。${characterizeAnswer(fixedCoachAnswer(text, next), settings.characterProfile ?? DEFAULT_CHARACTER)}` : error
-        setChat(c => [...c, { who: 'coach', text: answer }])
-      } finally {
-        setSending(false)
-      }
-      return
-    }
-    setChat(c => [...c, { who: 'coach', text: characterizeAnswer(fixedCoachAnswer(text, next), settings.characterProfile ?? DEFAULT_CHARACTER) }])
-  }
-
   return <>
     <div className="page-heading">
       <div><span className="eyebrow">CHARACTER COACH</span><h1>{settings.coachName}と整理する</h1><p>{aiReady ? '送信した文章と選択したタスク・目標だけを、OpenRouter経由で選択したモデルの提供先へ送ります。' : '現在は端末内の定型応答です。外部AIへの送信は行いません。'}</p></div>
       <span className="status-tag"><Moon size={15} /> {aiReady ? 'OpenRouter 接続' : 'オフライン対応'}</span>
     </div>
     <div className="coach-layout">
-      <section className="card conversation">
-        <div className="conversation-top"><div className="small-avatar">✦</div><div><strong>{settings.coachName}</strong><small>{aiReady ? 'AI応答 · 選択したデータだけ送信' : '定型応答 · タスクの保存状態を参照'}</small></div></div>
-        <div className="messages">
-          <div className="message coach">こんにちは。今日は何を整理しましょうか？</div>
-          {chat.map((m, i) => <div key={i} className={`message ${m.who}`}>{m.text}</div>)}
-          {sending && <div className="message coach">OpenRouterからの応答を待っています…</div>}
-        </div>
-        {aiReady && <div className="coach-share">
-          <label className="field">OpenRouterへ送る保存済みタスク
-            <select value={selectedId} onChange={e => setSelectedId(e.target.value)}><option value="">送らない</option>{tasks.map(t => <option key={t.id} value={t.id}>{t.title}</option>)}</select>
-          </label>
-          <label className="field">OpenRouterへ送る目標とチェックイン<select value={selectedGoalId} onChange={e => setSelectedGoalId(e.target.value)}><option value="">送らない</option>{goals.map(goal => <option key={goal.id} value={goal.id}>{goal.title}</option>)}</select></label>
-          {selectedContext && <details><summary>送信する保存情報を表示</summary><pre>{selectedContext}</pre></details>}
-          <small>メッセージ送信時、入力文と選択したタスク・目標の現行チェックインだけを送ります。過去の会話・他のタスクは送りません。APIキーは認証ヘッダーにだけ使用します。</small>
-        </div>}
-        <div className="chat-input"><input value={message} maxLength={6000} onChange={e => setMessage(e.target.value)} onKeyDown={e => { if (e.key === 'Enter' && !e.nativeEvent.isComposing && e.nativeEvent.keyCode !== 229) send() }} placeholder="今日、何から始めよう？" /><button className="primary-button" onClick={send} disabled={!message.trim() || sending}>送信</button></div>
-      </section>
+      <SavedCoachConversation settings={settings} tasks={tasks} goals={goals} checkIns={checkIns} aiReady={aiReady} template={text => characterizeAnswer(fixedCoachAnswer(text, next), settings.characterProfile ?? DEFAULT_CHARACTER)} onBusy={setSending} />
       <aside className="card coach-aside">
         <span className="eyebrow">FROM YOUR LIST</span><h2>いまの候補</h2>
         {next ? <><p>締め切りと重要度から、登録済みタスクを表示しています。</p><button className="candidate" onClick={() => onEdit(next)}><strong>{next.title}</strong><span>{scoreText(next)} {next.dueDate && `· 期限 ${dateLabel(next.dueDate)}`}</span></button></> : <Empty title="候補はありません" detail="必要なタスクを手動で追加できます。" action={<button className="secondary-button" onClick={onNew}>追加する</button>} />}
@@ -567,6 +543,7 @@ function CoachView({ tasks, goals, checkIns, settings, onEdit, onNew }: { tasks:
             <label className="field">モデルID<input value={modelInput} onChange={e => setModelInput(e.target.value)} placeholder="例：提供元/モデル名" /></label>
             <label className="field">APIキー<input type="password" autoComplete="off" value={keyInput} onChange={e => setKeyInput(e.target.value)} placeholder={aiStatus?.configured ? '登録済み（変更時のみ入力）' : 'OpenRouterのキー'} /></label>
             <button className="secondary-button full" disabled={aiStatus?.secureStorage === false} onClick={saveConnection}>接続を保存</button>
+            {settings.aiEnabled && <button className="secondary-button full" onClick={pauseAI}>AIをOFFにする（キーを保持）</button>}
             <button className="secondary-button full" disabled={!aiStatus?.configured || testing || sending} onClick={testConnection}>{testing ? '接続を確認中…' : '接続テスト'}</button>
             {connectionNotice && <p role="status">{connectionNotice}</p>}
             {aiStatus?.configured && <button className="text-button" onClick={disconnect}>キーを削除してOFFにする</button>}
@@ -576,6 +553,8 @@ function CoachView({ tasks, goals, checkIns, settings, onEdit, onNew }: { tasks:
         </div>
       </aside>
     </div>
+    <section className="card setting-section"><h2>既存タスクの再計画</h2><label className="field">変更する既存タスク<select aria-label="変更する既存タスク" value={changeTaskId} onChange={event => setChangeTaskId(event.target.value)}><option value="">選択してください</option>{tasks.map(task => <option key={task.id} value={task.id}>{task.title}</option>)}</select></label></section>
+    <CoachTaskChangeView selectedTask={tasks.find(task => task.id === changeTaskId)} settings={settings} onEdit={onEdit} />
   </>
 }
 function HistoryView({ completions, ledger, sessions, tasks, onEdit, run }: { completions: { taskId: string; title: string; currentAt: string | null; netPoints: number | null; scoreState: string }[]; ledger: { delta: number }[]; sessions: WorkSession[]; tasks: Task[]; onEdit: (id: string) => void; run: (fn: () => Promise<unknown>, success?: string) => Promise<boolean> }) {
@@ -615,7 +594,7 @@ function SettingsView({ settings, tasks, lists, run }: { settings: Settings; tas
   }
   async function inspect() { if (!file) return; await run(async () => { const result = await inspectBackup(file, password); setRestoreInfo(result) }, 'バックアップを検証しました') }
   async function restore() { if (!restoreInfo) return; if (!confirm(`現在のデータを置き換えます。${restoreInfo.tasks.length}件のタスクを復元しますか？`)) return; await run(async () => { await restoreBackup(restoreInfo); setRestoreInfo(null); setFile(null) }, 'バックアップを復元しました') }
-  return <><div className="page-heading"><div><span className="eyebrow">PREFERENCES & DATA</span><h1>設定とデータ</h1><p>この端末の保存と、自分に合う使い方を管理します。</p></div></div><div className="settings-grid"><AppearanceSettingsView settings={settings} run={run} /><WorkflowPresetsView settings={settings} run={run} /><ReminderCenter mode="settings" tasks={tasks} lists={lists} settings={settings} run={run} /><ShortcutSettingsView settings={settings} run={run} /><CharacterSettingsView settings={settings} run={run} /><AIUsageView /><DashboardSettingsView settings={settings} run={run} /><section className="card setting-section navigation-settings"><div className="setting-heading"><Settings2 size={20} /><div><h2>機能の表示</h2><p>OFFにしても保存済みデータは残ります。通知とバックグラウンド動作は別の設定です。</p></div></div><div className="feature-toggle-grid">{OPTIONAL_FEATURE_IDS.map(id => <label key={id}><input type="checkbox" aria-label={`${nav.find(item => item.view === id)?.label}をON`} checked={featureEnabled(settings.hiddenFeatures, id)} onChange={event => run(() => setFeatureVisible(id, event.target.checked), '機能の表示を保存しました')} />{nav.find(item => item.view === id)?.label}</label>)}</div></section><section className="card setting-section navigation-settings"><div className="setting-heading"><Search size={20} /><div><h2>ナビゲーション</h2><p>PCとスマートフォンで表示する入口を別々に選びます。上部の機能検索と設定ボタンは常に使えます。</p></div></div><div className="navigation-table"><strong>機能</strong><strong>PC</strong><strong>スマホ</strong>{nav.map(item => <div className="navigation-row" key={item.view}><span>{item.label}</span><input type="checkbox" aria-label={`${item.label}をPCに表示`} checked={visibleNavigation(settings.navDesktop, 'desktop').includes(item.view)} onChange={event => toggleNavigation('desktop', item.view, event.target.checked)} /><input type="checkbox" aria-label={`${item.label}をスマホに表示`} checked={visibleNavigation(settings.navMobile, 'mobile').includes(item.view)} onChange={event => toggleNavigation('mobile', item.view, event.target.checked)} /></div>)}</div></section><section className="card setting-section"><div className="setting-heading"><Settings2 size={20} /><div><h2>日々の目安</h2><p>計画画面の容量表示に使います。</p></div></div><div className="form-grid"><label className="field">1日の時間（分）<input type="number" min={0} value={settings.dailyMinutes} onChange={e => update('dailyMinutes', Number(e.target.value))} /></label><label className="field">1日のポイント<input type="number" min={0} value={settings.dailyPoints} onChange={e => update('dailyPoints', Number(e.target.value))} /></label><label className="field full-field">コーチの名前<input value={settings.coachName} onChange={e => update('coachName', e.target.value)} /></label></div></section><section className="card setting-section"><div className="setting-heading"><ShieldCheck size={20} /><div><h2>AIと自動化</h2><p>初期状態では外部AIの呼び出しはありません。</p></div></div><div className="setting-line"><div><strong>AI処理</strong><small>OpenRouter接続はコーチ画面から設定できます</small></div><span className="status-tag">任意</span></div><div className="setting-line"><div><strong>自動化レベル</strong><small>AIによるタスク変更は実行しません</small></div><span className="status-tag">A1 確認中心</span></div><div className="setting-line"><div><strong>通知</strong><small>アプリを開いている間、スヌーズ終了時に通知します</small></div><button className="secondary-button" onClick={async () => { if (settings.notifications) { update('notifications', false); return } await run(async () => { if (!window.michiDesktop) { if (!('Notification' in window)) throw new Error('この環境は通知に対応していません'); if (await Notification.requestPermission() !== 'granted') throw new Error('通知が許可されませんでした') }; await db.settings.update('main', { notifications: true }) }, '通知を有効にしました') }}>{settings.notifications ? '通知を停止' : '通知を有効にする'}</button></div></section><section className="card setting-section"><div className="setting-heading"><Database size={20} /><div><h2>ローカルデータ</h2><p>タスクと台帳はこのブラウザのIndexedDBが正本です。</p></div></div><div className="data-row"><span>データセット</span><code>{settings.datasetId.slice(0, 8)}…</code></div><div className="data-row"><span>保存使用量</span><strong>{storage}</strong></div><div className="data-row"><span>最後の書き出し</span><strong>{settings.lastBackupAt ? new Date(settings.lastBackupAt).toLocaleString('ja-JP') : 'まだありません'}</strong></div><button className="secondary-button" onClick={() => navigator.storage?.persist?.().then(ok => alert(ok ? '保存保護が許可されました' : 'ブラウザによって許可されませんでした'))}>保存保護を要求</button></section><section className="card setting-section"><div className="setting-heading"><LockKeyhole size={20} /><div><h2>暗号化バックアップ</h2><p>パスワードで保護した .coachbundle を保存・復元します。</p></div></div><label className="field">バックアップ用パスワード<input type="password" value={password} onChange={e => setPassword(e.target.value)} placeholder="10文字以上" /></label><button className="secondary-button" disabled={password.length < 10} onClick={() => run(() => exportBackup(password), 'バックアップを書き出しました')}><Download size={16} /> 書き出す</button><div className="divider"/><p className="muted">別形式の書き出し。JSON・CSV・ICSは暗号化されません。</p><div className="export-buttons"><button className="secondary-button" onClick={() => run(exportPortableJson, 'JSONを書き出しました')}>JSON</button><button className="secondary-button" onClick={() => run(exportTasksCsv, 'CSVを書き出しました')}>CSV</button><button className="secondary-button" onClick={() => run(exportTasksIcs, 'ICSを書き出しました')}>ICS</button></div><div className="divider"/><label className="field">復元するファイル<input type="file" accept=".coachbundle,.json,application/json" onChange={e => { setFile(e.target.files?.[0] ?? null); setRestoreInfo(null) }} /></label><button className="secondary-button" disabled={!file} onClick={inspect}><Upload size={16} /> 内容を検証</button>{restoreInfo && <div className="restore-preview"><strong>検証済み：{restoreInfo.tasks.length}件のタスク、{restoreInfo.completions.length}件の完了記録</strong><p>現在のデータを置き換えます。必要なら先に書き出してください。</p><button className="primary-button" onClick={restore}>このバックアップを復元</button></div>}</section></div></>
+  return <><div className="page-heading"><div><span className="eyebrow">PREFERENCES & DATA</span><h1>設定とデータ</h1><p>この端末の保存と、自分に合う使い方を管理します。</p></div></div><div className="settings-grid"><AppearanceSettingsView settings={settings} run={run} /><WorkflowPresetsView settings={settings} run={run} /><ReminderCenter mode="settings" tasks={tasks} lists={lists} settings={settings} run={run} /><ShortcutSettingsView settings={settings} run={run} /><CharacterSettingsView settings={settings} run={run} /><AIUsageView /><ChangePolicySettingsView key={`${settings.datasetId}:${settings.changePolicy?.epoch ?? 0}`} settings={settings} /><CoachMemoryView settings={settings} run={run} /><DashboardSettingsView settings={settings} run={run} /><section className="card setting-section navigation-settings"><div className="setting-heading"><Settings2 size={20} /><div><h2>機能の表示</h2><p>OFFにしても保存済みデータは残ります。通知とバックグラウンド動作は別の設定です。</p></div></div><div className="feature-toggle-grid">{OPTIONAL_FEATURE_IDS.map(id => <label key={id}><input type="checkbox" aria-label={`${nav.find(item => item.view === id)?.label}をON`} checked={featureEnabled(settings.hiddenFeatures, id)} onChange={event => run(() => setFeatureVisible(id, event.target.checked), '機能の表示を保存しました')} />{nav.find(item => item.view === id)?.label}</label>)}</div></section><section className="card setting-section navigation-settings"><div className="setting-heading"><Search size={20} /><div><h2>ナビゲーション</h2><p>PCとスマートフォンで表示する入口を別々に選びます。上部の機能検索と設定ボタンは常に使えます。</p></div></div><div className="navigation-table"><strong>機能</strong><strong>PC</strong><strong>スマホ</strong>{nav.map(item => <div className="navigation-row" key={item.view}><span>{item.label}</span><input type="checkbox" aria-label={`${item.label}をPCに表示`} checked={visibleNavigation(settings.navDesktop, 'desktop').includes(item.view)} onChange={event => toggleNavigation('desktop', item.view, event.target.checked)} /><input type="checkbox" aria-label={`${item.label}をスマホに表示`} checked={visibleNavigation(settings.navMobile, 'mobile').includes(item.view)} onChange={event => toggleNavigation('mobile', item.view, event.target.checked)} /></div>)}</div></section><section className="card setting-section"><div className="setting-heading"><Settings2 size={20} /><div><h2>日々の目安</h2><p>計画画面の容量表示に使います。</p></div></div><div className="form-grid"><label className="field">1日の時間（分）<input type="number" min={0} value={settings.dailyMinutes} onChange={e => update('dailyMinutes', Number(e.target.value))} /></label><label className="field">1日のポイント<input type="number" min={0} value={settings.dailyPoints} onChange={e => update('dailyPoints', Number(e.target.value))} /></label><label className="field full-field">コーチの名前<input value={settings.coachName} onChange={e => update('coachName', e.target.value)} /></label></div></section><section className="card setting-section"><div className="setting-heading"><ShieldCheck size={20} /><div><h2>AIと自動化</h2><p>初期状態では外部AIの呼び出しはありません。</p></div></div><div className="setting-line"><div><strong>AI処理</strong><small>OpenRouter接続はコーチ画面から設定できます</small></div><span className="status-tag">任意</span></div><div className="setting-line"><div><strong>タスク変更</strong><small>下の変更の許可で、選択タスクのメモ・予定日を制御できます</small></div><span className="status-tag">{settings.changePolicy?.taskUpdate === 'deny' ? '停止' : settings.changePolicy?.taskUpdate === 'auto_within_bounds' ? '設定範囲内' : '毎回確認'}</span></div><div className="setting-line"><div><strong>通知</strong><small>アプリを開いている間、スヌーズ終了時に通知します</small></div><button className="secondary-button" onClick={async () => { if (settings.notifications) { update('notifications', false); return } await run(async () => { if (!window.michiDesktop) { if (!('Notification' in window)) throw new Error('この環境は通知に対応していません'); if (await Notification.requestPermission() !== 'granted') throw new Error('通知が許可されませんでした') }; await db.settings.update('main', { notifications: true }) }, '通知を有効にしました') }}>{settings.notifications ? '通知を停止' : '通知を有効にする'}</button></div></section><section className="card setting-section"><div className="setting-heading"><Database size={20} /><div><h2>ローカルデータ</h2><p>タスクと台帳はこのブラウザのIndexedDBが正本です。</p></div></div><div className="data-row"><span>データセット</span><code>{settings.datasetId.slice(0, 8)}…</code></div><div className="data-row"><span>保存使用量</span><strong>{storage}</strong></div><div className="data-row"><span>最後の書き出し</span><strong>{settings.lastBackupAt ? new Date(settings.lastBackupAt).toLocaleString('ja-JP') : 'まだありません'}</strong></div><button className="secondary-button" onClick={() => navigator.storage?.persist?.().then(ok => alert(ok ? '保存保護が許可されました' : 'ブラウザによって許可されませんでした'))}>保存保護を要求</button></section><section className="card setting-section"><div className="setting-heading"><LockKeyhole size={20} /><div><h2>暗号化バックアップ</h2><p>パスワードで保護した .coachbundle を保存・復元します。</p></div></div><label className="field">バックアップ用パスワード<input type="password" value={password} onChange={e => setPassword(e.target.value)} placeholder="10文字以上" /></label><button className="secondary-button" disabled={password.length < 10} onClick={() => run(() => exportBackup(password), 'バックアップを書き出しました')}><Download size={16} /> 書き出す</button><div className="divider"/><p className="muted">別形式の書き出し。JSON・CSV・ICSは暗号化されません。</p><div className="export-buttons"><button className="secondary-button" onClick={() => run(exportPortableJson, 'JSONを書き出しました')}>JSON</button><button className="secondary-button" onClick={() => run(exportTasksCsv, 'CSVを書き出しました')}>CSV</button><button className="secondary-button" onClick={() => run(exportTasksIcs, 'ICSを書き出しました')}>ICS</button></div><div className="divider"/><label className="field">復元するファイル<input type="file" accept=".coachbundle,.json,application/json" onChange={e => { setFile(e.target.files?.[0] ?? null); setRestoreInfo(null) }} /></label><button className="secondary-button" disabled={!file} onClick={inspect}><Upload size={16} /> 内容を検証</button>{restoreInfo && <div className="restore-preview"><strong>検証済み：{restoreInfo.tasks.length}件のタスク、{restoreInfo.completions.length}件の完了記録</strong><p>現在のデータを置き換えます。必要なら先に書き出してください。</p><button className="primary-button" onClick={restore}>このバックアップを復元</button></div>}</section></div></>
 }
 
 export default App

@@ -1,6 +1,7 @@
 import type { CharacterProfile, Goal, GoalCheckIn, Task } from './domain'
 import { currentCheckInContext } from './goals'
 import type { AIUsageLimits, AIUsageSnapshot } from './AIUsageView'
+import type { DetectionRequest, DetectionChange } from './detection-contract'
 
 export type AIStatus = { secureStorage: boolean; configured: boolean }
 export type AIRequest = { model: string; message: string; selectedTask: string | null; character?: CharacterProfile }
@@ -13,9 +14,12 @@ declare global {
       saveKey: (value: string) => Promise<boolean>
       deleteKey: () => Promise<boolean>
       chat: (request: AIRequest) => Promise<string>
-      summarize: (request: { model: string; kind: 'day-note' | 'goal-checkin' | 'review'; text: string }) => Promise<string>
+      summarize: (request: { model: string; kind: 'day-note' | 'goal-checkin' | 'review' | 'source'; text: string }) => Promise<string>
       assistTask: (request: { model: string; text: string }) => Promise<string>
       assessScore: (request: { model: string; text: string }) => Promise<string>
+      proposeTaskChange: (request: { model: string; message: string; task: { id: string; title: string; notes: string; scheduledDate: string | null; dueDate: string | null; revision: number } }) => Promise<string>
+      detectObligations: (input: { model: string; request: DetectionRequest }) => Promise<string>
+      verifyObligations: (input: { model: string; request: DetectionRequest; change: DetectionChange }) => Promise<string>
       usage: () => Promise<AIUsageSnapshot>
       setUsageLimits: (limits: AIUsageLimits) => Promise<AIUsageSnapshot>
     }

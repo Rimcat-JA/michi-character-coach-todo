@@ -116,9 +116,15 @@ function createAIBudget({ filePath, now = () => new Date() }) {
       await handle.sync()
       await handle.close()
       handle = null
-      await fs.rename(temporaryPath, filePath)
-    } catch {
-      throw new Error('AI利用記録を保存できないため、送信を停止しました')
+      for (let attempt = 0; ; attempt++) {
+        try { await fs.rename(temporaryPath, filePath); break }
+        catch (error) {
+          if (attempt >= 2 || !['EPERM', 'EBUSY'].includes(error.code)) throw error
+          await new Promise(resolve => setTimeout(resolve, 20 * (attempt + 1)))
+        }
+      }
+    } catch (error) {
+      throw new Error('AI利用記録を保存できないため、送信を停止しました', { cause: error })
     } finally {
       if (handle) await handle.close().catch(() => {})
       await fs.unlink(temporaryPath).catch(() => {})

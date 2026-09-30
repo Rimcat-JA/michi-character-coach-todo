@@ -133,3 +133,31 @@
 .task-assist-preview fieldset{border:0;padding:0;margin:0}.task-assist-preview blockquote{margin:8px 0;padding:8px 12px;border-left:3px solid #ccc4ed;white-space:pre-wrap;font-size:12px}.task-assist-approval{padding:14px;background:#f4f1fc;border:1px solid #ddd5f2;border-radius:9px}.task-assist-approval li{font-size:12px;overflow-wrap:anywhere}
 .task-assist, .score-assist { padding: 20px 24px; } .score-assist { margin: 18px 0; } .score-provenance q { display: block; margin: 6px 0; }
 .card.reminder-center:not(.setting-section) { padding: 20px 24px; }
+.trip-bundles, .coach-task-change, .change-set-preview { padding: 20px 24px; margin: 20px 0; } .change-set-actions { display: flex; gap: 10px; flex-wrap: wrap; } .change-set-comparison { display: grid; grid-template-columns: 90px 1fr 1fr; gap: 12px; border-top: 1px solid var(--border); padding: 10px 0; } .change-set-comparison p { overflow-wrap: anywhere; } @media (max-width: 680px) { .change-set-comparison { grid-template-columns: 1fr; } }
+.trip-bundles .field>span, .coach-task-change .field>span, .change-set-preview .field>span { display: flex; align-items: center; gap: 8px; line-height: 1.6; }
+.trip-bundles .field input[type=checkbox], .coach-task-change .field input[type=checkbox], .change-set-preview .field input[type=checkbox] { width: 16px; min-height: 16px; height: 16px; padding: 0; margin: 0; flex: 0 0 16px; accent-color: #7763df; }
+.trip-bundles fieldset { border: 1px solid #e6e2f1; border-radius: 10px; padding: 12px; margin: 16px 0; }
+.trip-bundle-task { padding: 8px 0; border-top: 1px solid #efedf5; }
+.trip-bundles .table-scroll { overflow-x: auto; }
+.trip-bundles table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.trip-bundles th, .trip-bundles td { padding: 10px; text-align: left; border-bottom: 1px solid #ece8f3; }
+.trip-bundle-preview, .trip-bundle-saved { margin-top: 20px; }
+.source-library, .detection-inbox { padding: 20px 24px; margin-top: 20px; }
+.conversation-controls { padding: 12px 16px; display: flex; align-items: end; gap: 8px; flex-wrap: wrap; border-bottom: 1px solid #ece8f3; }
+.conversation-controls .field { flex: 1; min-width: 180px; }
+.conversation-privacy, .conversation-search { margin: 10px 16px; font-size: 11px; line-height: 1.6; }
+.saved-conversation .message p { margin: 0 0 6px; white-space: pre-wrap; }
+.saved-conversation .message small { font-size: 10px; opacity: .75; overflow-wrap: anywhere; }
+.calendar-rules-view { margin-top: 20px; }
+.calendar-rules-view form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; padding: 14px 0; }
+.calendar-rules-view label { display: flex; flex-direction: column; gap: 6px; font-size: 12px; color: #615b75; }
+.calendar-rules-view input:not([type=checkbox]), .calendar-rules-view select { width: 100%; min-height: 36px; border: 1px solid #e4e1ed; border-radius: 8px; padding: 8px 10px; background: white; color: #38314e; }
+.calendar-rules-view label:has(input[type=checkbox]) { flex-direction: row; align-items: center; line-height: 1.6; }
+.calendar-rules-view input[type=checkbox] { width: 16px; height: 16px; flex: 0 0 16px; accent-color: #7763df; }
+.calendar-rules-view fieldset { grid-column: 1/-1; border: 1px solid #e4e1ed; border-radius: 8px; padding: 10px; }
+.calendar-rules-view fieldset label { display: inline-flex; margin-right: 10px; }
+.calendar-rules-view button { min-height: 35px; border: 1px solid #ddd6f0; border-radius: 8px; padding: 8px 12px; color: #64509e; background: #f8f6ff; cursor: pointer; }
+.calendar-rules-view button:disabled { opacity: .5; cursor: default; }
+.calendar-rules-view pre, .calendar-rules-view li { overflow-wrap: anywhere; white-space: pre-wrap; font-size: 12px; line-height: 1.6; }
+.calendar-rules-view details, .calendar-rules-view h3 { margin: 16px 0; }
+@media (max-width: 680px) { .calendar-rules-view form { grid-template-columns: 1fr; } }

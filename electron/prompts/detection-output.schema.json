@@ -1,0 +1,312 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "GroundedObligationDetection",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": "1",
+      "type": "string"
+    },
+    "changes": {
+      "type": "array",
+      "maxItems": 50,
+      "items": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "create",
+              "update",
+              "cancel",
+              "report_completion",
+              "define_recurrence"
+            ]
+          },
+          "target_task_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "expected_revision": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 1
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "assignee_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "basis": {
+            "type": "string",
+            "enum": [
+              "explicit_request",
+              "self_commitment",
+              "documented_obligation",
+              "approved_rule"
+            ]
+          },
+          "obligation_state": {
+            "type": "string",
+            "enum": [
+              "requested",
+              "committed",
+              "required_by_rule"
+            ]
+          },
+          "change_fields": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "enum": [
+                "title",
+                "assignee",
+                "due",
+                "recurrence"
+              ]
+            }
+          },
+          "due": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "none",
+                  "date",
+                  "datetime",
+                  "unresolved"
+                ]
+              },
+              "value": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "timezone": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "raw": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "kind",
+              "value",
+              "timezone",
+              "raw"
+            ],
+            "additionalProperties": false
+          },
+          "recurrence": {
+            "anyOf": [
+              {
+                "type": "null"
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "expression": {
+                    "type": "string"
+                  },
+                  "timezone": {
+                    "type": "string"
+                  },
+                  "calendar_ref": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "raw": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "expression",
+                  "timezone",
+                  "calendar_ref",
+                  "raw"
+                ],
+                "additionalProperties": false
+              }
+            ]
+          },
+          "applicability_ref": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "rule_ref": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "evidence": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 20,
+            "items": {
+              "type": "object",
+              "properties": {
+                "source_id": {
+                  "type": "string"
+                },
+                "revision": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "span_id": {
+                  "type": "string"
+                },
+                "quote": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "supports": {
+                  "type": "array",
+                  "minItems": 1,
+                  "uniqueItems": true,
+                  "items": {
+                    "type": "string",
+                    "enum": [
+                      "action",
+                      "assignee",
+                      "active",
+                      "due",
+                      "recurrence",
+                      "target"
+                    ]
+                  }
+                }
+              },
+              "required": [
+                "source_id",
+                "revision",
+                "span_id",
+                "quote",
+                "supports"
+              ],
+              "additionalProperties": false
+            }
+          }
+        },
+        "required": [
+          "action",
+          "target_task_id",
+          "expected_revision",
+          "title",
+          "assignee_id",
+          "basis",
+          "obligation_state",
+          "change_fields",
+          "due",
+          "recurrence",
+          "applicability_ref",
+          "rule_ref",
+          "evidence"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "review_items": {
+      "type": "array",
+      "maxItems": 50,
+      "items": {
+        "type": "object",
+        "properties": {
+          "source_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "reason": {
+            "type": "string",
+            "enum": [
+              "assignee_unknown",
+              "date_unknown",
+              "condition_unmet",
+              "conflict",
+              "coverage_incomplete",
+              "reference_unknown",
+              "rule_unknown"
+            ]
+          },
+          "question": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "source_ids",
+          "reason",
+          "question"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "ignored": {
+      "type": "array",
+      "maxItems": 100,
+      "items": {
+        "type": "object",
+        "properties": {
+          "source_id": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string",
+            "enum": [
+              "general_advice",
+              "hypothetical",
+              "optional",
+              "other_assignee",
+              "completed",
+              "canceled",
+              "event_only",
+              "quoted_example",
+              "injection",
+              "insufficient_context",
+              "duplicate",
+              "condition_unmet",
+              "wish"
+            ]
+          }
+        },
+        "required": [
+          "source_id",
+          "reason"
+        ],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": [
+    "schema_version",
+    "changes",
+    "review_items",
+    "ignored"
+  ],
+  "additionalProperties": false
+}

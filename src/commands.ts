@@ -2,13 +2,14 @@ import { db } from './db'
 import { addDays, calculateScore, emptyScore, today, uid, validateDate, validateTaskInput, type Assessment, type Routine, type Task } from './domain'
 import { containerPath } from './containers'
 import { validateLabelsForOwner } from './labels'
+import { assertTripTaskScoreChangeAllowed, freezeTripBundle } from './trip-bundles'
 
 export class ConflictError extends Error { constructor() { super('別の画面で更新されました。再読み込みして差分を確認してください。') } }
 const now = () => new Date().toISOString()
 const tables = [db.tasks, db.assessments, db.completions, db.ledger, db.routines, db.sessions, db.commands, db.audits, db.containers, db.settings, db.labelGroups, db.labelDefinitions]
-async function receipt<T>(key: string, payload: unknown, run: () => Promise<T>): Promise<T> {
+async function receipt<T>(key: string, payload: unknown, run: () => Promise<T>, includeTrips = false): Promise<T> {
   const hash = JSON.stringify(payload)
-  return db.transaction('rw', tables, async () => {
+  return db.transaction('rw', includeTrips ? [...tables, db.tripBundles] : tables, async () => {
     const prior = await db.commands.get(key)
     if (prior) {
       if (prior.hash !== hash) throw new Error('IDEMPOTENCY_MISMATCH')
@@ -104,6 +105,7 @@ export async function updateTask(id: string, expectedRevision: number, input: Ta
     if (!old || old.deletedAt) throw new Error('タスクが見つかりません')
     if (old.revision !== expectedRevision) throw new ConflictError()
     const scoreChanged = JSON.stringify(old.score) !== JSON.stringify(input.score)
+    if (scoreChanged) assertTripTaskScoreChangeAllowed(id, old.score, input.score, await db.tripBundles.toArray())
     const result = calculateScore(input.score)
     const project = await resolvedProject(input)
     const assessmentId = scoreChanged ? uid() : old.assessmentId
@@ -111,7 +113,7 @@ export async function updateTask(id: string, expectedRevision: number, input: Ta
     await db.tasks.put({ ...old, ...input, project, firstScheduledDate: old.firstScheduledDate ?? old.scheduledDate ?? input.scheduledDate, title: input.title.trim(), labels: [...input.labels], score: { ...input.score }, assessmentId, effectivePoints: result.effective, revision: old.revision + 1, updatedAt: now() })
     await db.audits.add({ id: uid(), taskId: id, operation: 'update', at: now(), detail: '本人が編集' })
     return id
-  })
+  }, true)
 }
 export async function setTaskFlag(id: string, expectedRevision: number, flag: 'pinned' | 'backburner' | 'orbit', value: boolean, key: string = uid()) {
   return receipt(key, { operation: 'set_flag', id, expectedRevision, flag, value }, async () => {
@@ -132,6 +134,9 @@ export async function completeTask(id: string, expectedRevision: number, key: st
     if (task.revision !== expectedRevision) throw new ConflictError()
     if (task.status === 'completed') return id
     const at = now(), existing = await db.completions.where('taskId').equals(id).first()
+    for (const bundle of await db.tripBundles.toArray()) {
+      if (bundle.members.some(member => member.taskId === id) && !bundle.frozenAt) await db.tripBundles.put(freezeTripBundle(bundle, id, at))
+    }
     if (existing) {
       const points = existing.lastConfirmedPoints !== undefined ? existing.lastConfirmedPoints : task.effectivePoints
       await db.completions.put({ ...existing, currentAt: at, localDate: today(new Date(at)), timezone: Intl.DateTimeFormat().resolvedOptions().timeZone, netPoints: points, scoreState: points === null ? 'pending' : 'confirmed' })
@@ -144,7 +149,7 @@ export async function completeTask(id: string, expectedRevision: number, key: st
     await db.tasks.put({ ...task, status: 'completed', revision: task.revision + 1, updatedAt: at })
     await db.audits.add({ id: uid(), taskId: id, operation: 'complete', at, detail: task.effectivePoints === null ? 'ポイント未設定で完了' : `${task.effectivePoints}ptで完了` })
     return id
-  })
+  }, true)
 }
 export async function undoCompletion(id: string, expectedRevision: number, key: string = uid()) {
   return receipt(key, { operation: 'undo', id, expectedRevision }, async () => {
