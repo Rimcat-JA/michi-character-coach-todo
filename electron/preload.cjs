@@ -6,7 +6,10 @@ contextBridge.exposeInMainWorld('michiAI', {
   deleteKey: () => ipcRenderer.invoke('michi:ai-delete-key'),
   chat: request => ipcRenderer.invoke('michi:ai-chat', request),
   summarize: request => ipcRenderer.invoke('michi:ai-summarize', request),
-  assistTask: request => ipcRenderer.invoke('michi:ai-assist-task', request)
+  assistTask: request => ipcRenderer.invoke('michi:ai-assist-task', request),
+  assessScore: request => ipcRenderer.invoke('michi:ai-assess-score', request),
+  usage: () => ipcRenderer.invoke('michi:ai-usage'),
+  setUsageLimits: limits => ipcRenderer.invoke('michi:ai-usage-limits', limits)
 })
 
 contextBridge.exposeInMainWorld('michiDesktop', {

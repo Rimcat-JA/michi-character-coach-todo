@@ -1,5 +1,10 @@
-import { describe, expect, it } from 'vitest'
-import { acceptTitleQuote, draftFromText } from './task-assist'
+import 'fake-indexeddb/auto'
+import { beforeEach, describe, expect, it } from 'vitest'
+import { acceptAssistedDrafts, acceptTitleQuote, applyAssistedTasks, draftFromText, draftsFromText, prepareAssistedTasks } from './task-assist'
+import { db, ensureSettings } from './db'
+import { contentDigest } from './canonical'
+
+beforeEach(async () => { await db.delete(); await db.open(); await ensureSettings() })
 
 describe('タスク入力補助の確定境界', () => {
   it('本人の25ptと明示された期限だけを使い、移動込み時間を作業時間にしない', () => {
@@ -33,4 +38,45 @@ describe('タスク入力補助の確定境界', () => {
     expect(() => acceptTitleQuote(raw, '{"title_quote":"図書館へ返却","dueDate":"2026-09-30"}')).toThrow('形式')
     expect(() => acceptTitleQuote(raw, '掃除する')).toThrow('読めません')
   })
+
+  it('複数候補の点数を各出典に結び付け、25ptの省略と重複を拒否する', () => {
+    const raw = '明日までに返却。25pt\nメールを書く。10pt'
+    const tasks = [{ title_quote: '返却', source_quote: '明日までに返却。25pt' }, { title_quote: 'メールを書く', source_quote: 'メールを書く。10pt' }]
+    const drafts = acceptAssistedDrafts(raw, JSON.stringify({ tasks }), '2026-09-29')
+    expect(drafts.map(draft => draft.input.score.manualPoints)).toEqual([25, 10])
+    expect(drafts.map(draft => draft.input.dueDate)).toEqual(['2026-09-30', null])
+    expect(() => acceptAssistedDrafts(raw, JSON.stringify({ tasks: [{ ...tasks[0], source_quote: '明日までに返却。' }, tasks[1]] }), '2026-09-29')).toThrow('欠け')
+    expect(() => acceptAssistedDrafts(raw, JSON.stringify({ tasks: [tasks[0], tasks[0]] }), '2026-09-29')).toThrow('重複')
+    expect(draftsFromText(raw, '2026-09-29').map(draft => draft.input.score.manualPoints)).toEqual([25, 10])
+  })
+
+  it('内容差し替えは保存せず、同じ承認の再送でタスクと記録を増やさない', async () => {
+    const prepared = await prepareAssistedTasks(draftsFromText('返却25pt\n連絡10pt', '2026-09-29'), 'ai')
+    const changed = structuredClone(prepared)
+    changed.inputs[0].score.manualPoints = 40
+    await expect(applyAssistedTasks(changed, prepared.digest)).rejects.toThrow('内容が変わり')
+    expect(await db.tasks.count()).toBe(0)
+    const ids = await applyAssistedTasks(prepared, prepared.digest)
+    expect(await applyAssistedTasks(prepared, prepared.digest)).toEqual(ids)
+    expect(await db.tasks.count()).toBe(2)
+    expect((await db.audits.toArray()).filter(audit => audit.operation === 'assist.approved')).toHaveLength(1)
+  })
+
+  it('データセット変更と期限切れを拒否し、canonical hashをキー順に依存させない', async () => {
+    expect(await contentDigest({ a: 1, b: 2 })).toBe(await contentDigest({ b: 2, a: 1 }))
+    const prepared = await prepareAssistedTasks(draftsFromText('返却25pt', '2026-09-29'), 'manual')
+    await db.settings.update('main', { datasetId: 'other' })
+    await expect(applyAssistedTasks(prepared, prepared.digest)).rejects.toThrow('データセット')
+    const expired = { ...prepared, expiresAt: '2020-01-01T00:00:00.000Z' }
+    const { digest: _old, ...payload } = expired
+    expired.digest = await contentDigest(payload)
+    await expect(applyAssistedTasks(expired, expired.digest)).rejects.toThrow('有効期限')
+  })
+})
+it('負数や小数の一部を整数の点数・分数として採用しない', () => {
+  for (const text of ['作業 -25pt -30分', '作業 2.5pt 1.5分']) {
+    const draft = draftFromText(text, '2026-09-30')
+    expect(draft.input.score.manualPoints).toBeNull()
+    expect(draft.input.score.minutes).toBeNull()
+  }
 })

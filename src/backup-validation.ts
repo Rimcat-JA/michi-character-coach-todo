@@ -11,6 +11,8 @@ import { validateAppearance } from './appearance'
 import { validateKeybindings } from './shortcuts'
 import { validateCharacterProfile } from './character'
 import { validateCustomScreen, validateDashboardWidgets } from './dashboard'
+import type { ReviewRecord } from './review-coach'
+import { validateReviewRecords } from './review-validation'
 
 export type Snapshot = {
   format: 'coachbundle'; version: 1; exportedAt: string
@@ -40,6 +42,7 @@ export type Snapshot = {
   trackerEntries?: TrackerEntry[]
   dayNotes?: DayNote[]
   pomodoroCycles?: PomodoroCycle[]
+  reviewRecords?: ReviewRecord[]
 }
 
 const tableNames = ['tasks', 'assessments', 'completions', 'ledger', 'routines', 'sessions', 'commands', 'audits', 'settings'] as const
@@ -329,6 +332,7 @@ export function validateSnapshot(input: unknown): asserts input is Snapshot {
   unique(trackerEntries, '記録値', 'id')
   for (const entry of trackerEntries) { const tracker = byTracker.get(entry.trackerId); if (!trackerIds.has(entry.trackerId) || !tracker || entry.value !== null && (!Number.isFinite(entry.value) || entry.value < tracker.min || entry.value > tracker.max) || !timestamp(entry.recordedAt) || !['user', 'device'].includes(entry.source) || typeof entry.note !== 'string' || entry.note.length > 1000) throw new Error('記録値が不正です') }
   unique(dayNotes, '日記', 'id')
+  validateReviewRecords(input.reviewRecords, settings.profileId)
   for (const note of dayNotes) {
     validateDate(note.date, '日記の日付')
     try { new Intl.DateTimeFormat('ja-JP', { timeZone: note.timezone }) } catch { throw new Error('日記のtimezoneが不正です') }
@@ -369,11 +373,22 @@ export function validateSnapshot(input: unknown): asserts input is Snapshot {
     if (!record(reminders) || Object.keys(reminders).some(key => !['quietStart', 'quietEnd', 'dailyCap', 'rules', 'events'].includes(key)) || !clock(reminders.quietStart) || !clock(reminders.quietEnd) || !Number.isInteger(reminders.dailyCap) || reminders.dailyCap < 0 || reminders.dailyCap > 50 || !Array.isArray(reminders.rules) || reminders.rules.length > 500 || !Array.isArray(reminders.events) || reminders.events.length > 1000) throw new Error('通知設定が不正です')
     const ruleIds = unique(reminders.rules, '通知予約', 'id')
     for (const rule of reminders.rules) {
-      if (!['once', 'smart-daily', 'bug-me'].includes(rule.kind) || !filled(rule.targetId) || (rule.kind === 'smart-daily' ? rule.enabled && !smartLists.some(list => list.id === rule.targetId) : !taskIds.has(rule.targetId)) || !timestamp(rule.nextAt) || !nullableString(rule.timeOfDay) || (rule.kind === 'smart-daily' ? !clock(rule.timeOfDay) : rule.timeOfDay !== null) || !Number.isInteger(rule.intervalMinutes) || (rule.kind === 'bug-me' ? rule.intervalMinutes !== 30 : rule.intervalMinutes !== 0) || !Number.isInteger(rule.maxCount) || rule.maxCount !== (rule.kind === 'smart-daily' ? 0 : rule.kind === 'bug-me' ? 3 : 1) || !Number.isInteger(rule.sentCount) || rule.sentCount < 0 || (rule.maxCount > 0 && rule.sentCount > rule.maxCount) || !nullableString(rule.endDate) || !channels(rule.channels) || typeof rule.enabled !== 'boolean' || !timestamp(rule.createdAt) || !timestamp(rule.updatedAt) || Object.keys(rule).some(key => !['id', 'kind', 'targetId', 'nextAt', 'timeOfDay', 'intervalMinutes', 'maxCount', 'sentCount', 'endDate', 'channels', 'enabled', 'createdAt', 'updatedAt'].includes(key))) throw new Error('通知予約が不正です')
+      if (!['once', 'smart-daily', 'bug-me', 'review'].includes(rule.kind) || !filled(rule.targetId) || (rule.kind === 'smart-daily' ? rule.enabled && !smartLists.some(list => list.id === rule.targetId) : !taskIds.has(rule.targetId)) || !timestamp(rule.nextAt) || !nullableString(rule.timeOfDay) || (rule.kind === 'smart-daily' || rule.kind === 'review' ? !clock(rule.timeOfDay) : rule.timeOfDay !== null) || !Number.isInteger(rule.intervalMinutes) || (rule.kind === 'bug-me' ? rule.intervalMinutes !== 30 : rule.intervalMinutes !== 0) || !Number.isInteger(rule.maxCount) || rule.maxCount !== (rule.kind === 'smart-daily' ? 0 : rule.kind === 'bug-me' ? 3 : 1) || !Number.isInteger(rule.sentCount) || rule.sentCount < 0 || (rule.maxCount > 0 && rule.sentCount > rule.maxCount) || !nullableString(rule.endDate) || !channels(rule.channels) || typeof rule.enabled !== 'boolean' || !timestamp(rule.createdAt) || !timestamp(rule.updatedAt) || Object.keys(rule).some(key => !['id', 'kind', 'targetId', 'nextAt', 'timeOfDay', 'reviewDate', 'intervalMinutes', 'maxCount', 'sentCount', 'endDate', 'channels', 'enabled', 'createdAt', 'updatedAt'].includes(key))) throw new Error('通知予約が不正です')
+      if (rule.kind === 'review') {
+        if (!nullableString(rule.reviewDate)) throw new Error('見直し通知の日付が不正です')
+        validateDate(rule.reviewDate, '見直し通知の日付')
+      } else if (rule.reviewDate !== undefined) throw new Error('通知予約の見直し日が不正です')
       if (rule.endDate !== null) validateDate(rule.endDate, '通知終了日')
       if ((rule.kind === 'bug-me') !== (rule.endDate !== null)) throw new Error('催促終了日が不正です')
     }
     unique(reminders.events, '通知履歴', 'id')
-    for (const event of reminders.events) if (!ruleIds.has(event.ruleId) || !filled(event.targetId) || !['once', 'smart-daily', 'bug-me'].includes(event.kind) || typeof event.title !== 'string' || event.title.length > 300 || !timestamp(event.at) || !channels(event.channels) || !nullableString(event.readAt) || (event.readAt !== null && !timestamp(event.readAt)) || Object.keys(event).some(key => !['id', 'ruleId', 'targetId', 'kind', 'title', 'at', 'channels', 'readAt'].includes(key))) throw new Error('通知履歴が不正です')
+    for (const event of reminders.events) {
+      const rule = reminders.rules.find(item => item.id === event.ruleId)
+      if (!ruleIds.has(event.ruleId) || !rule || rule.kind !== event.kind || rule.targetId !== event.targetId || !filled(event.targetId) || !['once', 'smart-daily', 'bug-me', 'review'].includes(event.kind) || typeof event.title !== 'string' || event.title.length > 300 || !timestamp(event.at) || !channels(event.channels) || !nullableString(event.readAt) || (event.readAt !== null && !timestamp(event.readAt)) || Object.keys(event).some(key => !['id', 'ruleId', 'targetId', 'kind', 'title', 'reviewDate', 'reviewRevision', 'at', 'channels', 'readAt'].includes(key))) throw new Error('通知履歴が不正です')
+      if (event.kind === 'review') {
+        if (!filled(event.reviewDate) || typeof event.reviewRevision !== 'number' || !Number.isInteger(event.reviewRevision) || event.reviewRevision < 1) throw new Error('見直し通知の履歴が不正です')
+        validateDate(event.reviewDate, '見直し通知の日付')
+      } else if (event.reviewDate !== undefined || event.reviewRevision !== undefined) throw new Error('通知履歴の見直し日が不正です')
+    }
   }
 }
