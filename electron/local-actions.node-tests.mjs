@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { createRequire } from 'node:module'
-import { mkdtemp, mkdir, readFile, writeFile, rm, symlink, link, readdir } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, writeFile, rm, symlink, link, readdir, realpath } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import crypto from 'node:crypto'
@@ -14,9 +14,9 @@ const STAMP=Date.parse('2026-10-01T00:00:00Z')
 const genuineTicket=Object.freeze({})
 
 async function fixture(t,options={}) {
-  const root=await mkdtemp(path.join(tmpdir(),'coach-local-actions-test-'))
+  const root=await mkdtemp(path.join(await realpath(tmpdir()),'coach-local-actions-test-'))
   const journal=path.join(root,'journal');await mkdir(journal)
-  t.after(()=>rm(root,{recursive:true,force:true}))
+  t.after(async()=>{const resolved=path.resolve(root);assert.equal(path.dirname(resolved),await realpath(tmpdir()));assert.ok(path.basename(resolved).startsWith('coach-local-actions-test-'));assert.equal(await realpath(resolved),resolved);await rm(resolved,{recursive:true,force:true})})
   const sha256=crypto.createHash('sha256').update(await readFile(process.execPath)).digest('hex')
   const context={ownerId:'owner-test',datasetId:'dataset-test',deviceId:'device-test',policyEpoch:3,sourcePermissionRevision:2,enabled:true}
   const definition={id:'fixed-test',revision:1,ownerId:context.ownerId,datasetId:context.datasetId,deviceId:context.deviceId,executable:process.execPath,executableRoot:path.dirname(process.execPath),sha256,cwd:root,schema:{},argv:['-e','process.stdout.write("harmless local test")'],lowRisk:true,...options.definition}

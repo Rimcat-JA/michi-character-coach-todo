@@ -11,7 +11,7 @@ const require=createRequire(import.meta.url)
 const {createLocalActionCoordinator}=require('./local-action-service.cjs')
 
 async function fixture(callback,{actual=false}={}) {
-  const root=await fs.mkdtemp(path.join(os.tmpdir(),'michi-local-action-service-')),journalDirectory=path.join(root,'journal')
+  const root=await fs.mkdtemp(path.join(await fs.realpath(os.tmpdir()),'michi-local-action-service-')),journalDirectory=path.join(root,'journal')
   await fs.mkdir(journalDirectory)
   const signingKey=crypto.randomBytes(32),deviceId=crypto.randomUUID(),settings={profileId:crypto.randomUUID(),datasetId:crypto.randomUUID(),aiEnabled:true,changePolicy:{epoch:3,sourcePermissionRevision:2,aiChangesEnabled:true,taskUpdate:'require_approval'}}
   let configuration=null,history=[],spawns=0,stamp=Date.now()
@@ -21,7 +21,7 @@ async function fixture(callback,{actual=false}={}) {
   const service=await createLocalActionCoordinator(options),input={title:'読み取り専用のバージョン確認',executable:process.execPath,cwd:root,argv:['--version'],schema:{}}
   async function register(){const inspection=await service.inspectDefinition(input,proof('configure','inspect'));await service.configure({reference:inspection.reference,digest:inspection.digest},proof('configure',inspection.reference));return inspection}
   try{await callback({root,journalDirectory,service,options,settings,input,register,proof,receipts,spawns:()=>spawns,advance:ms=>{stamp+=ms},configuration:()=>configuration,history:()=>history})}
-  finally{assert.equal(path.dirname(path.resolve(root)),path.resolve(os.tmpdir()));assert.ok(path.basename(root).startsWith('michi-local-action-service-'));assert.equal(await fs.realpath(root),path.resolve(root));await fs.rm(root,{recursive:true,force:true})}
+  finally{assert.equal(path.dirname(path.resolve(root)),path.resolve(await fs.realpath(os.tmpdir())));assert.ok(path.basename(root).startsWith('michi-local-action-service-'));assert.equal(await fs.realpath(root),path.resolve(root));await fs.rm(root,{recursive:true,force:true})}
 }
 test('host inspection computes identity and only fresh native exact-digest registration permits an action',async()=>fixture(async f=>{
   assert.equal((await f.service.status()).enabled,false)

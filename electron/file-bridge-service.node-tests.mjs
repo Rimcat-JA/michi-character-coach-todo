@@ -8,8 +8,8 @@ import { createRequire } from 'node:module'
 const { createFileBridgeService } = createRequire(import.meta.url)('./file-bridge-service.cjs')
 
 async function fixture(t) {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'michi-filebridge-service-'))
-  t.after(async () => { const resolved = path.resolve(root); assert.equal(path.dirname(resolved), path.resolve(os.tmpdir())); assert.ok(path.basename(resolved).startsWith('michi-filebridge-service-')); await fs.rm(resolved, { recursive: true, force: true }) })
+  const root = await fs.mkdtemp(path.join(await fs.realpath(os.tmpdir()), 'michi-filebridge-service-'))
+  t.after(async () => { const resolved = path.resolve(root); assert.equal(path.dirname(resolved), path.resolve(await fs.realpath(os.tmpdir()))); assert.ok(path.basename(resolved).startsWith('michi-filebridge-service-')); await fs.rm(resolved, { recursive: true, force: true }) })
   const settings = { profileId: 'owner', datasetId: crypto.randomUUID(), aiEnabled: true, changePolicy: { epoch: 1, sourcePermissionRevision: 1, aiChangesEnabled: true } }
   const task = { id: crypto.randomUUID(), revision: 1, title: '正式タスク', notes: '本人のメモ', scheduledDate: '2026-10-01', containerId: null, deletedAt: null }
   const receipts = new Map(), proofs = new Map(); let configuration = null

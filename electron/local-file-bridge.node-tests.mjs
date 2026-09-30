@@ -10,7 +10,7 @@ const { createLocalFileBridge, parseEnvelope } = require('./local-file-bridge.cj
 const future = milliseconds => new Date(Date.now() + milliseconds).toISOString()
 
 async function fixture(callback, overrides = {}) {
-  const workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'michi-filebridge-')), root = path.join(workspace, 'agent'), journalDirectory = path.join(workspace, 'app-private')
+  const workspace = await fs.mkdtemp(path.join(await fs.realpath(os.tmpdir()), 'michi-filebridge-')), root = path.join(workspace, 'agent'), journalDirectory = path.join(workspace, 'app-private')
   await fs.mkdir(root); await fs.mkdir(journalDirectory)
   const task = { id: randomUUID(), revision: 1, title: '本人の25pt作業', notes: '元のメモ', scheduledDate: '2026-10-01', containerId: null, score: { mode: 'manual', manualPoints: 25 } }
   const registration = { schema_version: '1', owner_id: 'synthetic-owner', dataset_id: randomUUID(), policy_epoch: 5, source_permission_revision: 2, task_ids: [task.id], client: { id: randomUUID(), dataset_id: '', intended_host: 'codex', transport: 'stdio', status: 'active', revision: 1, grant_epoch: 1, grant: { keys: ['tasks:read', 'tasks:prepare', 'changes:submit', 'commands:read'], project_ids: [], fields: ['title', 'notes', 'scheduled_date'], mutation_mode: 'require_approval', max_operations_per_day: 100, max_schedule_shift_days: 31, max_point_delta: 0, allow_external_context: false, allow_handoffs: false, expires_at: future(3600000) } } }
@@ -25,7 +25,7 @@ async function fixture(callback, overrides = {}) {
   finally {
     // Only delete the exact new temporary workspace created by this test.
     const resolved = path.resolve(workspace)
-    assert.equal(path.dirname(resolved), path.resolve(os.tmpdir()))
+    assert.equal(path.dirname(resolved), path.resolve(await fs.realpath(os.tmpdir())))
     assert.ok(path.basename(resolved).startsWith('michi-filebridge-'))
     assert.equal(await fs.realpath(resolved), resolved)
     await fs.rm(resolved, { recursive: true, force: true })

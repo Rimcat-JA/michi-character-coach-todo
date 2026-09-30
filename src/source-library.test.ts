@@ -23,7 +23,7 @@ describe('本人が選んだ資料と7項目の許可', () => {
   it('選択したタイムゾーンを保存し、外側のatomic取込でもdigest待機中にtransactionを失効させない', async () => {
     const id = await db.transaction('rw', db.contextSources, db.contextSnapshots, db.sourceArtifacts, db.settings, async () => {
       const id = await importLocalSource(input({ timezone: 'America/New_York' }))
-      await db.sourceArtifacts.add({ id: 'import-provenance', sourceId: id, ownerId, kind: 'cache', text: 'synthetic immutable import provenance', createdAt: new Date().toISOString() })
+      await db.sourceArtifacts.add({ id: 'import-provenance', sourceId: id, ownerId, sourceRevision: 1, permissionRevision: 1, kind: 'cache', payload: 'synthetic immutable import provenance', createdAt: new Date().toISOString() })
       return id
     })
     expect((await db.contextSources.get(id))?.timezone).toBe('America/New_York')
