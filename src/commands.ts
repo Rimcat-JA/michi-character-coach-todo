@@ -3,6 +3,7 @@ import { addDays, calculateScore, emptyScore, today, uid, validateDate, validate
 import { containerPath } from './containers'
 import { validateLabelsForOwner } from './labels'
 import { assertTripTaskScoreChangeAllowed, freezeTripBundle } from './trip-bundles'
+import { cancelCoachNotificationTarget } from './coach-notification-save'
 
 export class ConflictError extends Error { constructor() { super('別の画面で更新されました。再読み込みして差分を確認してください。') } }
 const now = () => new Date().toISOString()
@@ -111,6 +112,7 @@ export async function updateTask(id: string, expectedRevision: number, input: Ta
     const assessmentId = scoreChanged ? uid() : old.assessmentId
     if (scoreChanged) await db.assessments.add({ id: assessmentId, taskId: id, score: { ...input.score }, result, createdAt: now(), origin: 'human', ruleVersion: 'v1' })
     await db.tasks.put({ ...old, ...input, project, firstScheduledDate: old.firstScheduledDate ?? old.scheduledDate ?? input.scheduledDate, title: input.title.trim(), labels: [...input.labels], score: { ...input.score }, assessmentId, effectivePoints: result.effective, revision: old.revision + 1, updatedAt: now() })
+    await cancelCoachNotificationTarget(id)
     await db.audits.add({ id: uid(), taskId: id, operation: 'update', at: now(), detail: '本人が編集' })
     return id
   }, true)
@@ -147,6 +149,7 @@ export async function completeTask(id: string, expectedRevision: number, key: st
       if (points !== null) await db.ledger.add({ id: uid(), completionId, taskId: id, kind: 'award', delta: points, at, reason: '完了' })
     }
     await db.tasks.put({ ...task, status: 'completed', revision: task.revision + 1, updatedAt: at })
+    await cancelCoachNotificationTarget(id, at)
     await db.audits.add({ id: uid(), taskId: id, operation: 'complete', at, detail: task.effectivePoints === null ? 'ポイント未設定で完了' : `${task.effectivePoints}ptで完了` })
     return id
   }, true)
@@ -185,6 +188,7 @@ export async function trashTask(id: string, expectedRevision: number, key: strin
     if (!task) throw new Error('タスクが見つかりません')
     if (task.revision !== expectedRevision) throw new ConflictError()
     await db.tasks.put({ ...task, deletedAt: now(), revision: task.revision + 1, updatedAt: now() })
+    await cancelCoachNotificationTarget(id)
     await db.audits.add({ id: uid(), taskId: id, operation: 'trash', at: now(), detail: '表示上の削除。実績は維持' })
     return id
   })

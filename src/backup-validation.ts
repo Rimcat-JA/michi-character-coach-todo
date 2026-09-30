@@ -23,6 +23,7 @@ import type { CoachConversation, CoachMessage } from './chat-history'
 import { validateChatHistoryRecords } from './chat-history-validation'
 import type { CalendarRulesState } from './calendar-resolver'
 import { validateCalendarRulesRecords } from './calendar-rules-validation'
+import { validateCoachNotificationState } from './coach-notifications'
 
 export type Snapshot = {
   format: 'coachbundle'; version: 1; exportedAt: string
@@ -304,7 +305,7 @@ export function validateSnapshot(input: unknown): asserts input is Snapshot {
     if (!taskIds.has(attachment.taskId) || attachment.ownerId !== settings.profileId || !filled(attachment.name) || attachment.name.length > 200 || [...attachment.name].some(char => char.charCodeAt(0) < 32 || '\\/:*?"<>|'.includes(char)) || typeof attachment.mediaType !== 'string' || attachment.mediaType.length > 120 || !Number.isInteger(attachment.size) || attachment.size < 1 || attachment.size > 5 * 1024 * 1024 || !/^[a-f0-9]{64}$/.test(attachment.sha256) || !timestamp(attachment.createdAt) || typeof attachment.contentBase64 !== 'string' || !/^[A-Za-z0-9+/]*={0,2}$/.test(attachment.contentBase64) || attachment.contentBase64.length > Math.ceil(attachment.size / 3) * 4) throw new Error('添付が不正です')
   }
   if (containers.some(raw => (raw as Container).ownerId !== settings.profileId)) throw new Error('カテゴリ・プロジェクトの所有者が不正です')
-  const allowedSettings = new Set(['id', 'profileId', 'datasetId', 'createdAt', 'coachName', 'dailyMinutes', 'dailyPoints', 'notifications', 'aiEnabled', 'aiModel', 'daySectionMode', 'taskListLimit', 'automation', 'lastBackupAt', 'timeTargets', 'dayProgressBaseline', 'wallTiles', 'navDesktop', 'navMobile', 'hiddenFeatures', 'workflowPresets', 'appearance', 'reminderState', 'keybindings', 'characterProfile', 'dashboardWidgets', 'customScreen', 'changePolicy'])
+  const allowedSettings = new Set(['id', 'profileId', 'datasetId', 'createdAt', 'coachName', 'dailyMinutes', 'dailyPoints', 'notifications', 'aiEnabled', 'aiModel', 'daySectionMode', 'taskListLimit', 'automation', 'lastBackupAt', 'timeTargets', 'dayProgressBaseline', 'wallTiles', 'navDesktop', 'navMobile', 'hiddenFeatures', 'workflowPresets', 'appearance', 'reminderState', 'keybindings', 'characterProfile', 'dashboardWidgets', 'customScreen', 'changePolicy', 'notificationState'])
   if (Object.keys(settings).some(key => !allowedSettings.has(key))) throw new Error('設定に未対応の項目があります')
   if (!filled(settings.profileId) || !filled(settings.datasetId) || !timestamp(settings.createdAt) || typeof settings.coachName !== 'string' || !Number.isInteger(settings.dailyMinutes) || settings.dailyMinutes < 0 || !Number.isInteger(settings.dailyPoints) || settings.dailyPoints < 0 || typeof settings.aiEnabled !== 'boolean' || typeof settings.notifications !== 'boolean' || !['A0', 'A1', 'A2'].includes(settings.automation) || !nullableString(settings.lastBackupAt) || (settings.lastBackupAt !== null && !timestamp(settings.lastBackupAt))) throw new Error('設定が不正です')
   for (const rule of themeRules) { if (rule.ownerId !== settings.profileId || !timestamp(rule.createdAt)) throw new Error('重点テーマが不正です'); validateThemeRule(rule) }
@@ -355,6 +356,7 @@ export function validateSnapshot(input: unknown): asserts input is Snapshot {
   validateReviewRecords(input.reviewRecords, settings.profileId)
   validateMemoryRecords(input.coachMemories, input.memoryTombstones, settings.profileId)
   if (settings.changePolicy !== undefined) validateChangePolicy(settings.changePolicy)
+  if (settings.notificationState !== undefined) validateCoachNotificationState(settings.notificationState, settings.profileId, settings.datasetId)
   validateSourceRecords(input.contextSources, input.contextSnapshots, input.sourceSummaries, input.sourceArtifacts, settings.profileId, settings.changePolicy)
   validateChatHistoryRecords(input.coachConversations, input.coachMessages, settings.profileId)
   validateCalendarRulesRecords(input.calendarRules ?? [], input.tasks as Task[], (input.calendarEvents ?? []) as CalendarEvent[], input.settings as Settings[])

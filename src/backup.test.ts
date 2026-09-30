@@ -1,5 +1,5 @@
 import 'fake-indexeddb/auto'
-import { beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { db, ensureSettings } from './db'
 import { createTask, newTaskInput, completeTask, correctCompletion, undoCompletion } from './commands'
 import { emptyScore } from './domain'
@@ -29,19 +29,24 @@ import { createReminder, dispatchDueReminders } from './reminders'
 import { saveKeybinding } from './shortcuts'
 import { saveCharacterProfile } from './character'
 import { saveCustomScreen, saveDashboardWidgets } from './dashboard'
-import { inspectBackup, restoreBackup } from './backup'
+import { captureSnapshot, exportBackup, exportPortableJson, inspectBackup, restoreBackup } from './backup'
 import { validateSnapshot, type Snapshot } from './backup-validation'
 import { saveReviewAnswer, setReviewSummary } from './review-coach'
-import { createCoachMemory, deleteCoachMemory } from './coach-memory'
+import { createCoachMemory, deleteCoachMemory, editCoachMemory, memorySourceFromOption } from './coach-memory'
 import { applyTripBundle } from './trip-bundle-save'
 import { prepareTripBundle } from './trip-bundles'
-import { applyChangeSet, prepareTaskChanges, type ChangeContext } from './change-set'
-import { defaultSourcePermissions, importLocalSource } from './source-library'
-import { appendCoachReply, beginCoachTurn, createCoachConversation, saveCoachDraft } from './chat-history'
+import { applyChangeSet, changePolicyFor, prepareTaskChanges, type ChangeContext } from './change-set'
+import { defaultSourcePermissions, importLocalSource, summarizeSelectedSource } from './source-library'
+import { appendCoachReply, beginCoachTurn, createCoachConversation, saveCoachDraft, setConversationRetention } from './chat-history'
 import { calendarFixture, monthlyRule } from './calendar-test-fixtures'
 import { applyCalendarProposalFromUI, prepareCalendarConfiguration, prepareCalendarGeneration } from './calendar-rules-save'
+import { beginCoachNotificationDelivery, emptyCoachNotificationState, reserveCoachNotification, settleCoachNotificationDelivery, type NotificationGuard, type NotificationRequest } from './coach-notifications'
+import { fileBridgeReceiptKey, fileBridgeScopeKey, type FileBridgeApplicationReceipt, type FileBridgeRegistration } from './file-bridge-types'
+import { readFileBridgeApplicationReceipt } from './file-bridge-commands'
+import { contentDigest } from './canonical'
 
 beforeEach(async () => { await db.delete(); await db.open(); await ensureSettings() })
+afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.useRealTimers() })
 
 async function snapshot(): Promise<Snapshot> {
   const attachments = await Promise.all((await db.taskAttachments.toArray()).map(async ({ blob, ...item }) => ({ ...item, contentBase64: btoa(Array.from(new Uint8Array(await blob.arrayBuffer()), value => String.fromCharCode(value)).join('')) })))
@@ -58,6 +63,108 @@ async function snapshot(): Promise<Snapshot> {
 }
 
 describe('バックアップの復元前検証', () => {
+  it.each(['captureSnapshot', 'JSON出力', '暗号化出力'] as const)('%sの実経路は期限切れの原文・履歴・下書き・派生本文を出力前に消去する', async route => {
+    vi.useFakeTimers({ toFake: ['Date', 'setTimeout'] }); vi.setSystemTime(new Date('2026-10-01T03:00:00.000Z'))
+    const retentionUntil = '2026-10-02T00:00:00.000Z', model = 'deepseek/deepseek-v4.1-flash'
+    await db.settings.update('main', { aiEnabled: true, aiModel: model })
+    const memoryId = await createCoachMemory({ kind: 'explicit', text: '消去対象メモ旧本文', retentionUntil })
+    await editCoachMemory(memoryId, 1, 'explicit', '消去対象メモ訂正本文')
+    const sourceId = await importLocalSource({ title: '消去対象資料名', provider: 'slack', externalId: 'expired-export', conversation: '消去対象チャンネル', author: '消去対象発言者', sourceUrl: null, date: '2026-10-01', fromDate: '2026-09-01', toDate: '2026-10-01', text: '消去対象資料原文\r\n消去対象資料二行目', permissions: { ...defaultSourcePermissions(), aiEgress: true }, allowedModels: [model], retentionUntil })
+    await summarizeSelectedSource(sourceId, 1, model, async () => '消去対象資料AI要約')
+    const currentSettings = (await db.settings.get('main'))!
+    const sourceRef = await memorySourceFromOption({ kind: 'library', refId: sourceId, summary: true, label: '選択した資料要約' }, currentSettings.profileId)
+    const sourceMemoryId = await createCoachMemory({ kind: 'inferred', text: '消去対象資料由来メモ', sources: [sourceRef] })
+    await editCoachMemory(sourceMemoryId, 1, 'inferred', '消去対象資料由来メモ訂正文')
+    await db.sourceArtifacts.add({ id: 'expired-cache', sourceId, ownerId: currentSettings.profileId, sourceRevision: 1, permissionRevision: 1, kind: 'cache', payload: '消去対象資料cache', createdAt: new Date().toISOString() })
+    const conversationId = await createCoachConversation('消去対象会話名', 'Asia/Tokyo')
+    const turn = await beginCoachTurn(conversationId, 1, { text: '消去対象本人会話本文', mode: 'local' })
+    await appendCoachReply(turn, '消去対象会話応答', 'template')
+    const conversation = (await db.coachConversations.get(conversationId))!
+    await saveCoachDraft(conversationId, conversation.draftRevision, '消去対象入力途中の下書き')
+    await setConversationRetention(conversationId, conversation.revision, retentionUntil)
+    expect((await db.coachMemories.get(memoryId))!.history[0].text).toBe('消去対象メモ旧本文')
+    expect((await db.coachConversations.get(conversationId))!.draft).toBe('消去対象入力途中の下書き')
+    expect(await db.contextSnapshots.count()).toBe(1)
+    vi.setSystemTime(new Date(retentionUntil))
+    let saved: Snapshot
+    if (route === 'captureSnapshot') saved = await captureSnapshot()
+    else {
+      let downloaded: Blob | undefined
+      const anchor = { href: '', download: '', click: vi.fn() }
+      vi.stubGlobal('document', { createElement: vi.fn(() => anchor) })
+      vi.spyOn(URL, 'createObjectURL').mockImplementation(content => { if (!(content instanceof Blob)) throw new Error('出力はBlobで保存します'); downloaded = content; return 'blob:backup-regression' })
+      vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => undefined)
+      const password = 'backup-regression-password'
+      if (route === 'JSON出力') await exportPortableJson()
+      else await exportBackup(password)
+      expect(anchor.click).toHaveBeenCalledOnce(); expect(downloaded).toBeDefined()
+      expect(anchor.download).toMatch(route === 'JSON出力' ? /\.json$/ : /\.coachbundle$/)
+      saved = await inspectBackup(new File([downloaded!], anchor.download, { type: 'application/json' }), route === 'JSON出力' ? '' : password)
+      if (route === '暗号化出力') expect((await db.settings.get('main'))!.lastBackupAt).toBe(retentionUntil)
+    }
+    expect(JSON.stringify(saved)).not.toContain('消去対象')
+    expect(saved.coachMemories!.find(item => item.id === memoryId)).toMatchObject({ text: '', history: [], contentPurged: 'retention', deletedAt: retentionUntil })
+    expect(saved.coachMemories!.find(item => item.id === sourceMemoryId)).toMatchObject({ text: '', history: [], sourcePurged: true, deletedAt: retentionUntil })
+    expect(saved.coachConversations!.find(item => item.id === conversationId)).toMatchObject({ title: '削除した会話', draft: '', pendingMessageId: null, deletedAt: retentionUntil })
+    expect(saved.contextSnapshots).toEqual([]); expect(saved.sourceSummaries).toEqual([]); expect(saved.sourceArtifacts).toEqual([]); expect(saved.coachMessages).toEqual([])
+    expect(await db.contextSnapshots.count()).toBe(0); expect(await db.sourceSummaries.count()).toBe(0); expect(await db.sourceArtifacts.count()).toBe(0); expect(await db.coachMessages.count()).toBe(0)
+    expect(await db.coachMemories.toArray()).toEqual(saved.coachMemories)
+    expect(await db.coachConversations.toArray()).toEqual(saved.coachConversations)
+    expect(saved.memoryTombstones!.every(item => item.reason === 'retention' || item.reason === 'source-deleted')).toBe(true)
+    await restoreBackup(saved)
+    expect(JSON.stringify(await captureSnapshot())).not.toContain('消去対象')
+  })
+
+  it('実際のsnapshot復元は待機・送信中の通知を取消し、通知権限版を進めて配信済み履歴を保持する', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(new Date('2026-10-01T03:00:00.000Z'))
+    const taskId = await createTask({ ...newTaskInput(), title: '通知復元の対象' }), settings = (await db.settings.get('main'))!, policy = changePolicyFor(settings), at = new Date().toISOString()
+    let state = emptyCoachNotificationState(settings.profileId, settings.datasetId, 'Asia/Tokyo')
+    const guards = new Map<string, NotificationGuard>()
+    for (const status of ['queued', 'sending', 'accepted_by_provider'] as const) {
+      const request: NotificationRequest = { id: `restore-notice:${status}`, purpose: 'direct_reply', category: 'reply', target: { kind: 'task', id: taskId, revision: 1 }, ruleId: `fixture:${status}`, ruleRevision: '1', ruleWindow: status, notBefore: at, expiresAt: '2026-10-01T04:00:00.000Z', destinationIds: ['in-app'], sourceRefs: [], text: { factual: '保存した通知文', savedAI: null }, intervalMinutes: null, maxCount: null, endDate: null }
+      const guard: NotificationGuard = { ownerId: settings.profileId, datasetId: settings.datasetId, authorityEpoch: policy.epoch, sourcePermissionRevision: policy.sourcePermissionRevision, aiEnabled: false, target: { ...request.target, active: true }, rule: { id: request.ruleId, revision: '1', active: true, sentCount: 0 }, sources: [], availableDestinationIds: ['in-app'] }
+      guards.set(request.id, guard)
+      const reserved = reserveCoachNotification(state, request, guard, at); expect(reserved.intent).not.toBeNull(); state = reserved.state
+      if (status !== 'queued') {
+        const sending = beginCoachNotificationDelivery(state, request.id, 'in-app', `attempt:${status}`, guard, at); expect(sending.payload).not.toBeNull(); state = sending.state
+        if (status === 'accepted_by_provider') state = settleCoachNotificationDelivery(state, request.id, 'in-app', `attempt:${status}`, status, at)
+      }
+    }
+    await db.settings.update('main', { notificationState: state })
+    const saved = await captureSnapshot()
+    await restoreBackup(saved)
+    const restored = (await db.settings.get('main'))!.notificationState!
+    expect(restored.policy.epoch).toBe(state.policy.epoch + 1)
+    expect(restored.intents.map(item => item.deliveries[0].state)).toEqual(['canceled', 'canceled', 'accepted_by_provider'])
+    expect(restored.intents.every(item => item.policyEpoch < restored.policy.epoch)).toBe(true)
+    expect(restored.intents[2].deliveries[0].attemptId).toBe('attempt:accepted_by_provider')
+    expect(beginCoachNotificationDelivery(restored, 'restore-notice:queued', 'in-app', 'replayed-attempt', guards.get('restore-notice:queued')!, at).payload).toBeNull()
+    expect(saved.settings[0].notificationState).toEqual(state)
+    expect(() => validateSnapshot({ ...saved, settings: [{ ...saved.settings[0], notificationState: restored }] })).not.toThrow()
+  })
+
+  it('実snapshotの復元でfilebridge scope権限だけを除外し、適用済みreceiptとタスク・台帳を維持する', async () => {
+    const taskId = await createTask({ ...newTaskInput(), title: '適用済み外部提案を保持するタスク', score: { ...emptyScore(), mode: 'manual', manualPoints: 25 } }), settings = (await db.settings.get('main'))!, policy = changePolicyFor(settings), at = new Date().toISOString()
+    const registration: FileBridgeRegistration = { schema_version: '1', owner_id: settings.profileId, dataset_id: settings.datasetId, policy_epoch: policy.epoch, source_permission_revision: policy.sourcePermissionRevision, task_ids: [taskId], client: { id: crypto.randomUUID(), dataset_id: settings.datasetId, intended_host: 'codex', transport: 'stdio', status: 'active', revision: 1, grant_epoch: 1, grant: { keys: ['tasks:read', 'tasks:prepare', 'changes:submit', 'commands:read'], project_ids: [], fields: ['notes'], mutation_mode: 'require_approval', max_operations_per_day: 10, max_schedule_shift_days: 3, max_point_delta: 0, allow_external_context: false, allow_handoffs: false, expires_at: new Date(Date.now() + 3600000).toISOString() } } }
+    const scope = { version: 1, registration }, scopeKey = fileBridgeScopeKey(settings.profileId, settings.datasetId)
+    const receipt: FileBridgeApplicationReceipt = { version: 1, commandId: crypto.randomUUID(), fileDigest: 'a'.repeat(64), applicationDigest: 'b'.repeat(64), ownerId: settings.profileId, datasetId: settings.datasetId, clientId: registration.client.id, policyEpoch: policy.epoch, sourcePermissionRevision: policy.sourcePermissionRevision, registrationRevision: 1, grantEpoch: 1, taskIds: [taskId], appliedAt: at }
+    await db.commands.add({ key: scopeKey, hash: await contentDigest(scope), resultId: JSON.stringify(scope), at })
+    await db.commands.add({ key: fileBridgeReceiptKey(receipt.commandId), hash: receipt.applicationDigest, resultId: JSON.stringify(receipt), at })
+    const saved = await captureSnapshot(), invalidate = vi.fn(async () => undefined)
+    vi.stubGlobal('window', { michiFileBridge: { invalidate } })
+    expect(saved.commands.some(item => item.key === scopeKey)).toBe(true)
+    expect(await readFileBridgeApplicationReceipt(receipt.commandId)).toEqual(receipt)
+    await db.commands.clear()
+    await restoreBackup(saved)
+    expect(invalidate).toHaveBeenCalledOnce()
+    expect(await db.commands.get(scopeKey)).toBeUndefined()
+    expect(await readFileBridgeApplicationReceipt(receipt.commandId)).toEqual(receipt)
+    expect(await db.tasks.toArray()).toEqual(saved.tasks); expect(await db.ledger.toArray()).toEqual(saved.ledger)
+    expect((await db.tasks.get(taskId))!.score.manualPoints).toBe(25)
+    expect((await captureSnapshot()).commands.every(item => !item.key.startsWith('filebridge:scope:'))).toBe(true)
+    expect(saved.commands.some(item => item.key === scopeKey)).toBe(true)
+  })
+
   it('共通カレンダーと完了実績を復元し、古い承認案と対応先の欠落を拒否する', async () => {
     const current = (await db.settings.get('main'))!, state = calendarFixture()
     state.ownerId = current.profileId; state.datasetId = current.datasetId

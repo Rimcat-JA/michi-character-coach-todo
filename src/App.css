@@ -161,3 +161,6 @@
 .calendar-rules-view pre, .calendar-rules-view li { overflow-wrap: anywhere; white-space: pre-wrap; font-size: 12px; line-height: 1.6; }
 .calendar-rules-view details, .calendar-rules-view h3 { margin: 16px 0; }
 @media (max-width: 680px) { .calendar-rules-view form { grid-template-columns: 1fr; } }
+[aria-label="ローカルエージェント接続"] { padding: 24px; grid-column: 1 / -1; }
+[aria-label="ローカルエージェント接続"] input[type="checkbox"], .saved-conversation input[type="checkbox"], .coach-notifications-view input[type="checkbox"] { width: 16px; }
+[aria-label="ローカルエージェント接続"] article { padding: 12px 0; border-bottom: 1px solid var(--border); overflow-wrap: anywhere; }

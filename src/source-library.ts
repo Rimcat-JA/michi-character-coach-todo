@@ -1,9 +1,11 @@
+import Dexie from 'dexie'
 import { db as baseDb } from './db'
 import { ConflictError } from './commands'
 import { changePolicyFor } from './change-set'
 import { uid, validateDate } from './domain'
 import type { CoachMemory, MemoryTombstone } from './coach-memory'
 import { purgeChatSourceResponses } from './chat-history'
+import { purgeCoachNotificationSource } from './coach-notification-save'
 
 export type SourceProvider = 'local' | 'slack' | 'line' | 'teams' | 'discord' | 'other'
 export type SourcePermissions = { acquire: boolean; retain: boolean; index: boolean; aiEgress: boolean; notify: boolean; externalWrite: boolean; disclose: boolean }
@@ -17,7 +19,7 @@ export type SourceSpan = { id: string; index: number; start: number; end: number
 export type ContextSnapshot = { id: string; sourceId: string; ownerId: string; revision: number; originalText: string; text: string; sha256: string; spans: SourceSpan[]; createdAt: string }
 export type SourceSummary = { id: string; ownerId: string; sourceId: string; sourceRevision: number; permissionRevision: number; policyEpoch: number; sourcePermissionRevision: number; model: string; provider: 'openrouter'; text: string; sha256: string; createdAt: string }
 export type SourceArtifact = { id: string; ownerId: string; sourceId: string; sourceRevision: number; permissionRevision: number; kind: 'cache' | 'embedding' | 'candidate'; payload: string; createdAt: string }
-export type SourceImport = Pick<ContextSource, 'title' | 'provider' | 'externalId' | 'conversation' | 'author' | 'sourceUrl' | 'date' | 'permissions' | 'allowedModels' | 'retentionUntil'> & { text: string; fromDate: string; toDate: string }
+export type SourceImport = Pick<ContextSource, 'title' | 'provider' | 'externalId' | 'conversation' | 'author' | 'sourceUrl' | 'date' | 'permissions' | 'allowedModels' | 'retentionUntil'> & { text: string; fromDate: string; toDate: string; timezone?: string }
 export const sourceDb = baseDb
 const db = sourceDb
 const providerNames: SourceProvider[] = ['local', 'slack', 'line', 'teams', 'discord', 'other']
@@ -54,11 +56,12 @@ async function bumpPolicy() {
 const purgeTables = () => [db.contextSources, db.contextSnapshots, db.sourceSummaries, db.sourceArtifacts, db.coachMemories, db.memoryTombstones, db.coachConversations, db.coachMessages, db.settings]
 function usesSource(memory: CoachMemory, sourceId: string) { return memory.sources.some(ref => (ref.kind as string) === 'library' && ref.refId === sourceId || ref.kind === 'derived-summary' && ref.refId === `library:${sourceId}`) }
 async function purgeDerived(source: ContextSource, at: string) {
+  await purgeCoachNotificationSource(source.id, at)
   await purgeChatSourceResponses(source.id, source.ownerId)
   await db.sourceSummaries.where('sourceId').equals(source.id).delete()
   await db.sourceArtifacts.where('sourceId').equals(source.id).delete()
   const memories = await db.coachMemories.where('ownerId').equals(source.ownerId).toArray()
-  for (const memory of memories) if (!memory.sourcePurged && usesSource(memory, source.id)) {
+  for (const memory of memories) if (!memory.sourcePurged && !memory.contentPurged && usesSource(memory, source.id)) {
     const existing = new Set((await db.memoryTombstones.where('ownerId').equals(source.ownerId).toArray()).map(row => row.sourceKey))
     for (const tombstone of await db.memoryTombstones.where('ownerId').equals(source.ownerId).toArray()) if (tombstone.memoryId === memory.id) await db.memoryTombstones.put({ ...tombstone, reason: 'source-deleted', at })
     for (const ref of memory.sources) {
@@ -72,6 +75,8 @@ async function purgeDerived(source: ContextSource, at: string) {
 
 export async function importLocalSource(input: SourceImport): Promise<string> {
   const text = normalizeSourceText(input.text)
+  const timezone = input.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone
+  try { if (typeof timezone !== 'string' || !timezone.trim() || timezone.length > 100) throw new Error(); new Intl.DateTimeFormat('en-US', { timeZone: timezone }).format() } catch { throw new Error('資料のタイムゾーンを確認してください') }
   if (typeof input.title !== 'string' || !input.title.trim() || input.title.length > 200 || !providerNames.includes(input.provider)) throw new Error('資料名と由来を確認してください')
   for (const value of [input.externalId, input.conversation, input.author]) if (value !== null && (typeof value !== 'string' || value.length > 200)) throw new Error('資料の識別情報を確認してください')
   if (input.sourceUrl !== null) { try { const url = new URL(input.sourceUrl); if (!['http:', 'https:'].includes(url.protocol) || input.sourceUrl.length > 2000) throw new Error() } catch { throw new Error('出典URLを確認してください') } }
@@ -81,7 +86,7 @@ export async function importLocalSource(input: SourceImport): Promise<string> {
   if (!input.permissions.acquire || !input.permissions.retain) throw new Error('取り込みには取得と保存の許可が必要です')
   if (input.permissions.aiEgress && !input.allowedModels.length) throw new Error('AI送信を許可するモデルIDを指定してください')
   if (input.retentionUntil !== null && Date.parse(input.retentionUntil) <= Date.now()) throw new Error('保持期限は未来の日時にしてください')
-  const digest = await hash(text), id = uid(), snapshotId = `${id}:1`, spans = sourceSpans(snapshotId, text), at = new Date().toISOString()
+  const digest = await Dexie.waitFor(hash(text)), id = uid(), snapshotId = `${id}:1`, spans = sourceSpans(snapshotId, text), at = new Date().toISOString()
   return db.transaction('rw', [db.contextSources, db.contextSnapshots, db.settings], async () => {
     const settings = await owner()
     const existing = await db.contextSources.where('ownerId').equals(settings.profileId).toArray()
@@ -91,7 +96,7 @@ export async function importLocalSource(input: SourceImport): Promise<string> {
       if (snapshot?.sha256 === digest) return source.id
     }
     await bumpPolicy()
-    await db.contextSources.add({ id, ownerId: settings.profileId, title: input.title.trim(), provider: input.provider, externalId: input.externalId, conversation: input.conversation, author: input.author, sourceUrl: input.sourceUrl, date: input.date, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone, revision: 1, latestRevision: 1, permissionRevision: 1, permissions: { ...input.permissions }, aiProvider: 'openrouter', allowedModels: [...input.allowedModels], coverage: { fromDate: input.fromDate, toDate: input.toDate, complete: false, method: 'manual-import', lastCheckedAt: at }, retentionUntil: input.retentionUntil, createdAt: at, updatedAt: at, deletedAt: null })
+    await db.contextSources.add({ id, ownerId: settings.profileId, title: input.title.trim(), provider: input.provider, externalId: input.externalId, conversation: input.conversation, author: input.author, sourceUrl: input.sourceUrl, date: input.date, timezone, revision: 1, latestRevision: 1, permissionRevision: 1, permissions: { ...input.permissions }, aiProvider: 'openrouter', allowedModels: [...input.allowedModels], coverage: { fromDate: input.fromDate, toDate: input.toDate, complete: false, method: 'manual-import', lastCheckedAt: at }, retentionUntil: input.retentionUntil, createdAt: at, updatedAt: at, deletedAt: null })
     await db.contextSnapshots.add({ id: snapshotId, sourceId: id, ownerId: settings.profileId, revision: 1, originalText: input.text, text, sha256: digest, spans, createdAt: at })
     return id
   })
@@ -123,9 +128,11 @@ export async function deleteSource(id: string, expectedRevision: number): Promis
     await db.contextSources.put({ ...source, title: '削除した資料', externalId: null, conversation: null, author: null, sourceUrl: null, permissions: Object.fromEntries(permissionKeys.map(key => [key, false])) as SourcePermissions, revision: source.revision + 1, permissionRevision: source.permissionRevision + 1, deletedAt: at, updatedAt: at })
   })
 }
+let sourcePurge: Promise<void> | null = null
 export async function purgeExpiredSources(): Promise<void> {
-  const settings = await owner(), sources = await db.contextSources.where('ownerId').equals(settings.profileId).toArray()
-  for (const source of sources) if (!source.deletedAt && source.retentionUntil !== null && Date.parse(source.retentionUntil) <= Date.now()) await deleteSource(source.id, source.revision)
+  if (sourcePurge) return sourcePurge
+  sourcePurge = (async () => { const settings = await owner(), sources = await db.contextSources.where('ownerId').equals(settings.profileId).toArray(); for (const source of sources) if (!source.deletedAt && source.retentionUntil !== null && Date.parse(source.retentionUntil) <= Date.now()) await deleteSource(source.id, source.revision) })()
+  try { await sourcePurge } finally { sourcePurge = null }
 }
 export async function readSource(id: string): Promise<{ source: ContextSource; snapshot: ContextSnapshot }> {
   const settings = await owner(), source = await db.contextSources.get(id)
@@ -138,7 +145,6 @@ export async function searchSources(query: string, fromDate: string, toDate: str
   if (typeof query !== 'string' || query.length > 200) throw new Error('検索語を200文字以内で指定してください')
   validateDate(fromDate, '検索開始日'); validateDate(toDate, '検索終了日')
   if (!fromDate || !toDate || fromDate > toDate) throw new Error('検索範囲を確認してください')
-  await purgeExpiredSources()
   const settings = await owner(), sources = (await db.contextSources.where('ownerId').equals(settings.profileId).toArray()).filter(source => canRead(source, settings.profileId) && source.permissions.index && source.coverage.fromDate <= toDate && source.coverage.toDate >= fromDate)
   const hits: { source: ContextSource; snapshotRevision: number; span: SourceSpan }[] = []
   for (const source of sources) {
@@ -151,6 +157,7 @@ export async function searchSources(query: string, fromDate: string, toDate: str
 }
 
 export async function summarizeSelectedSource(id: string, expectedRevision: number, model: string, send: (text: string) => Promise<string>): Promise<string> {
+  await purgeExpiredSources()
   let prepared: { source: ContextSource; snapshot: ContextSnapshot; ownerId: string; datasetId: string; epoch: number; sourcePermissionRevision: number }
   await db.transaction('r', [db.contextSources, db.contextSnapshots, db.settings], async () => {
     const settings = await owner(), { source, snapshot } = await readSource(id), policy = changePolicyFor(settings)

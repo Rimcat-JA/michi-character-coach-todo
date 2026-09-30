@@ -1,17 +1,21 @@
 import { ConflictError } from './commands'
 import { db } from './db'
 import { uid } from './domain'
+import Dexie from 'dexie'
+import { purgeChatMemoryResponses } from './chat-history'
 
 export type MemoryKind = 'explicit' | 'inferred'
 export type MemorySourceRef = { kind: 'human' | 'day-note' | 'review' | 'goal-checkin' | 'library' | 'derived-summary'; refId: string; revision: number; digest: string | null }
 export type CoachMemory = {
   id: string; ownerId: string; kind: MemoryKind; text: string; revision: number; sources: MemorySourceRef[]
   history: { text: string; kind: MemoryKind; sources: MemorySourceRef[]; revision: number; at: string }[]
-  createdAt: string; updatedAt: string; deletedAt: string | null; sourcePurged?: true
+  createdAt: string; updatedAt: string; deletedAt: string | null; sourcePurged?: true; retentionUntil?: string | null; contentPurged?: 'retention'
 }
-export type MemoryTombstone = { id: string; ownerId: string; memoryId: string; sourceKey: string; reason: 'deleted' | 'corrected' | 'source-deleted'; at: string }
+export type MemoryTombstone = { id: string; ownerId: string; memoryId: string; sourceKey: string; reason: 'deleted' | 'corrected' | 'source-deleted' | 'retention'; at: string }
 export type MemorySourceOption = { label: string; kind: 'day-note' | 'review' | 'goal-checkin' | 'library'; refId: string; summary: boolean }
 const libraryDb = db
+const notExpired = (memory: CoachMemory) => !memory.retentionUntil || Date.parse(memory.retentionUntil) > Date.now()
+export function validateMemoryRetention(value: unknown): asserts value is string | null { if (value !== null && (typeof value !== 'string' || !Number.isFinite(Date.parse(value)) || new Date(value).toISOString() !== value)) throw new Error('記憶の保持期限を確認してください') }
 
 function validInput(kind: MemoryKind, text: string) {
   if (!['explicit', 'inferred'].includes(kind) || typeof text !== 'string' || !text.trim() || text.length > 2000) throw new Error('記憶の種類と本文（1〜2000文字）を確認してください')
@@ -86,8 +90,10 @@ export function memorySuppressed(sources: MemorySourceRef[], tombstones: MemoryT
 }
 const sourceTables = (sources: MemorySourceRef[]) => [db.dayNotes, db.reviewRecords, db.goalCheckIns, db.goals, ...(sources.some(source => source.kind === 'library' || source.kind === 'derived-summary' && source.refId.startsWith('library:')) ? [libraryDb.contextSources, libraryDb.contextSnapshots, libraryDb.sourceSummaries] : [])]
 
-export async function createCoachMemory(input: { kind: MemoryKind; text: string; sources?: MemorySourceRef[] }): Promise<string> {
+export async function createCoachMemory(input: { kind: MemoryKind; text: string; sources?: MemorySourceRef[]; retentionUntil?: string | null }): Promise<string> {
   validInput(input.kind, input.text)
+  validateMemoryRetention(input.retentionUntil ?? null)
+  if (input.retentionUntil && Date.parse(input.retentionUntil) <= Date.now()) throw new Error('保持期限は未来の日時にしてください')
   const id = uid(), settings = await db.settings.get('main')
   if (!settings || !settings.profileId.trim()) throw new Error('本人の設定がありません')
   const sources = input.sources?.map(source => ({ ...source })) ?? [{ kind: 'human' as const, refId: id, revision: 1, digest: null }]
@@ -107,7 +113,7 @@ export async function createCoachMemory(input: { kind: MemoryKind; text: string;
     if (existing.length >= 10000) throw new Error('記憶は10000件まで保存できます')
     if (input.kind === 'inferred' && existing.some(memory => !memory.deletedAt && memory.kind === 'inferred' && memory.sources.some(source => sources.some(candidate => memorySourceKey(candidate) === memorySourceKey(source))))) throw new Error('この出典の推測は保存済みです。内容を訂正してください')
     const at = new Date().toISOString()
-    await db.coachMemories.add({ id, ownerId: settings.profileId, kind: input.kind, text: input.text.trim(), revision: 1, sources, history: [], createdAt: at, updatedAt: at, deletedAt: null })
+    await db.coachMemories.add({ id, ownerId: settings.profileId, kind: input.kind, text: input.text.trim(), revision: 1, sources, history: [], retentionUntil: input.retentionUntil ?? null, createdAt: at, updatedAt: at, deletedAt: null })
     return id
   })
 }
@@ -121,7 +127,7 @@ async function addTombstones(memory: CoachMemory, reason: MemoryTombstone['reaso
 }
 export async function editCoachMemory(id: string, expectedRevision: number, kind: MemoryKind, text: string): Promise<void> {
   validInput(kind, text)
-  await db.transaction('rw', [db.coachMemories, db.memoryTombstones, db.settings], async () => {
+  await db.transaction('rw', [db.coachMemories, db.memoryTombstones, db.coachMessages, db.coachConversations, db.settings], async () => {
     const memory = await db.coachMemories.get(id), settings = await db.settings.get('main')
     if (!memory || memory.deletedAt || !settings || memory.ownerId !== settings.profileId) throw new Error('本人の記憶がありません')
     if (memory.revision !== expectedRevision) throw new ConflictError()
@@ -129,15 +135,17 @@ export async function editCoachMemory(id: string, expectedRevision: number, kind
     if (memory.history.length >= 1000) throw new Error('記憶の変更履歴が1000件に達しています')
     const clock = new Date().toISOString(), at = clock < memory.updatedAt ? memory.updatedAt : clock
     if (memory.kind === 'inferred') await addTombstones(memory, 'corrected', at)
+    await purgeChatMemoryResponses(memory.id, memory.ownerId)
     await db.coachMemories.put({ ...memory, kind, text: text.trim(), revision: memory.revision + 1, history: [...memory.history, { text: memory.text, kind: memory.kind, sources: memory.sources.map(source => ({ ...source })), revision: memory.revision, at }], updatedAt: at })
   })
 }
 export async function deleteCoachMemory(id: string, expectedRevision: number): Promise<void> {
-  await db.transaction('rw', [db.coachMemories, db.memoryTombstones, db.settings], async () => {
+  await db.transaction('rw', [db.coachMemories, db.memoryTombstones, db.coachMessages, db.coachConversations, db.settings], async () => {
     const memory = await db.coachMemories.get(id), settings = await db.settings.get('main')
     if (!memory || !settings || memory.ownerId !== settings.profileId) throw new Error('本人の記憶がありません')
     if (memory.revision !== expectedRevision) throw new ConflictError()
     if (memory.deletedAt) return
+    await purgeChatMemoryResponses(memory.id, memory.ownerId)
     const clock = new Date().toISOString(), at = clock < memory.updatedAt ? memory.updatedAt : clock
     await addTombstones(memory, 'deleted', at)
     await db.coachMemories.put({ ...memory, revision: memory.revision + 1, deletedAt: at, updatedAt: at, history: [...memory.history, { text: memory.text, kind: memory.kind, sources: memory.sources.map(source => ({ ...source })), revision: memory.revision, at }] })
@@ -159,7 +167,7 @@ export async function invalidateMemoriesForSource(kind: MemorySourceOption['kind
 }
 
 export function currentMemoryContext(memories: CoachMemory[], ownerId: string) {
-  const own = memories.filter(memory => memory.ownerId === ownerId && !memory.deletedAt)
+  const own = memories.filter(memory => memory.ownerId === ownerId && !memory.deletedAt && notExpired(memory))
   const content = (kind: MemoryKind) => own.filter(memory => memory.kind === kind).map(memory => ({ id: memory.id, text: memory.text, sources: memory.sources.map(source => ({ ...source })) }))
   return { explicit: content('explicit'), inferred: content('inferred') }
 }
@@ -168,9 +176,56 @@ export async function availableMemoryContext(ownerId: string) {
   if (!settings || settings.profileId !== ownerId) throw new Error('本人の設定がありません')
   const memories = await db.coachMemories.where('ownerId').equals(ownerId).toArray(), available: CoachMemory[] = []
   for (const memory of memories) {
-    if (memory.deletedAt) continue
+    if (memory.deletedAt || !notExpired(memory)) continue
     try { for (const source of memory.sources) if (source.kind !== 'human') await verifySource(source, ownerId); available.push(memory) }
     catch { /* Deleted, changed, or inaccessible source is excluded from reuse. */ }
   }
   return currentMemoryContext(available, ownerId)
+}
+
+export async function memoryForSelectedChat(id: string, ownerId: string, model: string | null): Promise<{ memory: CoachMemory; digest: string }> {
+  const settings = await db.settings.get('main'), memory = await db.coachMemories.get(id)
+  if (!settings || settings.profileId !== ownerId || !memory || memory.ownerId !== ownerId || memory.deletedAt || !notExpired(memory)) throw new Error('選択した本人の記憶がありません')
+  const provenance: unknown[] = []
+  for (const ref of memory.sources) {
+    if (ref.kind === 'human') { if (ref.refId !== memory.id || ref.revision !== 1 || ref.digest !== null) throw new Error('記憶の本人出典が不正です'); provenance.push(ref); continue }
+    const parsed = parseSource(ref), current = await sourceContent(parsed.kind, parsed.refId, parsed.summary, ownerId)
+    if (current.revision !== ref.revision || parsed.summary && await Dexie.waitFor(digestOf(current.text)) !== ref.digest) throw new ConflictError()
+    const sourceBody = current.text
+    if (parsed.kind === 'library') {
+      const source = (await db.contextSources.get(parsed.refId))!
+      if (model !== null && (!source.permissions.aiEgress || !source.allowedModels.includes(model))) throw new Error('選択した記憶の出典資料とモデルへのAI送信は許可されていません')
+      provenance.push([ref, sourceBody, source.permissionRevision, source.retentionUntil, source.permissions, source.allowedModels])
+    } else provenance.push([ref, sourceBody])
+  }
+  return { memory, digest: await Dexie.waitFor(digestOf(JSON.stringify([memory.id, memory.kind, memory.text, memory.revision, memory.sources, memory.retentionUntil ?? null, provenance]))) }
+}
+
+export async function setMemoryRetention(id: string, expectedRevision: number, retentionUntil: string | null): Promise<void> {
+  validateMemoryRetention(retentionUntil)
+  if (retentionUntil !== null && Date.parse(retentionUntil) <= Date.now()) throw new Error('保持期限は未来の日時にしてください')
+  await db.transaction('rw', db.coachMemories, db.settings, async () => {
+    const settings = await db.settings.get('main'), memory = await db.coachMemories.get(id)
+    if (!settings || !memory || memory.ownerId !== settings.profileId || memory.deletedAt || !notExpired(memory)) throw new Error('本人の記憶がありません')
+    if (memory.revision !== expectedRevision) throw new ConflictError()
+    if ((memory.retentionUntil ?? null) === retentionUntil) return
+    if (memory.history.length >= 1000) throw new Error('記憶の変更履歴が1000件に達しています')
+    const clock = new Date().toISOString(), at = clock < memory.updatedAt ? memory.updatedAt : clock
+    await db.coachMemories.put({ ...memory, retentionUntil, revision: memory.revision + 1, updatedAt: at, history: [...memory.history, { text: memory.text, kind: memory.kind, sources: memory.sources.map(source => ({ ...source })), revision: memory.revision, at }] })
+  })
+}
+
+export async function purgeExpiredMemories(): Promise<number> {
+  return db.transaction('rw', db.coachMemories, db.memoryTombstones, db.coachMessages, db.coachConversations, db.settings, async () => {
+    const settings = await db.settings.get('main'); if (!settings) throw new Error('本人の設定がありません')
+    const memories = await db.coachMemories.where('ownerId').equals(settings.profileId).toArray(); let count = 0
+    for (const memory of memories) if (!memory.sourcePurged && !memory.contentPurged && !notExpired(memory)) {
+      const clock = new Date().toISOString(), at = clock < memory.updatedAt ? memory.updatedAt : clock
+      for (const tombstone of await db.memoryTombstones.where('ownerId').equals(settings.profileId).toArray()) if (tombstone.memoryId === memory.id) await db.memoryTombstones.put({ ...tombstone, reason: 'retention', at })
+      await addTombstones(memory, 'retention', at)
+      await purgeChatMemoryResponses(memory.id, memory.ownerId)
+      await db.coachMemories.put({ ...memory, text: '', history: [], contentPurged: 'retention', revision: memory.revision + 1, deletedAt: at, updatedAt: at }); count++
+    }
+    return count
+  })
 }

@@ -1,5 +1,60 @@
 const { contextBridge, ipcRenderer } = require('electron')
 
+let nativeFileBridgeProof = null
+window.addEventListener('click', event => {
+  if (!event.isTrusted || !(event.target instanceof Element)) return
+  const button = event.target.closest('button[data-file-bridge-configure],button[data-file-bridge-approve],button[data-file-bridge-disconnect]')
+  if (!button || button.disabled) return
+  const kind = button.hasAttribute('data-file-bridge-configure') ? 'configure' : button.hasAttribute('data-file-bridge-approve') ? 'approve' : 'disconnect'
+  const reference = kind === 'configure' ? '' : button.getAttribute(`data-file-bridge-${kind}`) ?? ''
+  const proof = { nonce: crypto.randomUUID(), kind, reference }
+  nativeFileBridgeProof = { ...proof, at: Date.now() }
+  ipcRenderer.send('michi:filebridge-native-proof', proof)
+}, true)
+function fileBridgeNativeCall(method, kind, reference, request) {
+  const proof = nativeFileBridgeProof; nativeFileBridgeProof = null
+  if (!proof || proof.kind !== kind || proof.reference !== reference || Date.now() - proof.at > 5000) return Promise.reject(new Error('本人の確認ボタンから操作してください'))
+  return ipcRenderer.invoke(`michi:filebridge-${method}`, { request, proofNonce: proof.nonce })
+}
+contextBridge.exposeInMainWorld('michiFileBridge', {
+  status: () => ipcRenderer.invoke('michi:filebridge-status'),
+  configure: request => fileBridgeNativeCall('configure', 'configure', '', request),
+  disconnect: request => fileBridgeNativeCall('disconnect', 'disconnect', request?.clientId, request),
+  exportSnapshot: request => ipcRenderer.invoke('michi:filebridge-exportSnapshot', request),
+  scanInbox: () => ipcRenderer.invoke('michi:filebridge-scanInbox'),
+  authorizeApplication: request => fileBridgeNativeCall('authorizeApplication', 'approve', request?.reference, request),
+  recordApplied: request => ipcRenderer.invoke('michi:filebridge-recordApplied', request),
+  cancelApplication: request => ipcRenderer.invoke('michi:filebridge-cancelApplication', request),
+  invalidate: () => ipcRenderer.invoke('michi:filebridge-invalidate')
+})
+
+let nativeLocalActionProof = null
+window.addEventListener('click', event => {
+  if (!event.isTrusted || !(event.target instanceof Element)) return
+  const button = event.target.closest('button[data-local-action-configure],button[data-local-action-approve]')
+  if (!button || button.disabled) return
+  const kind = button.hasAttribute('data-local-action-configure') ? 'configure' : 'approve'
+  const reference = button.getAttribute(`data-local-action-${kind}`) ?? ''
+  const proof = { nonce: crypto.randomUUID(), kind, reference }
+  nativeLocalActionProof = { ...proof, at: Date.now() }
+  ipcRenderer.send('michi:localaction-native-proof', proof)
+}, true)
+function localActionNativeCall(method, kind, reference, request) {
+  const proof = nativeLocalActionProof; nativeLocalActionProof = null
+  if (!proof || proof.kind !== kind || proof.reference !== reference || Date.now() - proof.at > 5000) return Promise.reject(new Error('本人の確認ボタンから操作してください'))
+  return ipcRenderer.invoke(`michi:localaction-${method}`, { request, proofNonce: proof.nonce })
+}
+contextBridge.exposeInMainWorld('michiLocalActions', {
+  status: () => ipcRenderer.invoke('michi:localaction-status'),
+  inspectDefinition: request => localActionNativeCall('inspectDefinition', 'configure', 'inspect', request),
+  configure: request => localActionNativeCall('configure', 'configure', request?.reference, request),
+  remove: request => localActionNativeCall('remove', 'configure', `remove:${request?.actionId}`, request),
+  prepare: request => ipcRenderer.invoke('michi:localaction-prepare', request),
+  execute: request => localActionNativeCall('execute', 'approve', request?.reference, request),
+  recordReceipt: request => ipcRenderer.invoke('michi:localaction-recordReceipt', request),
+  invalidate: () => ipcRenderer.invoke('michi:localaction-invalidate')
+})
+
 contextBridge.exposeInMainWorld('michiAI', {
   status: () => ipcRenderer.invoke('michi:ai-status'),
   saveKey: value => ipcRenderer.invoke('michi:ai-save-key', value),

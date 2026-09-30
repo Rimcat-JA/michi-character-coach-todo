@@ -45,12 +45,15 @@ export function validateMemoryRecords(memories: unknown, tombstones: unknown, ow
   if (memoryRows.length > 10000 || tombstoneRows.length > 200000) fail()
   const byId = new Map<string, CoachMemory>()
   for (const raw of memoryRows) {
-    const row = object(raw, ['id', 'ownerId', 'kind', 'text', 'revision', 'sources', 'history', 'createdAt', 'updatedAt', 'deletedAt'], ['sourcePurged'])
-    const purged = row.sourcePurged === true
-    if (row.sourcePurged !== undefined && !purged || !text(row.id, 200) || byId.has(row.id) || row.ownerId !== ownerId || !kinds.includes(row.kind as string) || (purged ? row.text !== '' || row.deletedAt === null : !text(row.text, 2000)) || !revision(row.revision, 1003)) fail()
+    const row = object(raw, ['id', 'ownerId', 'kind', 'text', 'revision', 'sources', 'history', 'createdAt', 'updatedAt', 'deletedAt'], ['sourcePurged', 'retentionUntil', 'contentPurged'])
+    if (row.retentionUntil !== undefined && row.retentionUntil !== null) timestamp(row.retentionUntil)
+    if (row.contentPurged !== undefined && row.contentPurged !== 'retention' || row.contentPurged !== undefined && row.sourcePurged !== undefined) fail()
+    const purged = row.sourcePurged === true || row.contentPurged === 'retention'
+    if (row.sourcePurged !== undefined && row.sourcePurged !== true || !text(row.id, 200) || byId.has(row.id) || row.ownerId !== ownerId || !kinds.includes(row.kind as string) || (purged ? row.text !== '' || row.deletedAt === null : !text(row.text, 2000)) || !revision(row.revision, 1003)) fail()
     timestamp(row.createdAt); timestamp(row.updatedAt)
     if (row.updatedAt < row.createdAt) fail()
     if (row.deletedAt !== null) { timestamp(row.deletedAt); if (row.deletedAt < row.createdAt || row.deletedAt !== row.updatedAt) fail() }
+    if (row.contentPurged === 'retention' && (typeof row.retentionUntil !== 'string' || row.retentionUntil > (row.deletedAt as string))) fail()
     sources(row.sources, row.id)
     if (!Array.isArray(row.history) || row.history.length > 1001 || (purged ? row.history.length !== 0 : row.history.length !== row.revision - 1)) fail()
     let previousAt = row.createdAt
@@ -66,14 +69,14 @@ export function validateMemoryRecords(memories: unknown, tombstones: unknown, ow
   const ids = new Set<string>(), sourceKeys = new Set<string>()
   for (const raw of tombstoneRows) {
     const row = object(raw, ['id', 'ownerId', 'memoryId', 'sourceKey', 'reason', 'at'])
-    if (!text(row.id, 200) || ids.has(row.id) || row.ownerId !== ownerId || !text(row.memoryId, 200) || !['deleted', 'corrected', 'source-deleted'].includes(row.reason as string)) fail()
+    if (!text(row.id, 200) || ids.has(row.id) || row.ownerId !== ownerId || !text(row.memoryId, 200) || !['deleted', 'corrected', 'source-deleted', 'retention'].includes(row.reason as string)) fail()
     timestamp(row.at)
     const ref = sourceFromKey(row.sourceKey)
     const memory = byId.get(row.memoryId)
     if (!memory || row.at < memory.createdAt || row.at > memory.updatedAt || sourceKeys.has(row.sourceKey as string)) fail()
     const allSources = [...memory.sources, ...memory.history.flatMap(event => event.sources)]
     if (!allSources.some(candidate => key(candidate) === key(ref))) fail()
-    if ((row.reason === 'deleted' || row.reason === 'source-deleted') && !memory.deletedAt || row.reason === 'corrected' && !memory.history.some(event => event.kind === 'inferred')) fail()
+    if ((row.reason === 'deleted' || row.reason === 'source-deleted' || row.reason === 'retention') && !memory.deletedAt || row.reason === 'retention' && memory.contentPurged !== 'retention' || row.reason === 'corrected' && !memory.history.some(event => event.kind === 'inferred')) fail()
     ids.add(row.id); sourceKeys.add(row.sourceKey as string)
   }
   for (const memory of byId.values()) {
