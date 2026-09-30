@@ -20,6 +20,8 @@ import ChangePolicySettingsView from './ChangePolicySettingsView'
 import CoachTaskChangeView from './CoachTaskChangeView'
 import CoachMemoryView from './CoachMemoryView'
 import SourceLibraryView from './SourceLibraryView'
+import ExternalMessageImportView from './ExternalMessageImportView'
+import { WebCaptureImportView } from './WebCaptureImportView'
 import DetectionInboxView from './DetectionInboxView'
 import SavedCoachConversation from './SavedCoachConversation'
 import CoachAvatarPanel from './CoachAvatarPanel'
@@ -29,6 +31,8 @@ import CoachNotificationsView from './CoachNotificationsView'
 import { VoiceMediaView } from './VoiceMediaView'
 import { prepareCoachNotificationDelivery, queueSnoozeNotification, recordCoachNotificationDelivery } from './coach-notification-save'
 import { CalendarRulesView } from './CalendarRulesView'
+import CalendarImportView from './CalendarImportView'
+import { purgeExpiredCalendarOriginals } from './calendar-import-retention'
 import { applyCalendarProposalFromUI, loadCalendarRulesState, prepareCalendarConfiguration, prepareCalendarGeneration, prepareCalendarScheduleImport } from './calendar-rules-save'
 import TripBundlesView from './TripBundlesView'
 import { applyTripBundle, removeTripBundle } from './trip-bundle-save'
@@ -148,6 +152,13 @@ function App() {
   useEffect(() => { if (location.hash === '#mini') return; ensureSettings().then(() => expandRoutines()).then(() => captureDayProgressBaseline(currentDate)).catch(e => setToast(e instanceof Error ? e.message : String(e))) }, [currentDate])
   useEffect(() => applyAppearance(settings?.appearance), [settings?.appearance])
   useEffect(() => {
+    const purge = () => { void purgeExpiredCalendarOriginals().catch(error => setToast(error instanceof Error ? error.message : String(error))) }
+    purge()
+    window.addEventListener('focus', purge)
+    const timer = window.setInterval(purge, 60000)
+    return () => { window.removeEventListener('focus', purge); window.clearInterval(timer) }
+  }, [])
+  useEffect(() => {
     const onHash = () => { const id = taskIdFromHash(location.hash); if (id) { setLinkTaskId(id); setView('tasks') } }
     window.addEventListener('hashchange', onHash)
     return () => window.removeEventListener('hashchange', onHash)
@@ -248,10 +259,10 @@ function App() {
         {view === 'coach' && <CoachView tasks={open} goals={goals.filter(goal => goal.ownerId === settings.profileId && !goal.deletedAt)} checkIns={goalCheckIns} settings={settings} onEdit={setEditor} onNew={() => setEditor('new')} />}
         {view === 'focus' && <><SuperFocusView tasks={open} sessions={sessions} onEdit={setEditor} onBack={() => go('today')} run={run} /><PomodoroPanel tasks={open} run={run} /><FocusChoiceTools tasks={tasks} dependencies={dependencies} themes={themeRules.filter(rule => rule.ownerId === settings.profileId)} focusProjects={focusSelection?.projects ?? []} lists={smartLists} ownerId={settings.profileId} date={currentDate} now={nowIso} onEdit={setEditor} run={run} /></>}
         {view === 'history' && <><HistoryView completions={completions} ledger={ledger} sessions={sessions} tasks={tasks} onEdit={id => { const t = tasks.find(x => x.id === id); if (t) setEditor(t) }} run={run} /><TimeTargetsView settings={settings} containers={containers} tasks={tasks} sessions={sessions} run={run} /><AnalyticsView completions={completions} sessions={sessions} /><SessionCorrectionView sessions={sessions} tasks={tasks} run={run} /></>}
-        {view === 'routines' && <><RoutinesView routines={routines} run={run} />{calendarRulesState && <CalendarRulesView key={`${calendarRulesState.ownerId}:${calendarRulesState.datasetId}`} state={calendarRulesState} onPrepareConfiguration={prepareCalendarConfiguration} onPrepareImport={prepareCalendarScheduleImport} onPrepareGeneration={prepareCalendarGeneration} onApply={applyCalendarProposalFromUI} />}</>}
+        {view === 'routines' && <><RoutinesView routines={routines} run={run} />{calendarRulesState && <><CalendarRulesView key={`${calendarRulesState.ownerId}:${calendarRulesState.datasetId}`} state={calendarRulesState} onPrepareConfiguration={prepareCalendarConfiguration} onPrepareImport={prepareCalendarScheduleImport} onPrepareGeneration={prepareCalendarGeneration} onApply={applyCalendarProposalFromUI} /><CalendarImportView key={`ics:${calendarRulesState.ownerId}:${calendarRulesState.datasetId}`} state={calendarRulesState} /></>}</>}
         {view === 'habits' && <HabitsView run={run} />}
         {view === 'goals' && <GoalsView run={run} />}
-        {view === 'journal' && <><ReviewCoachView settings={settings} tasks={tasks} onEdit={setEditor} run={run} /><JournalView run={run} /><SourceLibraryView settings={settings} run={run} /><DetectionInboxView settings={settings} tasks={tasks} onEdit={setEditor} /></>}
+        {view === 'journal' && <><ReviewCoachView settings={settings} tasks={tasks} onEdit={setEditor} run={run} /><JournalView run={run} /><ExternalMessageImportView settings={settings} /><WebCaptureImportView settings={settings} /><SourceLibraryView settings={settings} run={run} /><DetectionInboxView settings={settings} tasks={tasks} onEdit={setEditor} /></>}
         {view === 'settings' && <SettingsView settings={settings} tasks={tasks} lists={smartLists} run={run} />}
         </>}
       </div>

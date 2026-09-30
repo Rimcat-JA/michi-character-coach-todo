@@ -7,6 +7,7 @@ import { calculateScore, uid, type CalendarEvent, type Settings, type Task } fro
 import { assertTripTaskScoreChangeAllowed } from './trip-bundles'
 import { buildCalendarChangePlan, prepareCalendarChangePlan, type CalendarChangePlan, type CalendarChangeScope, type CalendarRulesState, type CurrentCalendarEntity, type ResolvedCalendarSpec, type ResolverConflict } from './calendar-resolver'
 import { emptyCalendarRulesState, mergeScheduleImport, prepareScheduleImport, validateCalendarRulesState, type ScheduleImportPreview } from './calendar-rules-validation'
+import { redactICSForAudit } from './calendar-import-redaction'
 
 const calendarDB = db as typeof db & { calendarRules: EntityTable<CalendarRulesState, 'id'> }
 const table = () => { if (!calendarDB.calendarRules) throw new Error('共通カレンダーの保存先がありません。アプリを更新してください'); return calendarDB.calendarRules }
@@ -85,7 +86,7 @@ function assertProposal(proposal: Proposal) {
 function eventFrom(spec: ResolvedCalendarSpec, id: string, ownerId: string, at: string): CalendarEvent { return { id, ownerId, title: spec.title, kind: spec.eventKind!, startAt: spec.startAt!, endAt: spec.endAt!, timezone: spec.timezone, linkedTaskId: null, createdAt: at } }
 export async function applyCalendarProposalFromUI(input: Proposal, event: Event): Promise<string> {
   humanEvent(event)
-  const proposal = structuredClone(input), key = `calendar:${proposal.id}`, hash = canonicalJSON(proposal)
+  const proposal = structuredClone(input), key = `calendar:${proposal.id}`, hash = await contentDigest(proposal)
   assertProposal(proposal)
   const { digest, ...unsigned } = proposal
   if (await contentDigest(unsigned) !== digest) throw new Error('確認後に案が変わりました')
@@ -98,11 +99,12 @@ export async function applyCalendarProposalFromUI(input: Proposal, event: Event)
     checkContext(proposal, current, state)
     const at = new Date().toISOString()
     if (proposal.kind === 'configuration') {
+      if (proposal.next.sources.some(source => source.ics?.retentionUntil && source.ics.retentionUntil <= at && source.ics.snapshots.some(snapshot => snapshot.originalText !== null))) throw new Error('ICS原本の保持期限に達しました。差分を確認し直してください')
       if (proposal.importPreview?.noOp && canonicalJSON(proposal.next) === canonicalJSON(config(state))) { await db.commands.add({ key, hash, resultId: proposal.id, at }); return proposal.id }
       const next = { ...state, ...structuredClone(proposal.next), revision: state.revision + 1 }
       validateCalendarRulesState(next, current.profileId, current.datasetId)
       await calendarTable.put(next)
-      await db.audits.add({ id: uid(), taskId: null, operation: 'calendar.configuration', at, detail: JSON.stringify({ proposalId: proposal.id, digest: proposal.digest, approvedBy: current.profileId, policyEpoch: proposal.policyEpoch, fromRevision: state.revision, toRevision: next.revision, before: config(state), after: proposal.next, import: proposal.importPreview ? { sourceId: proposal.importPreview.source.id, revision: proposal.importPreview.source.revision, coverageFrom: proposal.importPreview.source.coverageFrom, coverageTo: proposal.importPreview.source.coverageTo, bodyHash: proposal.importPreview.source.bodyHash } : null }) })
+      await db.audits.add({ id: uid(), taskId: null, operation: 'calendar.configuration', at, detail: JSON.stringify({ proposalId: proposal.id, digest: proposal.digest, approvedBy: current.profileId, policyEpoch: proposal.policyEpoch, fromRevision: state.revision, toRevision: next.revision, before: redactICSForAudit(config(state)), after: redactICSForAudit(proposal.next), import: proposal.importPreview ? { sourceId: proposal.importPreview.source.id, revision: proposal.importPreview.source.revision, coverageFrom: proposal.importPreview.source.coverageFrom, coverageTo: proposal.importPreview.source.coverageTo, bodyHash: proposal.importPreview.source.bodyHash } : null }) })
     } else {
       const entities = await currentCalendarEntities(state), rebuilt = buildCalendarChangePlan(state, entities, proposal.plan.from, proposal.plan.to, proposal.plan.scope), { digest: _planDigest, ...expected } = proposal.plan
       if (canonicalJSON(rebuilt) !== canonicalJSON(expected)) throw new ConflictError()

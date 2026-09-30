@@ -11,6 +11,8 @@ $appFolder = Join-Path $destination 'resources\app'
 New-Item -ItemType Directory -Path $appFolder -Force | Out-Null
 Copy-Item -LiteralPath (Join-Path $project 'dist') -Destination (Join-Path $appFolder 'dist') -Recurse
 Copy-Item -LiteralPath (Join-Path $project 'electron') -Destination (Join-Path $appFolder 'electron') -Recurse
+New-Item -ItemType Directory -Path (Join-Path $appFolder 'scripts') -Force | Out-Null
+Copy-Item -LiteralPath (Join-Path $project 'scripts\michi-mcp.mjs') -Destination (Join-Path $appFolder 'scripts\michi-mcp.mjs')
 Copy-Item -LiteralPath (Join-Path $project 'package.json') -Destination (Join-Path $appFolder 'package.json')
 Copy-Item -LiteralPath (Join-Path $project 'README.md') -Destination (Join-Path $destination 'README.txt')
 Move-Item -LiteralPath (Join-Path $destination 'electron.exe') -Destination (Join-Path $destination 'michi.exe')

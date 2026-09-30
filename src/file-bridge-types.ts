@@ -45,6 +45,7 @@ export type FileBridgeApplicationReceipt = {
 }
 export type FileBridgeSnapshotTask = { id: string; revision: number; title: string; notes: string; scheduledDate: string | null; containerId: string | null }
 export interface FileBridgeGateway {
+  mcpConfiguration?(): Promise<{mcpServers:{michi:{command:string;args:string[];env:{ELECTRON_RUN_AS_NODE:'1'}}}}>
   status(): Promise<FileBridgeStatus>
   configure(request: FileBridgeConfigure): Promise<FileBridgeStatus>
   disconnect(request: { clientId: string }): Promise<FileBridgeStatus>

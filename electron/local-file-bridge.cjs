@@ -141,7 +141,7 @@ async function createLocalFileBridge({ root, journalDirectory, signingKey, regis
   await authorize()
   const regRecord = signed(reg)
   await write('registration.json', regRecord)
-  async function currentRegistration() { await authorize(); const disk = verify(JSON.parse((await read('registration.json')).toString('utf8'))); if (canonical(disk) !== canonical(reg)) fail('REGISTRATION_CHANGED') }
+  async function currentRegistration() { await authorize(); try { await read('revoked.json'); fail('AUTHORITY_CHANGED') } catch (error) { if (error.code !== 'ENOENT') throw error }; const disk = verify(JSON.parse((await read('registration.json')).toString('utf8'))); if (canonical(disk) !== canonical(reg)) fail('REGISTRATION_CHANGED') }
   async function exportSnapshot(tasks) {
     await currentRegistration()
     if (!reg.client.grant.keys.includes('tasks:read') || !Array.isArray(tasks) || tasks.length > 100 || new Set(tasks.map(task => task.id)).size !== tasks.length) fail('SCOPE_DENIED')
@@ -283,6 +283,7 @@ async function createLocalFileBridge({ root, journalDirectory, signingKey, regis
     return results
   }
   function clearAuthorities() { pending.clear() }
-  return Object.freeze({ exportSnapshot, readSnapshot, prepareCommand, approve, execute, scanInbox, readResult: async id => { await currentRegistration(); return resultFor(id) }, clearAuthorities })
+  async function revoke() { clearAuthorities(); await write('revoked.json', signed({ schema_version: '1', client_id: reg.client.id, dataset_id: reg.dataset_id, revoked_at: new Date().toISOString() })) }
+  return Object.freeze({ exportSnapshot, readSnapshot, prepareCommand, approve, execute, scanInbox, readResult: async id => { await currentRegistration(); return resultFor(id) }, clearAuthorities, revoke })
 }
 module.exports = { createLocalFileBridge, parseEnvelope, canonicalFileJSON: canonical, fileCommandDigest: digest, validateFileBridgeRegistration: validateRegistration }

@@ -30,6 +30,7 @@ const factFields: Record<ScheduleFact['kind'], string[]> = {
   open: ['calendarId', 'date'], closed: ['calendarId', 'date'], substitute_pattern: ['calendarId', 'date', 'patternWeekday', 'mode'],
   reschedule: ['activityId', 'originalDate', 'newDate'], cancel: ['activityId', 'originalDate'],
   roster_assignment: ['activityId', 'externalId', 'personRef', 'published', 'status', 'startAt', 'endAt'],
+  external_event: ['activityId', 'externalId', 'status', 'startAt', 'endAt', 'timezone', 'allDay', 'title'],
 }
 function fact(raw: unknown, bound = true): asserts raw is ScheduleFact {
   if (!raw || typeof raw !== 'object' || !('kind' in raw)) throw new Error('予定の事実が不正です')
@@ -46,6 +47,7 @@ function fact(raw: unknown, bound = true): asserts raw is ScheduleFact {
   if ('newDate' in value) date(value.newDate)
   if (value.kind === 'substitute_pattern') { integer(value.patternWeekday, 0, 6); choice(value.mode, ['replace', 'add']) }
   if (value.kind === 'roster_assignment') { id(value.externalId); text(value.personRef, '勤務表の本人識別子', 200); bool(value.published); choice(value.status, ['scheduled', 'cancelled']); instant(value.startAt); instant(value.endAt); if (String(value.startAt) >= String(value.endAt) || Date.parse(String(value.endAt)) - Date.parse(String(value.startAt)) > 7 * 86400000) throw new Error('勤務時間の順序・長さが不正です') }
+  if (value.kind === 'external_event') { id(value.externalId); choice(value.status, ['scheduled', 'cancelled']); instant(value.startAt); instant(value.endAt); zone(value.timezone); bool(value.allDay); text(value.title, 'ICS予定名'); if (String(value.startAt) >= String(value.endAt) || Date.parse(String(value.endAt)) - Date.parse(String(value.startAt)) > 7 * 86400000) throw new Error('ICS予定の順序・長さが不正です') }
 }
 function spec(value: unknown): asserts value is ResolvedCalendarSpec {
   object(value, ['generationKey', 'triggerKey', 'stepKey', 'contextId', 'bindingId', 'activityId', 'ruleId', 'kind', 'title', 'scheduledDate', 'dueDate', 'score', 'startAt', 'endAt', 'eventKind', 'timezone', 'sourceRefs', 'originBasis'])
@@ -76,8 +78,32 @@ export function validateCalendarRulesState(value: unknown, ownerId?: string, dat
   value.calendars.forEach(row => { id(row.contextId); text(row.name, '本人選択カレンダー'); weekdays(row.weekdays); range(row.validFrom, row.validTo); revision(row.revision) })
   rows(value.activities, ['id', 'contextId', 'bindingId', 'calendarId', 'title', 'eventKind', 'weekdays', 'startTime', 'endTime', 'endDayOffset', 'validFrom', 'validTo', 'revision'], 1000)
   value.activities.forEach(row => { id(row.contextId); id(row.bindingId); id(row.calendarId); text(row.title, '活動名'); choice(row.eventKind, ['class', 'meeting', 'other']); weekdays(row.weekdays); clock(row.startTime); clock(row.endTime); integer(row.endDayOffset, 0, 6); range(row.validFrom, row.validTo); revision(row.revision); if (row.endDayOffset === 0 && String(row.startTime) >= String(row.endTime)) throw new Error('開始・終了の順序を確認してください') })
-  rows(value.sources, ['id', 'contextId', 'title', 'authorityScope', 'coverageFrom', 'coverageTo', 'status', 'revision', 'importedAt', 'bodyHash'], 1000)
-  value.sources.forEach(row => { id(row.contextId); text(row.title, '公式資料名'); choice(row.authorityScope, ['calendar', 'activity', 'roster']); range(row.coverageFrom, row.coverageTo); choice(row.status, ['current', 'stale']); revision(row.revision); instant(row.importedAt); if (typeof row.bodyHash !== 'string' || !/^[a-f0-9]{64}$/.test(row.bodyHash)) throw new Error('資料の内容ハッシュが不正です') })
+  array(value.sources, 1000)
+  for (const source of value.sources) { if (!source || typeof source !== 'object') throw new Error('資料が不正です'); object(source, ['id', 'contextId', 'title', 'authorityScope', 'coverageFrom', 'coverageTo', 'status', 'revision', 'importedAt', 'bodyHash', ...('ics' in source ? ['ics'] : [])]); id(source.id) }
+  if (new Set(value.sources.map(source => (source as Row).id)).size !== value.sources.length) throw new Error('資料IDが重複しています')
+  const sourceRows = value.sources as Row[]
+  let originalBytes = 0
+  for (const source of sourceRows) if (source.ics !== undefined) {
+    object(source.ics, ['feedId', 'readOnly', 'retentionUntil', 'snapshots', 'components']); text(source.ics.feedId, 'ICS取込元', 120); if (source.ics.readOnly !== true || source.authorityScope !== 'activity') throw new Error('ICSは読取専用の活動資料です')
+    if (source.ics.retentionUntil !== null) instant(source.ics.retentionUntil)
+    array(source.ics.snapshots, 20); if (!source.ics.snapshots.length) throw new Error('ICS原本の記録がありません')
+    let prior = 0
+    for (const snapshot of source.ics.snapshots) {
+      object(snapshot, ['revision', 'sha256', 'originalText', 'importedAt', 'fromDate', 'toDate']); revision(snapshot.revision); if (Number(snapshot.revision) <= prior || Number(snapshot.revision) > Number(source.revision)) throw new Error('ICS原本の版が不正です'); prior = Number(snapshot.revision)
+      if (typeof snapshot.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(snapshot.sha256)) throw new Error('ICS原本hashが不正です')
+      if (snapshot.originalText !== null) { if (typeof snapshot.originalText !== 'string' || !snapshot.originalText || new TextEncoder().encode(snapshot.originalText).length > 1048576) throw new Error('ICS原本は1MiB以内です'); originalBytes += new TextEncoder().encode(snapshot.originalText).length }
+      instant(snapshot.importedAt); range(snapshot.fromDate, snapshot.toDate)
+    }
+    const latest = source.ics.snapshots[source.ics.snapshots.length - 1] as Row
+    if (latest.revision !== source.revision || latest.sha256 !== source.bodyHash) throw new Error('ICS原本の最新版と資料hashが一致しません')
+    array(source.ics.components, 1000); const componentKeys = new Set<string>()
+    for (const component of source.ics.components) {
+      object(component, ['uid', 'recurrenceId', 'sequence', 'dtstamp', 'lastModified', 'digest']); if (typeof component.uid !== 'string' || !/^sha256:[a-f0-9]{64}$/.test(component.uid)) throw new Error('保存するICS UIDは匿名hashです'); if (component.recurrenceId !== null) text(component.recurrenceId, 'ICS RECURRENCE-ID', 200); integer(component.sequence, 0, 2147483647); instant(component.dtstamp); if (component.lastModified !== null) instant(component.lastModified); if (typeof component.digest !== 'string' || !/^[a-f0-9]{64}$/.test(component.digest)) throw new Error('ICS component hashが不正です')
+      const key = JSON.stringify([component.uid, component.recurrenceId]); if (componentKeys.has(key)) throw new Error('ICS componentが重複しています'); componentKeys.add(key)
+    }
+  }
+  if (originalBytes > 8 * 1048576) throw new Error('保持するICS原文は全体で8MiB以内です')
+  sourceRows.forEach(row => { id(row.contextId); text(row.title, '公式資料名'); choice(row.authorityScope, ['calendar', 'activity', 'roster']); range(row.coverageFrom, row.coverageTo); choice(row.status, ['current', 'stale']); revision(row.revision); instant(row.importedAt); if (typeof row.bodyHash !== 'string' || !/^[a-f0-9]{64}$/.test(row.bodyHash)) throw new Error('資料の内容ハッシュが不正です') })
   array(value.facts); value.facts.forEach(row => fact(row)); if (new Set(value.facts.map(row => (row as ScheduleFact).id)).size !== value.facts.length) throw new Error('事実IDが重複しています')
   array(value.rules, 1000)
   const ruleKeys = ['id', 'contextId', 'bindingId', 'calendarId', 'title', 'originBasis', 'enabled', 'validFrom', 'validTo', 'revision', 'steps', 'trigger']
@@ -128,6 +154,7 @@ export function validateCalendarRulesState(value: unknown, ownerId?: string, dat
   for (const entry of state.facts) {
     const source = state.sources.find(row => row.id === entry.sourceId && row.contextId === entry.contextId), context = state.contexts.find(row => row.id === entry.contextId)
     if (!source || !context) throw new Error('事実の資料参照が不正です')
+    if (entry.kind === 'external_event' && !source.ics) throw new Error('外部予定は本人が選んだ読取専用ICS資料に限ります')
     const target = 'calendarId' in entry ? state.calendars.find(row => row.id === entry.calendarId) : state.activities.find(row => row.id === entry.activityId)
     if (!target || target.contextId !== entry.contextId || source.authorityScope !== ('calendarId' in entry ? 'calendar' : entry.kind === 'roster_assignment' ? 'roster' : 'activity')) throw new Error('事実の適用対象・資料の範囲が不正です')
     const factDates = 'date' in entry ? [entry.date] : 'originalDate' in entry ? [entry.originalDate, ...(entry.kind === 'reschedule' ? [entry.newDate] : [])] : [calendarDateAt(entry.startAt, context.timezone)]

@@ -141,11 +141,17 @@ async function createFileBridgeService({ agentDirectory, journalDirectory, signi
   }
   async function invalidate() {
     if (initializing) await initializing.catch(() => null)
+    const active = connection, errors = []
+    active?.bridge.clearAuthorities(); entries.clear()
     for (const lease of leases.values()) if (!lease.settled) {
-      const actual = receiptFor(lease, await getReceipt(receiptKey(lease.prepared.command.command_id)))
-      if (actual) lease.committed.resolve(actual.file); else lease.committed.reject(new Error('AUTHORITY_CHANGED'))
+      try {
+        const actual = receiptFor(lease, await getReceipt(receiptKey(lease.prepared.command.command_id)))
+        if (actual) lease.committed.resolve(actual.file); else lease.committed.reject(new Error('AUTHORITY_CHANGED'))
+      } catch (error) { lease.committed.reject(new Error('RECEIPT_UNAVAILABLE')); errors.push(error) }
     }
-    connection?.bridge.clearAuthorities(); connection = null; entries.clear(); await saveConfiguration(null)
+    try { await active?.bridge.revoke() } catch (error) { errors.push(error) }
+    finally { connection = null; try { await saveConfiguration(null) } catch (error) { errors.push(error) } }
+    if (errors.length) throw new AggregateError(errors, '外部接続の取消中にエラーが発生しました')
   }
   async function disconnect(request, nativeProof) {
     if (!exact(request, ['clientId']) || !await verifyNativeProof('disconnect', request.clientId, nativeProof)) fail('HUMAN_APPROVAL_REQUIRED')

@@ -7,14 +7,14 @@ import crypto from 'node:crypto'
 import { createRequire } from 'node:module'
 const { createFileBridgeService } = createRequire(import.meta.url)('./file-bridge-service.cjs')
 
-async function fixture(t) {
+async function fixture(t, { getReceiptOverride } = {}) {
   const root = await fs.mkdtemp(path.join(await fs.realpath(os.tmpdir()), 'michi-filebridge-service-'))
   t.after(async () => { const resolved = path.resolve(root); assert.equal(path.dirname(resolved), path.resolve(await fs.realpath(os.tmpdir()))); assert.ok(path.basename(resolved).startsWith('michi-filebridge-service-')); await fs.rm(resolved, { recursive: true, force: true }) })
   const settings = { profileId: 'owner', datasetId: crypto.randomUUID(), aiEnabled: true, changePolicy: { epoch: 1, sourcePermissionRevision: 1, aiChangesEnabled: true } }
   const task = { id: crypto.randomUUID(), revision: 1, title: '正式タスク', notes: '本人のメモ', scheduledDate: '2026-10-01', containerId: null, deletedAt: null }
   const receipts = new Map(), proofs = new Map(); let configuration = null
   const native = (kind, reference = '') => { const nonce = crypto.randomUUID(); proofs.set(nonce, { kind, reference }); return nonce }
-  const service = await createFileBridgeService({ agentDirectory: path.join(root, 'agents'), journalDirectory: path.join(root, 'private'), signingKey: Buffer.alloc(32, 7), getSettings: async () => settings, getTasks: async ids => ids.includes(task.id) ? [task] : [], getReceipt: async id => receipts.get(id), loadConfiguration: async () => configuration, saveConfiguration: async value => { configuration = value }, verifyNativeProof: (kind, reference, nonce) => { const proof = proofs.get(nonce); proofs.delete(nonce); return proof?.kind === kind && proof?.reference === reference } })
+  const service = await createFileBridgeService({ agentDirectory: path.join(root, 'agents'), journalDirectory: path.join(root, 'private'), signingKey: Buffer.alloc(32, 7), getSettings: async () => settings, getTasks: async ids => ids.includes(task.id) ? [task] : [], getReceipt: async id => getReceiptOverride ? getReceiptOverride(id, receipts) : receipts.get(id), loadConfiguration: async () => configuration, saveConfiguration: async value => { configuration = value }, verifyNativeProof: (kind, reference, nonce) => { const proof = proofs.get(nonce); proofs.delete(nonce); return proof?.kind === kind && proof?.reference === reference } })
   const config = { ownerId: settings.profileId, datasetId: settings.datasetId, policyEpoch: 1, sourcePermissionRevision: 1, intendedHost: 'codex', taskIds: [task.id], fields: ['title', 'notes', 'scheduled_date'], lifetimeHours: 24 }
   await service.configure(config, native('configure'))
   const status = await service.exportSnapshot({ tasks: [{ id: task.id, title: '偽装タイトル' }] })
@@ -86,4 +86,17 @@ test('AI OFF after a lease cancels an uncommitted attempt and disables the clien
   assert.equal((await f.service.status()).connected, false)
   const result = await f.service.cancelApplication({ leaseId: lease.leaseId, reference: binding.reference })
   assert.equal(result.state, 'unknown'); assert.equal(f.receipts.size, 0)
+})
+test('receipt read failure still revokes the external copy and disables the saved connection', async t => {
+  let unreadable = false
+  const f = await fixture(t, { getReceiptOverride: async (id, receipts) => { if (unreadable) throw new Error('DB unavailable'); return receipts.get(id) } })
+  const { binding } = await f.command()
+  await f.service.authorizeApplication(binding, f.native('approve', binding.reference))
+  unreadable = true
+  await assert.rejects(f.service.invalidate(), /取消中にエラー/)
+  assert.equal((await f.service.status()).connected, false)
+  const marker = JSON.parse(await fs.readFile(path.join(f.status.root, 'revoked.json'), 'utf8'))
+  assert.equal(marker.value.client_id, f.status.registration.client.id)
+  assert.match(marker.signature, /^[a-f0-9]{64}$/)
+  assert.equal(f.receipts.size, 0)
 })
