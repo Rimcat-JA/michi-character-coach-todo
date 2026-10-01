@@ -46,6 +46,13 @@ function validDay(day) {
 }
 function clone(value) { return JSON.parse(JSON.stringify(value)) }
 
+function retainedEntries(entries, day) {
+  const previousMonth = new Date(`${day.slice(0, 7)}-01T12:00:00`)
+  previousMonth.setMonth(previousMonth.getMonth() - 1)
+  const keepFrom = previousMonth.getFullYear() < 1 ? '0001-01-01' : dateKey(previousMonth)
+  return entries.filter(entry => entry.outcome === 'pending' || entry.day >= keepFrom || entry.settledDay >= keepFrom)
+}
+
 function validateState(value) {
   if (!keysAre(value, ['version', 'provider', 'lastDay', 'limits', 'entries']) || value.version !== 1 ||
     value.provider !== 'openrouter' || !validDay(value.lastDay) || !Array.isArray(value.entries) || value.entries.length > 1000000) {
@@ -151,16 +158,14 @@ function createAIBudget({ filePath, now = () => new Date() }) {
       next.lastDay = day
       // A crashed request may already have been billed; never release it as unused.
       for (const entry of next.entries) if (entry.outcome === 'pending') { entry.outcome = 'timeout'; entry.settledDay = day }
+      next.entries = retainedEntries(next.entries, day)
       await commit(next)
     }
     if (day < state.lastDay) throw new Error('端末の日付がAI利用記録より前です。日付を確認してください')
     if (day > state.lastDay) {
       const next = clone(state)
       next.lastDay = day
-      const previousMonth = new Date(`${day.slice(0, 7)}-01T12:00:00`)
-      previousMonth.setMonth(previousMonth.getMonth() - 1)
-      const keepFrom = dateKey(previousMonth)
-      next.entries = next.entries.filter(entry => entry.outcome === 'pending' || entry.day >= keepFrom || entry.settledDay >= keepFrom)
+      next.entries = retainedEntries(next.entries, day)
       await commit(next)
     }
     return state
