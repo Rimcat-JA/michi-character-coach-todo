@@ -5,6 +5,7 @@ import { changePolicyFor } from './change-set'
 import { validateDate } from './domain'
 import { defaultSourcePermissions, importLocalSource, sourceSpans } from './source-library'
 import { defaultSourceRetention } from './retention-defaults'
+import { onFeatureHidden } from './features'
 
 export type ExternalImportProvider = 'line' | 'discord'
 export type ImportedMessageSpan = { id: string; index: number; start: number; end: number; text: string; kind: 'body' | 'quoted' | 'uncertain' }
@@ -23,7 +24,10 @@ export type ExternalImportInput = { provider: ExternalImportProvider; filename: 
 export type ExternalImportResult = { sourceIds: string[]; created: number; duplicates: number; suppressed: number; notice: string }
 type ExternalImportReceipt = { version: 1; ownerId: string; datasetId: string; provider: ExternalImportProvider; fileSha256: string; messageDigest: string; sourceId: string }
 type RawMessage = Omit<ImportedMessagePreview, 'id' | 'bodySha256' | 'spans'>
-const prepared = new WeakMap<PreparedExternalMessageImport, Map<string, string>>()
+let prepared = new WeakMap<PreparedExternalMessageImport, Map<string, string>>()
+/** Hiding the feature discards unsaved previews and speaker confirmations. */
+export function clearExternalImportAuthority() { prepared = new WeakMap() }
+onFeatureHidden('externalImport', clearExternalImportAuthority)
 const maxMessages = 1000, maxSelected = 200
 const normalized = (value: string) => value.replace(/\r\n?/g, '\n').normalize('NFC')
 const object = (value: unknown): value is Record<string, unknown> => Boolean(value && typeof value === 'object' && !Array.isArray(value))

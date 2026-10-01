@@ -16,6 +16,14 @@ function redactedNotes(stored, wanted) {
   for (const line of wanted.split('\n')) { while (index < lines.length && lines[index] !== line) index++; if (index++ >= lines.length) return null }
   return wanted
 }
+const days = (a, b) => Math.abs(Date.parse(`${a}T00:00:00Z`) - Date.parse(`${b}T00:00:00Z`)) / 86400000
+/** N09 table (or the legacy taskUpdate) must itself allow automatic notes/schedule changes within this shift. */
+function n09Automatic(p, fields, shift) {
+  const rules = Array.isArray(p.operations) ? p.operations : null, mode = operation => rules ? rules.find(rule => rule?.operation === operation)?.mode : p.taskUpdate
+  if ([...new Set(fields.map(field => field === 'notes' ? 'task.text' : 'task.schedule'))].some(operation => mode(operation) !== 'auto_within_bounds')) return false
+  const limit = rules ? rules.find(rule => rule?.operation === 'task.schedule')?.max_schedule_days_delta : p.bounds?.maxScheduledDayShift
+  return !fields.includes('scheduled_date') || Number.isInteger(limit) && Number.isInteger(shift) && shift <= limit
+}
 
 /** Coordinates the durable file claim BEFORE the renderer's atomic DB write. */
 async function createFileBridgeService({ agentDirectory, journalDirectory, signingKey, getSettings, getTasks, getReceipt, loadConfiguration, saveConfiguration, verifyNativeProof, leaseMilliseconds = 60000 }) {
@@ -69,18 +77,23 @@ async function createFileBridgeService({ agentDirectory, journalDirectory, signi
     const context = await currentContext(current.registration)
     if (!context.enabled || context.ownerId !== current.registration.owner_id || context.datasetId !== current.registration.dataset_id || context.policyEpoch !== current.registration.policy_epoch || context.sourcePermissionRevision !== current.registration.source_permission_revision || Date.parse(current.registration.client.grant.expires_at) <= Date.now()) { await invalidate(); return status() }
     const results = [...new Map(current.results.map(result => [result.command_id, result])).values()].slice(-100)
-    return { version: 1, available: true, connected: true, root: current.root, registration: structuredClone(current.registration), snapshot: current.snapshot, results, notice: '手動ポイント・期限・完了・周期は変更できません。登録済み範囲内の変更も本人承認が必要です。' }
+    const automatic = current.registration.client.grant.mutation_mode === 'auto_within_bounds'
+    return { version: 1, available: true, connected: true, root: current.root, registration: structuredClone(current.registration), snapshot: current.snapshot, results, notice: automatic ? '手動ポイント・期限・完了・周期は変更できません。本人が許可した範囲内のメモ・予定日変更だけを受信確認時に自動適用し、それ以外は本人承認を待ちます。' : '手動ポイント・期限・完了・周期は変更できません。登録済み範囲内の変更も本人承認が必要です。' }
   }
   async function configure(request, nativeProof) {
     if (!await verifyNativeProof('configure', '', nativeProof)) fail('HUMAN_APPROVAL_REQUIRED')
-    if (!exact(request, ['ownerId', 'datasetId', 'policyEpoch', 'sourcePermissionRevision', 'intendedHost', 'taskIds', 'fields', 'lifetimeHours']) || !Number.isInteger(request.lifetimeHours) || request.lifetimeHours < 1 || request.lifetimeHours > 168) fail('CONFIG_INVALID')
+    const configKeys = ['ownerId', 'datasetId', 'policyEpoch', 'sourcePermissionRevision', 'intendedHost', 'taskIds', 'fields', 'lifetimeHours']
+    if (!exact(request, configKeys) && !exact(request, [...configKeys, 'automation']) || !Number.isInteger(request.lifetimeHours) || request.lifetimeHours < 1 || request.lifetimeHours > 168) fail('CONFIG_INVALID')
+    const automation = request.automation ?? null
+    if (automation !== null && (!exact(automation, ['maxScheduleShiftDays', 'maxOperationsPerDay']) || !Number.isInteger(automation.maxScheduleShiftDays) || automation.maxScheduleShiftDays < 0 || automation.maxScheduleShiftDays > 7 || !Number.isInteger(automation.maxOperationsPerDay) || automation.maxOperationsPerDay < 1 || automation.maxOperationsPerDay > 20 || !Array.isArray(request.fields) || !request.fields.length || request.fields.some(field => !['notes', 'scheduled_date'].includes(field)))) fail('AUTOMATION_SCOPE')
     await ensure()
     const settings = await getSettings(), current = policy(settings)
     if (request.ownerId !== settings.profileId || request.datasetId !== settings.datasetId || request.policyEpoch !== current.epoch || request.sourcePermissionRevision !== current.sourcePermissionRevision || !settings.aiEnabled || !current.aiChangesEnabled) fail('AUTHORITY_CHANGED')
+    if (automation !== null && !n09Automatic(current, request.fields, automation.maxScheduleShiftDays)) fail('AUTOMATION_NOT_GRANTED')
     if (!Array.isArray(request.taskIds) || request.taskIds.length > 100 || request.taskIds.some(id => !uuid(id)) || new Set(request.taskIds).size !== request.taskIds.length) fail('TASK_SCOPE')
     const tasks = await getTasks(request.taskIds)
     if (tasks.length !== request.taskIds.length || tasks.some(task => task.deletedAt)) fail('TASK_SCOPE')
-    const id = crypto.randomUUID(), registration = { schema_version: '1', owner_id: request.ownerId, dataset_id: request.datasetId, policy_epoch: current.epoch, source_permission_revision: current.sourcePermissionRevision, task_ids: [...request.taskIds], client: { id, dataset_id: request.datasetId, intended_host: request.intendedHost, transport: 'stdio', status: 'active', revision: 1, grant_epoch: 1, grant: { keys: ['tasks:read', 'tasks:prepare', 'changes:submit', 'commands:read'], project_ids: [], fields: [...request.fields], mutation_mode: 'require_approval', max_operations_per_day: 20, max_schedule_shift_days: 7, max_point_delta: 0, allow_external_context: false, allow_handoffs: false, expires_at: new Date(Date.now() + request.lifetimeHours * 3600000).toISOString() } } }
+    const id = crypto.randomUUID(), registration = { schema_version: '1', owner_id: request.ownerId, dataset_id: request.datasetId, policy_epoch: current.epoch, source_permission_revision: current.sourcePermissionRevision, task_ids: [...request.taskIds], client: { id, dataset_id: request.datasetId, intended_host: request.intendedHost, transport: 'stdio', status: 'active', revision: 1, grant_epoch: 1, grant: { keys: ['tasks:read', 'tasks:prepare', 'changes:submit', 'commands:read'], project_ids: [], fields: [...request.fields], mutation_mode: automation ? 'auto_within_bounds' : 'require_approval', max_operations_per_day: 20, max_schedule_shift_days: 7, max_point_delta: 0, allow_external_context: false, allow_handoffs: false, expires_at: new Date(Date.now() + request.lifetimeHours * 3600000).toISOString(), ...(automation ? { automation: { max_schedule_shift_days: automation.maxScheduleShiftDays, max_operations_per_day: automation.maxOperationsPerDay } } : {}) } } }
     validateFileBridgeRegistration(registration)
     await invalidate()
     const configuration = { root: path.join(agentDirectory, id), registration }
@@ -112,20 +125,42 @@ async function createFileBridgeService({ agentDirectory, journalDirectory, signi
     return { status: await status(), entries: results }
   }
   function deferred() { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no }); return { promise, resolve, reject } }
+  const validBinding = binding => exact(binding, ['reference', 'fileDigest', 'applicationDigest', 'ownerId', 'datasetId', 'policyEpoch', 'sourcePermissionRevision']) && digest(binding.fileDigest) && digest(binding.applicationDigest)
   async function authorizeApplication(binding, nativeProof) {
-    if (!exact(binding, ['reference', 'fileDigest', 'applicationDigest', 'ownerId', 'datasetId', 'policyEpoch', 'sourcePermissionRevision']) || !digest(binding.fileDigest) || !digest(binding.applicationDigest)) fail('LEASE_INVALID')
+    if (!validBinding(binding)) fail('LEASE_INVALID')
     if (!await verifyNativeProof('approve', binding.reference, nativeProof)) fail('HUMAN_APPROVAL_REQUIRED')
+    return issueLease(binding, false)
+  }
+  /** No native click: only main's own signed auto grant, its bounds/quota and the current N09 table can authorize this. */
+  async function authorizeAutomaticApplication(binding) {
+    if (!validBinding(binding)) fail('LEASE_INVALID')
+    const entry = entries.get(binding.reference), current = await ensure()
+    if (!entry || !current || entry.registration !== current.registration) fail('LEASE_INVALID')
+    const command = entry.prepared.command, grant = entry.registration.client.grant, fields = Object.keys(command.payload)
+    if (grant.mutation_mode !== 'auto_within_bounds' || !grant.automation || command.type !== 'task.update' || !fields.length || fields.some(field => !['notes', 'scheduled_date'].includes(field) || !grant.fields.includes(field))) fail('AUTOMATION_NOT_GRANTED')
+    let shift = null
+    if (fields.includes('scheduled_date')) {
+      const [task] = await getTasks([command.target_id])
+      if (!task || task.deletedAt || !task.scheduledDate || !command.payload.scheduled_date) fail('AUTO_SCHEDULE_BOUND')
+      shift = days(task.scheduledDate, command.payload.scheduled_date)
+      if (shift > grant.automation.max_schedule_shift_days) fail('AUTO_SCHEDULE_BOUND')
+    }
+    const settings = await getSettings(), p = policy(settings)
+    if (!settings.aiEnabled || !p.aiChangesEnabled || p.epoch !== entry.registration.policy_epoch || !n09Automatic(p, fields, shift)) fail('AUTOMATION_NOT_GRANTED')
+    return issueLease(binding, true)
+  }
+  async function issueLease(binding, automatic) {
     const entry = entries.get(binding.reference), current = await ensure()
     if (!entry || !current || entry.registration !== current.registration) fail('LEASE_INVALID')
     const prepared = entry.prepared, reg = entry.registration
     if (prepared.digest !== binding.fileDigest || prepared.ownerId !== binding.ownerId || prepared.datasetId !== binding.datasetId || prepared.policyEpoch !== binding.policyEpoch || prepared.sourcePermissionRevision !== binding.sourcePermissionRevision || [...leases.values()].some(value => value.prepared.command.command_id === prepared.command.command_id && !value.settled)) fail('LEASE_INVALID')
     const leaseId = crypto.randomUUID(), ready = deferred(), committed = deferred(), expiresAt = new Date(Math.min(Date.now() + leaseMilliseconds, Date.parse(prepared.expiresAt))).toISOString()
     committed.promise.catch(() => {})
-    const lease = { ...entry, binding: structuredClone(binding), public: { ...binding, version: 1, leaseId, clientId: reg.client.id, registrationRevision: reg.client.revision, grantEpoch: reg.client.grant_epoch, expiresAt }, ready, committed, settled: false, work: null, timer: null }
+    const lease = { ...entry, binding: structuredClone(binding), public: { ...binding, version: 1, leaseId, clientId: reg.client.id, registrationRevision: reg.client.revision, grantEpoch: reg.client.grant_epoch, expiresAt, automatic }, ready, committed, settled: false, work: null, timer: null }
     leases.set(leaseId, lease)
     const appProof = Object.freeze({ id: crypto.randomUUID() }); proofs.add(appProof)
     try {
-      const approval = await entry.bridge.approve(prepared, appProof)
+      const approval = await entry.bridge.approve(prepared, appProof, automatic)
       lease.timer = setTimeout(() => { committed.reject(new Error('LEASE_EXPIRED')); ready.reject(new Error('LEASE_EXPIRED')) }, Math.max(1, Date.parse(expiresAt) - Date.now())); lease.timer.unref?.()
       lease.work = entry.bridge.execute(prepared, approval).then(result => { lease.settled = true; clearTimeout(lease.timer); current.results.push(result); ready.reject(new Error(result.state === 'applied' ? 'ALREADY_APPLIED' : 'APPLICATION_UNKNOWN')); return result }, error => { lease.settled = true; clearTimeout(lease.timer); ready.reject(error); throw error })
       lease.work.catch(() => {})
@@ -167,7 +202,7 @@ async function createFileBridgeService({ agentDirectory, journalDirectory, signi
     if (connection && request.clientId !== connection.registration.client.id) fail('AUTHORITY_CHANGED')
     await invalidate(); return status()
   }
-  return Object.freeze({ status, configure, disconnect, exportSnapshot, scanInbox, authorizeApplication, recordApplied, cancelApplication, invalidate })
+  return Object.freeze({ status, configure, disconnect, exportSnapshot, scanInbox, authorizeApplication, authorizeAutomaticApplication, recordApplied, cancelApplication, invalidate })
 }
 
 module.exports = { createFileBridgeService }

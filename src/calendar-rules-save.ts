@@ -88,11 +88,15 @@ export async function prepareCalendarScheduleImport(contextId: string, input: un
   return register<CalendarConfigurationProposal>({ ...await captureBase(state), kind: 'configuration', next: config(proposed), preview: plan.creates.sort((a, b) => (a.scheduledDate ?? a.startAt!).localeCompare(b.scheduledDate ?? b.startAt!)).slice(0, 10), conflicts: plan.conflicts, importPreview })
 }
 export async function prepareCalendarGeneration(from: string, to: string, scope: CalendarChangeScope = { kind: 'all_uncompleted' }): Promise<CalendarGenerationProposal> {
+  const current = await db.settings.get('main')
+  if (current && changePolicyFor(current).stops?.routines) throw new Error(ROUTINES_STOPPED)
   const state = await loadCalendarRulesState(), entities = await currentCalendarEntities(state)
   return register<CalendarGenerationProposal>({ ...await captureBase(state), kind: 'generation', plan: await prepareCalendarChangePlan(state, entities, from, to, scope) })
 }
+const ROUTINES_STOPPED = 'ルーティン・繰り返しの生成は停止中です。設定 > 自動化 から本人が再開してください'
 function checkContext(proposal: Proposal, current: Settings, state: CalendarRulesState) {
   const policy = changePolicyFor(current)
+  if (proposal.kind === 'generation' && policy.stops?.routines) throw new Error(ROUTINES_STOPPED)
   if (current.profileId !== proposal.ownerId || current.datasetId !== proposal.datasetId || state.ownerId !== proposal.ownerId || state.datasetId !== proposal.datasetId || state.revision !== proposal.stateRevision || policy.epoch !== proposal.policyEpoch || policy.sourcePermissionRevision !== proposal.sourcePermissionRevision || Date.parse(proposal.expiresAt) <= Date.now()) throw new Error('本人・データセット・設定・版または期限が変わりました。差分を作り直してください')
 }
 function assertProposal(proposal: Proposal) {

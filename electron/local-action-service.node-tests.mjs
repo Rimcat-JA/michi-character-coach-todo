@@ -106,3 +106,18 @@ test('new native registration after an owner change never carries definitions fr
   await assert.rejects(f.service.prepare({actionId:first.definition.id,event:'owner-click',params:{}}),{code:'UNREGISTERED_ACTION'})
   assert.equal(f.spawns(),0)
 }))
+test('N09 local_action.run=deny (or legacy taskUpdate=deny) disables registration and execution before spawn',async()=>{
+  for(const deny of [policy=>({...policy,operations:[{operation:'local_action.run',mode:'deny'}]}),policy=>({...policy,taskUpdate:'deny'})])await fixture(async f=>{
+    const inspected=await f.register(),prepared=await f.service.prepare({actionId:inspected.definition.id,event:'owner-click',params:{}})
+    f.settings.changePolicy=deny(f.settings.changePolicy)
+    assert.equal((await f.service.status()).enabled,false)
+    await assert.rejects(f.service.inspectDefinition(f.input,f.proof('configure','inspect')),{code:'LOCAL_ACTIONS_DISABLED'})
+    await assert.rejects(f.service.execute({reference:prepared.reference,digest:prepared.review.digest},f.proof('approve',prepared.reference)))
+    assert.equal(f.spawns(),0)
+  })
+  await fixture(async f=>{
+    f.settings.changePolicy={...f.settings.changePolicy,operations:[{operation:'local_action.run',mode:'require_approval'}]}
+    const inspected=await f.register(),prepared=await f.service.prepare({actionId:inspected.definition.id,event:'owner-click',params:{}})
+    assert.equal((await f.service.execute({reference:prepared.reference,digest:prepared.review.digest},f.proof('approve',prepared.reference))).status,'succeeded')
+  })
+})

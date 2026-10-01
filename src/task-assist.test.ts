@@ -51,6 +51,7 @@ describe('タスク入力補助の確定境界', () => {
   })
 
   it('内容差し替えは保存せず、同じ承認の再送でタスクと記録を増やさない', async () => {
+    await db.settings.update('main', { aiEnabled: true })
     const prepared = await prepareAssistedTasks(draftsFromText('返却25pt\n連絡10pt', '2026-09-29'), 'ai')
     const changed = structuredClone(prepared)
     changed.inputs[0].score.manualPoints = 40

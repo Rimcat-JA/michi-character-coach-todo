@@ -8,6 +8,8 @@ function fail(code) { const error = new Error(code); error.code = code; throw er
 function canonical(value) { if (value === null || ['string', 'boolean', 'number'].includes(typeof value)) return JSON.stringify(value); if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`; if (value && typeof value === 'object') return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${canonical(value[key])}`).join(',')}}`; fail('INVALID_INPUT') }
 const digest = value => crypto.createHash('sha256').update(canonical(value)).digest('hex')
 const policy = settings => settings.changePolicy ?? { epoch: 0, sourcePermissionRevision: 0, aiChangesEnabled: true, taskUpdate: 'require_approval' }
+// N09 local_action.run; older settings without an operation table keep the taskUpdate=deny rule.
+const actionsDenied = p => Array.isArray(p.operations) ? p.operations.find(rule => rule?.operation === 'local_action.run')?.mode !== 'require_approval' : p.taskUpdate === 'deny'
 const receiptKey = requestId => `localaction:result:${requestId}`
 function validateInput(input) {
   if (!exact(input, ['title', 'executable', 'cwd', 'argv', 'schema']) || typeof input.title !== 'string' || !input.title.trim() || input.title.length > 120 || typeof input.executable !== 'string' || input.executable.length > 4000 || !path.isAbsolute(input.executable) || typeof input.cwd !== 'string' || input.cwd.length > 4000 || !path.isAbsolute(input.cwd) || !Array.isArray(input.argv) || input.argv.length > 64 || !input.schema || typeof input.schema !== 'object' || Array.isArray(input.schema) || Object.keys(input.schema).length > 16) fail('DEFINITION_INVALID')
@@ -39,7 +41,7 @@ async function createLocalActionCoordinator({ signingKey, journalDirectory, devi
   if (!Buffer.isBuffer(signingKey) || signingKey.length !== 32 || !token(deviceId)) fail('CONFIG_INVALID')
   let configuration = null, service = null, loaded = false, history = [], queue = Promise.resolve()
   const inspections = new Map(), requests = new Map(), proofs = new WeakSet()
-  async function context() { const settings = await getSettings(), p = policy(settings); return { ownerId: settings.profileId, datasetId: settings.datasetId, deviceId, policyEpoch: p.epoch, sourcePermissionRevision: p.sourcePermissionRevision, enabled: Boolean(configuration && settings.aiEnabled && p.aiChangesEnabled && p.taskUpdate !== 'deny' && configuration.ownerId === settings.profileId && configuration.datasetId === settings.datasetId && configuration.policyEpoch === p.epoch && configuration.sourcePermissionRevision === p.sourcePermissionRevision) } }
+  async function context() { const settings = await getSettings(), p = policy(settings); return { ownerId: settings.profileId, datasetId: settings.datasetId, deviceId, policyEpoch: p.epoch, sourcePermissionRevision: p.sourcePermissionRevision, enabled: Boolean(configuration && settings.aiEnabled && p.aiChangesEnabled && !actionsDenied(p) && configuration.ownerId === settings.profileId && configuration.datasetId === settings.datasetId && configuration.policyEpoch === p.epoch && configuration.sourcePermissionRevision === p.sourcePermissionRevision) } }
   async function create(config) { return createLocalActionService({ signingKey, journalDirectory, registrations: config.definitions.map(primitiveDefinition), getCurrentContext: context, verifyHumanApproval: (_review, proof) => proofs.has(proof), ...(spawn ? { spawn } : {}), now }) }
   async function ensure() {
     if (loaded) return
@@ -65,7 +67,7 @@ async function createLocalActionCoordinator({ signingKey, journalDirectory, devi
     if (!await verifyNativeProof('configure', 'inspect', nativeProof)) fail('HUMAN_APPROVAL_REQUIRED')
     await ensure(); validateInput(input)
     const settings = await getSettings(), p = policy(settings)
-    if (!settings.aiEnabled || !p.aiChangesEnabled || p.taskUpdate === 'deny') fail('LOCAL_ACTIONS_DISABLED')
+    if (!settings.aiEnabled || !p.aiChangesEnabled || actionsDenied(p)) fail('LOCAL_ACTIONS_DISABLED')
     const definition = { ...structuredClone(input), id: crypto.randomUUID(), revision: 1, ownerId: settings.profileId, datasetId: settings.datasetId, deviceId, executableRoot: path.dirname(path.resolve(input.executable)), sha256: await inspectExecutable(input.executable) }
     // Registration validation verifies executable identity, cwd and typed argv;
     // constructing the primitive never launches an executable.
@@ -80,14 +82,14 @@ async function createLocalActionCoordinator({ signingKey, journalDirectory, devi
     await ensure()
     return mutate(async () => {
       const inspected = inspections.get(request.reference), settings = await getSettings(), p = policy(settings)
-      if (!inspected || inspected.digest !== request.digest || inspected.expiresAt <= now() || inspected.ownerId !== settings.profileId || inspected.datasetId !== settings.datasetId || inspected.policyEpoch !== p.epoch || inspected.sourcePermissionRevision !== p.sourcePermissionRevision || !settings.aiEnabled || !p.aiChangesEnabled || p.taskUpdate === 'deny') fail('AUTHORITY_CHANGED')
+      if (!inspected || inspected.digest !== request.digest || inspected.expiresAt <= now() || inspected.ownerId !== settings.profileId || inspected.datasetId !== settings.datasetId || inspected.policyEpoch !== p.epoch || inspected.sourcePermissionRevision !== p.sourcePermissionRevision || !settings.aiEnabled || !p.aiChangesEnabled || actionsDenied(p)) fail('AUTHORITY_CHANGED')
       const sameScope = configuration?.ownerId === settings.profileId && configuration?.datasetId === settings.datasetId && configuration?.policyEpoch === p.epoch && configuration?.sourcePermissionRevision === p.sourcePermissionRevision
       const defs = sameScope ? configuration.definitions : []
       if (defs.length >= 20) fail('DEFINITION_LIMIT')
       const next = { version: 1, ownerId: settings.profileId, datasetId: settings.datasetId, deviceId, policyEpoch: p.epoch, sourcePermissionRevision: p.sourcePermissionRevision, definitions: [...defs, structuredClone(inspected.definition)] }
       const nextService = await create(next)
       const latest = await getSettings(), latestPolicy = policy(latest)
-      if (!latest.aiEnabled || !latestPolicy.aiChangesEnabled || latestPolicy.taskUpdate === 'deny' || latest.profileId !== next.ownerId || latest.datasetId !== next.datasetId || latestPolicy.epoch !== next.policyEpoch || latestPolicy.sourcePermissionRevision !== next.sourcePermissionRevision) fail('AUTHORITY_CHANGED')
+      if (!latest.aiEnabled || !latestPolicy.aiChangesEnabled || actionsDenied(latestPolicy) || latest.profileId !== next.ownerId || latest.datasetId !== next.datasetId || latestPolicy.epoch !== next.policyEpoch || latestPolicy.sourcePermissionRevision !== next.sourcePermissionRevision) fail('AUTHORITY_CHANGED')
       await saveConfiguration(next); service?.clearAuthorities(); configuration = next; service = nextService; requests.clear(); inspections.delete(request.reference)
       return status()
     })

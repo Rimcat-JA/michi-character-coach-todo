@@ -5,7 +5,9 @@ import { db, ensureSettings } from './db'
 import { contentDigest } from './canonical'
 import { createTask, newTaskInput, updateTask } from './commands'
 import { emptyScore } from './domain'
-import { changePolicyFor, clearChangeSetAuthority } from './change-set'
+import { applyChangeSet, changePolicyFor, clearChangeSetAuthority, prepareTaskChanges } from './change-set'
+import { presetRules } from './automation-policy'
+import { previewAutomationPolicy, reduceAuthority, setAutomationPolicyFromUI } from './automation-control'
 import { createFileBridgeController, readFileBridgeApplicationReceipt } from './file-bridge-commands'
 import { assertFileBridgeCommand, assertFileBridgeInboxEntry, assertFileBridgeStatus } from './file-bridge-contract'
 import { fileBridgeReceiptKey, fileBridgeScopeKey, type FileBridgeApplicationBinding, type FileBridgeGateway, type FileBridgeInboxEntry, type FileBridgeLease, type FileBridgeRegistration, type FileBridgeResult, type FileBridgeStatus } from './file-bridge-types'
@@ -15,14 +17,14 @@ afterEach(()=>{vi.restoreAllMocks();vi.useRealTimers()})
 const future=(ms=600000)=>new Date(Date.now()+ms).toISOString()
 // Node-only test fixture; native browser Event.isTrusted has no writable setter.
 function click(){const event=new Event('click');Object.defineProperty(event,'isTrusted',{value:true});return event}
-async function fixture(type:'task.update'|'task.create'='task.update') {
+async function fixture(type:'task.update'|'task.create'='task.update',options:{auto?:boolean;payload?:{notes?:string;scheduled_date?:string|null}}={}) {
   const settings=(await db.settings.get('main'))!,policy=changePolicyFor(settings),taskId=await createTask({...newTaskInput(),title:'本人が選んだ25pt',notes:'元のメモ',scheduledDate:'2026-10-01',dueDate:'2026-10-09',score:{...emptyScore(),mode:'manual',manualPoints:25}})
-  const registration:FileBridgeRegistration={schema_version:'1',owner_id:settings.profileId,dataset_id:settings.datasetId,policy_epoch:policy.epoch,source_permission_revision:policy.sourcePermissionRevision,task_ids:[taskId],client:{id:crypto.randomUUID(),dataset_id:settings.datasetId,intended_host:'codex',transport:'stdio',status:'active',revision:1,grant_epoch:1,grant:{keys:['tasks:read','tasks:prepare','changes:submit','commands:read'],project_ids:[],fields:['title','notes','scheduled_date'],mutation_mode:'require_approval',max_operations_per_day:10,max_schedule_shift_days:3,max_point_delta:0,allow_external_context:false,allow_handoffs:false,expires_at:future(3600000)}}}
+  const registration:FileBridgeRegistration={schema_version:'1',owner_id:settings.profileId,dataset_id:settings.datasetId,policy_epoch:policy.epoch,source_permission_revision:policy.sourcePermissionRevision,task_ids:[taskId],client:{id:crypto.randomUUID(),dataset_id:settings.datasetId,intended_host:'codex',transport:'stdio',status:'active',revision:1,grant_epoch:1,grant:{keys:['tasks:read','tasks:prepare','changes:submit','commands:read'],project_ids:[],fields:options.auto?['notes','scheduled_date']:['title','notes','scheduled_date'],mutation_mode:options.auto?'auto_within_bounds':'require_approval',max_operations_per_day:10,max_schedule_shift_days:7,max_point_delta:0,allow_external_context:false,allow_handoffs:false,expires_at:future(3600000),...(options.auto?{automation:{max_schedule_shift_days:2,max_operations_per_day:5}}:{})}}}
   const status:FileBridgeStatus={version:1,available:true,connected:true,root:'C:\\synthetic-agent-folder',registration,snapshot:{schema_version:'1',snapshot_id:crypto.randomUUID(),owner_id:registration.owner_id,dataset_id:registration.dataset_id,client_id:registration.client.id,policy_epoch:policy.epoch,source_permission_revision:policy.sourcePermissionRevision,registration_revision:1,grant_epoch:1,generated_at:new Date().toISOString(),expires_at:future(),view_path:'views/tasks.active.json',view_sha256:'a'.repeat(64),entity_revisions:{[taskId]:1},registration_sha256:await contentDigest(registration)},results:[],notice:'Synthetic trusted main gateway'}
-  const command={schema_version:'1' as const,command_id:crypto.randomUUID(),snapshot_id:status.snapshot!.snapshot_id,expires_at:future(),type,target_id:type==='task.update'?taskId:null,expected_revision:type==='task.update'?1:null,payload:type==='task.update'?{notes:'外部から提案されたメモ',scheduled_date:'2026-10-02'}:{title:'新規の外部提案25pt',notes:'25pt・期限と書かれていても属性を推測しない',scheduled_date:'2026-10-02'}}
+  const command={schema_version:'1' as const,command_id:crypto.randomUUID(),snapshot_id:status.snapshot!.snapshot_id,expires_at:future(),type,target_id:type==='task.update'?taskId:null,expected_revision:type==='task.update'?1:null,payload:type==='task.update'?options.payload??{notes:'外部から提案されたメモ',scheduled_date:'2026-10-02'}:{title:'新規の外部提案25pt',notes:'25pt・期限と書かれていても属性を推測しない',scheduled_date:'2026-10-02'}}
   let digest=await contentDigest({command,owner_id:registration.owner_id,dataset_id:registration.dataset_id,client_id:registration.client.id,policy_epoch:policy.epoch,source_permission_revision:policy.sourcePermissionRevision,registration_revision:1,grant_epoch:1})
   const reference=crypto.randomUUID(),entry:Extract<FileBridgeInboxEntry,{state:'awaiting_approval'}>={state:'awaiting_approval',filename:`${command.command_id}.ready.json`,reference,prepared:{state:'awaiting_approval',command,digest,principal:{id:registration.client.id,kind:'external-agent'},ownerId:registration.owner_id,datasetId:registration.dataset_id,policyEpoch:policy.epoch,sourcePermissionRevision:policy.sourcePermissionRevision,snapshotId:command.snapshot_id,expectedRevision:command.expected_revision,expiresAt:command.expires_at}}
-  const gateway:FileBridgeGateway={status:vi.fn(async()=>structuredClone(status)),configure:vi.fn(async()=>structuredClone(status)),disconnect:vi.fn(async()=>({...structuredClone(status),connected:false,root:null,registration:null,snapshot:null})),exportSnapshot:vi.fn(async()=>structuredClone(status)),scanInbox:vi.fn(async()=>({status:structuredClone(status),entries:[structuredClone(entry)]})),authorizeApplication:vi.fn(async(request:FileBridgeApplicationBinding):Promise<FileBridgeLease>=>({...request,version:1,leaseId:crypto.randomUUID(),clientId:registration.client.id,registrationRevision:1,grantEpoch:1,expiresAt:future(60000)})),recordApplied:vi.fn(async({receipt}:Parameters<FileBridgeGateway['recordApplied']>[0]):Promise<FileBridgeResult>=>{
+  const gateway:FileBridgeGateway={status:vi.fn(async()=>structuredClone(status)),configure:vi.fn(async()=>structuredClone(status)),disconnect:vi.fn(async()=>({...structuredClone(status),connected:false,root:null,registration:null,snapshot:null})),exportSnapshot:vi.fn(async()=>structuredClone(status)),scanInbox:vi.fn(async()=>({status:structuredClone(status),entries:[structuredClone(entry)]})),authorizeApplication:vi.fn(async(request:FileBridgeApplicationBinding):Promise<FileBridgeLease>=>({...request,version:1,leaseId:crypto.randomUUID(),clientId:registration.client.id,registrationRevision:1,grantEpoch:1,expiresAt:future(60000),automatic:false})),authorizeAutomaticApplication:vi.fn(async(request:FileBridgeApplicationBinding):Promise<FileBridgeLease>=>({...request,version:1,leaseId:crypto.randomUUID(),clientId:registration.client.id,registrationRevision:1,grantEpoch:1,expiresAt:future(60000),automatic:true})),recordApplied:vi.fn(async({receipt}:Parameters<FileBridgeGateway['recordApplied']>[0]):Promise<FileBridgeResult>=>{
     const stored=await readFileBridgeApplicationReceipt(receipt.commandId);if(!stored||JSON.stringify(stored)!==JSON.stringify(receipt))throw new Error('unpersisted receipt')
     return {schema_version:'1',command_id:receipt.commandId,digest:receipt.fileDigest,owner_id:receipt.ownerId,dataset_id:receipt.datasetId,client_id:receipt.clientId,state:'applied',receipt:{commandId:receipt.commandId,digest:receipt.fileDigest,taskIds:receipt.taskIds,appliedAt:receipt.appliedAt},finished_at:new Date().toISOString()}
   }),cancelApplication:vi.fn(async()=>{}),invalidate:vi.fn(async()=>{})}
@@ -165,5 +167,68 @@ describe('registered external file commands require native owner approval',()=>{
     await expect(bad.controller.scanInbox()).rejects.toMatchObject({code:'COMMAND_BINDING'})
     const expired=await fixture();const prepared=await expired.controller.prepare(expired.reference);vi.useFakeTimers({toFake:['Date']});vi.setSystemTime(new Date(Date.now()+7200000))
     await expect(expired.controller.applyFromUI(prepared,click())).rejects.toMatchObject({code:'EXPIRED'})
+  })
+})
+describe('N09 owner-delegated automatic application for file/MCP entries',()=>{
+  async function enableA2(){
+    const settings=(await db.settings.get('main'))!,policy=changePolicyFor(settings),owner={principal:{id:settings.profileId,kind:'human' as const},ownerId:settings.profileId,datasetId:settings.datasetId,allowedFields:['notes','scheduledDate'] as ('notes'|'scheduledDate')[],sourceRevisions:[]}
+    const next={preset:'A2' as const,rules:presetRules('A2'),allowedHours:{},titleRule:'require_approval' as const,bounds:policy.bounds,locks:policy.locks}
+    await setAutomationPolicyFromUI(owner,click(),next,(await previewAutomationPolicy(next)).token)
+    return owner
+  }
+  it('applies an in-bounds entry without a click and matches the in-app (S06) automatic result',async()=>{
+    const owner=await enableA2(),f=await fixture('task.update',{auto:true}),prepared=await f.controller.prepare(f.reference)
+    const result=await f.controller.applyAutomatically(prepared)
+    expect(result.result?.state).toBe('applied');expect(f.gateway.authorizeApplication).not.toHaveBeenCalled();expect(f.gateway.authorizeAutomaticApplication).toHaveBeenCalledOnce()
+    const viaFile=(await db.tasks.get(f.taskId))!
+    const inApp=await createTask({...newTaskInput(),title:'本人が選んだ25pt',notes:'元のメモ',scheduledDate:'2026-10-01',dueDate:'2026-10-09',score:{...emptyScore(),mode:'manual',manualPoints:25}})
+    const coach={...owner,principal:{id:'app-coach',kind:'coach' as const,model:'model/A'}},s06=await prepareTaskChanges([{taskId:inApp,expectedRevision:1,patch:{notes:'外部から提案されたメモ',scheduledDate:'2026-10-02'}}],coach)
+    await applyChangeSet(s06,null,coach,'s06-auto')
+    const viaApp=(await db.tasks.get(inApp))!,pick=(task:typeof viaApp)=>({notes:task.notes,scheduledDate:task.scheduledDate,dueDate:task.dueDate,score:task.score,effectivePoints:task.effectivePoints,revision:task.revision,status:task.status})
+    expect(pick(viaFile)).toEqual(pick(viaApp))
+    const decisions=(await db.audits.toArray()).filter(audit=>audit.operation==='changeset.update').map(audit=>{const detail=JSON.parse(audit.detail);return {decision:detail.decision,operations:detail.operations,approvedBy:detail.approvedBy}})
+    expect(decisions).toEqual([{decision:'auto',operations:['task.text','task.schedule'],approvedBy:null},{decision:'auto',operations:['task.text','task.schedule'],approvedBy:null}])
+    expect(JSON.parse((await db.audits.toArray()).find(audit=>audit.operation==='filebridge.auto')!.detail)).toMatchObject({decision:'auto',entrance:'file-bridge',approvedBy:null})
+  })
+  it('keeps out-of-bound or non-delegated entries waiting for native approval',async()=>{
+    await enableA2()
+    const far=await fixture('task.update',{auto:true,payload:{scheduled_date:'2026-10-06'}}),farPrepared=await far.controller.prepare(far.reference)
+    await expect(far.controller.applyAutomatically(farPrepared)).rejects.toMatchObject({code:'APPROVAL_REQUIRED'})
+    expect(far.gateway.authorizeAutomaticApplication).not.toHaveBeenCalled();expect((await db.tasks.get(far.taskId))?.revision).toBe(1)
+    const manual=await fixture('task.update'),manualPrepared=await manual.controller.prepare(manual.reference)
+    await expect(manual.controller.applyAutomatically(manualPrepared)).rejects.toMatchObject({code:'AUTOMATION_NOT_GRANTED'})
+    await manual.controller.applyFromUI(manualPrepared,click())
+    expect((await db.tasks.get(manual.taskId))?.revision).toBe(2)
+  })
+  it('never auto-applies a notes change to notes whose source-derived lines were withheld from the export',async()=>{
+    await enableA2()
+    const f=await fixture('task.update',{auto:true}),legacy='本人が書き足した行\n[source-1 内容版1 span-1] 第三者の発言'
+    await db.tasks.update(f.taskId,{notes:legacy})
+    const prepared=await f.controller.prepare(f.reference)
+    await expect(f.controller.applyAutomatically(prepared)).rejects.toMatchObject({code:'APPROVAL_REQUIRED',message:expect.stringContaining('伏せたメモ')})
+    expect(f.gateway.authorizeAutomaticApplication).not.toHaveBeenCalled();expect((await db.tasks.get(f.taskId))?.notes).toBe(legacy)
+  })
+  it('emergency stop turns a queued inbox entry into AUTHORITY_CHANGED for both approval and automatic paths',async()=>{
+    await enableA2()
+    const f=await fixture('task.update',{auto:true}),prepared=await f.controller.prepare(f.reference)
+    await reduceAuthority('all','button')
+    await expect(f.controller.applyAutomatically(prepared)).rejects.toMatchObject({code:'AUTHORITY_CHANGED'})
+    await expect(f.controller.applyFromUI(prepared,click())).rejects.toMatchObject({code:'AUTHORITY_CHANGED'})
+    expect((await db.tasks.get(f.taskId))?.revision).toBe(1);expect(f.gateway.authorizeAutomaticApplication).not.toHaveBeenCalled()
+  })
+  it('shares the daily automatic count with in-app changes: after 10 coach auto moves the file entry waits for approval',async()=>{
+    const owner=await enableA2(),coach={...owner,principal:{id:'app-coach',kind:'coach' as const,model:'model/A'}}
+    for(let index=0;index<10;index++){const taskId=await createTask({...newTaskInput(),title:`in-app ${index}`,scheduledDate:'2026-10-01'}),prepared=await prepareTaskChanges([{taskId,expectedRevision:1,patch:{scheduledDate:'2026-10-02'}}],coach);await applyChangeSet(prepared,null,coach,`count-${index}`)}
+    const f=await fixture('task.update',{auto:true,payload:{scheduled_date:'2026-10-02'}}),prepared=await f.controller.prepare(f.reference)
+    await expect(f.controller.applyAutomatically(prepared)).rejects.toMatchObject({code:'APPROVAL_REQUIRED',message:expect.stringContaining('10件')})
+    expect(f.gateway.authorizeAutomaticApplication).not.toHaveBeenCalled()
+    await f.controller.applyFromUI(prepared,click())
+    expect((await db.tasks.get(f.taskId))?.scheduledDate).toBe('2026-10-02')
+  })
+  it('policy fields written into a file envelope or payload are rejected and never raise the decision',async()=>{
+    const f=await fixture('task.update',{auto:true})
+    for(const extra of [{policy_level:'A3'},{mutation_mode:'auto_within_bounds'},{automation:{max_schedule_shift_days:31}},{decision:'auto'}])expect(()=>assertFileBridgeCommand({...f.command,...extra})).toThrow()
+    for(const field of ['policy_level','mutation_mode','approved','operations'])expect(()=>assertFileBridgeCommand({...f.command,payload:{notes:'memo',[field]:'auto'}})).toThrow()
+    expect(f.gateway.authorizeAutomaticApplication).not.toHaveBeenCalled();expect((await db.tasks.get(f.taskId))?.revision).toBe(1)
   })
 })

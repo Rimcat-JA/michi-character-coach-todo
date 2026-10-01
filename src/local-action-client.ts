@@ -1,6 +1,7 @@
 import { db } from './db'
 import { canonicalJSON, contentDigest } from './canonical'
 import { changePolicyFor } from './change-set'
+import { operationMode } from './automation-policy'
 import { localActionReceiptKey, type LocalActionDefinition, type LocalActionDefinitionInput, type LocalActionGateway, type LocalActionInspection, type LocalActionPrepared, type LocalActionResult, type LocalActionStatus } from './local-action-types'
 const record=(value:unknown):value is Record<string,unknown>=>Boolean(value&&typeof value==='object'&&!Array.isArray(value)&&Object.getPrototypeOf(value)===Object.prototype)
 const exact=(value:Record<string,unknown>,keys:string[])=>Object.keys(value).length===keys.length&&keys.every(key=>Object.hasOwn(value,key))
@@ -54,7 +55,7 @@ export function createLocalActionController(gateway:LocalActionGateway) {
   async function assertOwner(ownerId:string,datasetId:string,deviceId:string,epoch?:number,sourceRevision?:number) {
     const settings=await db.settings.get('main'),policy=settings?changePolicyFor(settings):null
     if(!settings||settings.profileId!==ownerId||settings.datasetId!==datasetId||current&&current.deviceId!==deviceId)fail('本人・保存データまたは端末が変わりました。')
-    if(epoch!==undefined&&(!settings.aiEnabled||!policy?.aiChangesEnabled||policy.taskUpdate==='deny'||policy.epoch!==epoch||policy.sourcePermissionRevision!==sourceRevision))fail('AIまたは変更の許可が変わりました。PC操作を準備し直してください。')
+    if(epoch!==undefined&&(!settings.aiEnabled||!policy?.aiChangesEnabled||operationMode(policy!,'local_action.run')==='deny'||policy!.epoch!==epoch||policy.sourcePermissionRevision!==sourceRevision))fail('AIまたは変更の許可が変わりました。PC操作を準備し直してください。')
   }
   async function adopt(value:LocalActionStatus) {
     status(value);await assertOwner(value.ownerId,value.datasetId,value.deviceId)

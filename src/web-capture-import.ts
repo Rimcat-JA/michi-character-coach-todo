@@ -4,6 +4,7 @@ import { changePolicyFor } from './change-set'
 import { defaultSourcePermissions, importLocalSource, normalizeSourceText, sourceDb } from './source-library'
 import type { SourceImport, SourcePermissions } from './source-library'
 import { defaultSourceRetention } from './retention-defaults'
+import { onFeatureHidden } from './features'
 
 export const MAX_EMAIL_BYTES = 100 * 1024
 export const MAX_CAPTURE_TEXT = 50000
@@ -28,7 +29,10 @@ export type CaptureImportPreview = {
 }
 export type CaptureImportReceipt = { sourceId: string; sourceRevision: number; provenanceId: string; selectedSha256: string; duplicate: boolean; permissions: SourcePermissions }
 type PreparedRecord = { input: SourceImport; provenance: Record<string, unknown>; artifactId: string; selectedSha256: string; previewPayload: Omit<CaptureImportPreview, 'digest'> }
-const prepared = new WeakMap<CaptureImportPreview, PreparedRecord>()
+let prepared = new WeakMap<CaptureImportPreview, PreparedRecord>()
+/** Hiding the feature discards unsaved previews; re-showing it never replays them. */
+export function clearCaptureImportAuthority() { prepared = new WeakMap() }
+onFeatureHidden('captureImport', clearCaptureImportAuthority)
 const parsedEmails = new WeakSet<ParsedLocalEmail>()
 function fail(message = '取込データの形式を確認してください。'): never { throw new Error(message) }
 function object(value: unknown, keys: string[]): Record<string, unknown> {

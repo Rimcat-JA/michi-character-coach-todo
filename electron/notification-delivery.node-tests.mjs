@@ -93,3 +93,11 @@ test('Smart List malformed AST/property/prototype operators/deep trees fail clos
   const list = { id: 'list', ownerId: 'person', revision: 1, ast: valid }
   assert.equal(activeSmartList(list, [{ status: 'completed', deletedAt: null }, { status: 'open', deletedAt: now }], 'person', now), false)
 })
+test('N09 notification stop switch and notification.send=deny are re-checked at OS show time', () => {
+  const allowed = fixture()
+  allowed.context.settings.changePolicy = { ...allowed.context.settings.changePolicy, operations: [{ operation: 'notification.send', mode: 'auto_within_bounds' }] }
+  assert.deepEqual(validateOSNotification(allowed.context, allowed.payload, now), { title: allowed.payload.title, body: allowed.payload.body })
+  for (const mutate of [value => { value.context.settings.changePolicy = { ...value.context.settings.changePolicy, stops: { notifications: true, routines: false } } }, value => { value.context.settings.changePolicy = { ...value.context.settings.changePolicy, operations: [{ operation: 'notification.send', mode: 'deny' }] } }]) {
+    const value = fixture(); mutate(value); assert.equal(validateOSNotification(value.context, value.payload, now), null)
+  }
+})

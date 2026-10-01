@@ -3,10 +3,11 @@ import { db } from './db'
 import { canonicalJSON, contentDigest } from './canonical'
 import { newTaskInput } from './commands'
 import { uid, type Settings } from './domain'
-import { applyChangeSet, approveChangeSetFromUI, changePolicyFor, prepareTaskChanges, type ChangeContext, type PreparedChangeSet, type TaskChangeField, type UIChangeApproval } from './change-set'
+import { applyChangeSet, approveChangeSetFromUI, autoChangeCountsToday, changePolicyFor, decideChangePolicy, prepareTaskChanges, type ChangeContext, type ChangePolicy, type PreparedChangeSet, type TaskChangeField, type UIChangeApproval } from './change-set'
+import { operationMode, ruleFor } from './automation-policy'
 import { applyAssistedTasks, prepareAssistedTasks, type PreparedAssistedTasks } from './task-assist'
 import { assertFileBridgeInboxEntry, assertFileBridgeLease, assertFileBridgeResult, assertFileBridgeStatus, fileBridgeDigest, fileBridgeTimestamp, rejectFileBridge } from './file-bridge-contract'
-import { loadTaskEgress, recordEgressAudit } from './egress-policy'
+import { loadTaskEgress, ownerNotesForEgress, recordEgressAudit } from './egress-policy'
 import { fileBridgeReceiptKey, fileBridgeScopeKey, type FileBridgeApplicationBinding, type FileBridgeApplicationReceipt, type FileBridgeConfigure, type FileBridgeGateway, type FileBridgeInboxEntry, type FileBridgeLease, type FileBridgeRegistration, type FileBridgeResult, type FileBridgeStatus } from './file-bridge-types'
 
 type PendingEntry = Extract<FileBridgeInboxEntry,{state:'awaiting_approval'}>
@@ -24,8 +25,16 @@ async function settings():Promise<Settings>{const value=await db.settings.get('m
 function assertSettings(registration:FileBridgeRegistration,value:Settings) {
   const policy=changePolicyFor(value)
   if(value.profileId!==registration.owner_id||value.datasetId!==registration.dataset_id)rejectFileBridge('OWNER_CHANGED')
-  if(!value.aiEnabled||!policy.aiChangesEnabled||policy.taskUpdate==='deny'||policy.epoch!==registration.policy_epoch||policy.sourcePermissionRevision!==registration.source_permission_revision)rejectFileBridge('AUTHORITY_CHANGED','本人・AI設定または利用許可が変わりました。接続を確認してください。')
+  if(!value.aiEnabled||!policy.aiChangesEnabled||operationMode(policy,'task.text')==='deny'&&operationMode(policy,'task.schedule')==='deny'||policy.epoch!==registration.policy_epoch||policy.sourcePermissionRevision!==registration.source_permission_revision)rejectFileBridge('AUTHORITY_CHANGED','本人・AI設定または利用許可が変わりました。接続を確認してください。')
   if(Date.parse(registration.client.grant.expires_at)<=Date.now())rejectFileBridge('EXPIRED')
+}
+/** Renderer-side mirror of main's check: the N09 table itself must allow automatic notes/schedule changes in these bounds. */
+export function fileBridgeAutomationAllowed(policy:ChangePolicy,fields:string[],maxScheduleShiftDays:number){
+  if(!fields.length||fields.some(field=>!['notes','scheduled_date'].includes(field)))return false
+  if(fields.includes('notes')&&operationMode(policy,'task.text')!=='auto_within_bounds')return false
+  if(!fields.includes('scheduled_date'))return true
+  const limit=ruleFor(policy,'task.schedule').max_schedule_days_delta??policy.bounds.maxScheduledDayShift
+  return operationMode(policy,'task.schedule')==='auto_within_bounds'&&maxScheduleShiftDays<=limit
 }
 function commandDigestPayload(entry:PendingEntry,reg:FileBridgeRegistration) {
   return {command:entry.prepared.command,owner_id:reg.owner_id,dataset_id:reg.dataset_id,client_id:reg.client.id,policy_epoch:reg.policy_epoch,source_permission_revision:reg.source_permission_revision,registration_revision:reg.client.revision,grant_epoch:reg.client.grant_epoch}
@@ -93,15 +102,51 @@ export function createFileBridgeController(gateway:FileBridgeGateway) {
       return {receipt,result,resultPending:false}
     }catch{return {receipt,result:null,resultPending:true}}
   }
+  async function priorOutcome(prepared:PreparedFileBridgeApplication):Promise<FileBridgeApplicationOutcome|null> {
+    const prior=await readFileBridgeApplicationReceipt(prepared.entry.prepared.command.command_id)
+    if(!prior)return null
+    if(prior.applicationDigest!==prepared.digest)rejectFileBridge('IDEMPOTENCY_MISMATCH')
+    const existingLease=leases.get(prepared.id)
+    if(!existingLease)rejectFileBridge('RECEIPT_ALREADY_APPLIED','このコマンドは保存済みです。受信箱の結果を更新してください。')
+    return notify(prepared,prior,existingLease)
+  }
+  async function commit(prepared:PreparedFileBridgeApplication,approval:UIChangeApproval|null,lease:FileBridgeLease,automatic:boolean):Promise<FileBridgeApplicationOutcome> {
+    const reg=prepared.registration
+    try{
+      assertFileBridgeLease(lease)
+      if(canonicalJSON(binding(prepared))!==canonicalJSON({reference:lease.reference,fileDigest:lease.fileDigest,applicationDigest:lease.applicationDigest,ownerId:lease.ownerId,datasetId:lease.datasetId,policyEpoch:lease.policyEpoch,sourcePermissionRevision:lease.sourcePermissionRevision})||lease.automatic!==automatic||lease.clientId!==reg.client.id||lease.registrationRevision!==reg.client.revision||lease.grantEpoch!==reg.client.grant_epoch||Date.parse(lease.expiresAt)<=Date.now()||Date.parse(lease.expiresAt)>Date.parse(prepared.entry.prepared.expiresAt))rejectFileBridge('LEASE_INVALID')
+    }catch(error){if(lease&&typeof lease.leaseId==='string')await gateway.cancelApplication({leaseId:lease.leaseId,reference:prepared.reference}).catch(()=>{});throw error}
+    leases.set(prepared.id,freeze(structuredClone(lease)))
+    let receipt:FileBridgeApplicationReceipt
+    try{
+      receipt=await db.transaction('rw',[db.tasks,db.assessments,db.commands,db.audits,db.containers,db.settings,db.labelGroups,db.labelDefinitions,db.tripBundles],async()=>{
+        await verifyPrepared(prepared);await assertCurrent(prepared)
+        if(Date.parse(lease.expiresAt)<=Date.now())rejectFileBridge('EXPIRED')
+        const command=prepared.entry.prepared.command,key=fileBridgeReceiptKey(command.command_id),existing=await db.commands.get(key)
+        if(existing){const previous=JSON.parse(existing.resultId) as FileBridgeApplicationReceipt;if(!validReceipt(previous)||existing.hash!==prepared.digest||previous.applicationDigest!==prepared.digest||previous.fileDigest!==prepared.entry.prepared.digest)rejectFileBridge('IDEMPOTENCY_MISMATCH');return previous}
+        const today=new Date().toISOString().slice(0,10),receipts=await db.commands.toArray()
+        const count=receipts.filter(item=>item.key.startsWith('filebridge:applied:')&&item.at.slice(0,10)===today).reduce((sum,item)=>{try{const stored=JSON.parse(item.resultId);return sum+(validReceipt(stored)&&stored.clientId===reg.client.id&&stored.ownerId===reg.owner_id&&stored.datasetId===reg.dataset_id?1:0)}catch{return sum}},0)
+        if(count>=reg.client.grant.max_operations_per_day)rejectFileBridge('DAILY_BOUND')
+        // applyChangeSet re-decides inside this transaction; with no approval it succeeds only when the N09 decision is auto.
+        const taskIds=prepared.changeSet?(await applyChangeSet(prepared.changeSet,approval,prepared.actorContext,`filebridge:${command.command_id}`)).taskIds:prepared.assisted&&!automatic?await applyAssistedTasks(prepared.assisted,prepared.assisted.digest):rejectFileBridge('INVALID_APPLICATION')
+        const appliedAt=new Date().toISOString(),result:FileBridgeApplicationReceipt={version:1,commandId:command.command_id,fileDigest:prepared.entry.prepared.digest,applicationDigest:prepared.digest,ownerId:reg.owner_id,datasetId:reg.dataset_id,clientId:reg.client.id,policyEpoch:reg.policy_epoch,sourcePermissionRevision:reg.source_permission_revision,registrationRevision:reg.client.revision,grantEpoch:reg.client.grant_epoch,taskIds,appliedAt}
+        await db.commands.add({key,hash:prepared.digest,resultId:JSON.stringify(result),at:appliedAt})
+        await db.audits.add({id:uid(),taskId:taskIds[0]??null,operation:automatic?'filebridge.auto':'filebridge.approved',at:appliedAt,detail:JSON.stringify({...result,approvedBy:automatic?null:reg.owner_id,decision:automatic?'auto':'approved',entrance:'file-bridge',snapshotId:command.snapshot_id,operation:command.type})})
+        return result
+      })
+    }catch(error){await gateway.cancelApplication({leaseId:lease.leaseId,reference:prepared.reference}).catch(()=>{});throw error}
+    return notify(prepared,receipt,lease)
+  }
   return {
     clearAuthority:clear,
     lastEgress:()=>lastEgress,
     refresh:async()=>adoptStatus(await gateway.status()),
-    async configure(request:Pick<FileBridgeConfigure,'intendedHost'|'taskIds'|'fields'|'lifetimeHours'>,event:Event) {
+    async configure(request:Pick<FileBridgeConfigure,'intendedHost'|'taskIds'|'fields'|'lifetimeHours'>&{automation?:FileBridgeConfigure['automation']},event:Event) {
       trustedClick(event)
       const current=await settings(),policy=changePolicyFor(current)
       if(!current.aiEnabled||!policy.aiChangesEnabled)rejectFileBridge('AUTHORITY_CHANGED')
-      const value={...structuredClone(request),ownerId:current.profileId,datasetId:current.datasetId,policyEpoch:policy.epoch,sourcePermissionRevision:policy.sourcePermissionRevision}
+      if(request.automation&&!fileBridgeAutomationAllowed(policy,request.fields,request.automation.maxScheduleShiftDays))rejectFileBridge('AUTOMATION_NOT_GRANTED','自動化設定（S20）でメモ・予定日の範囲内自動を許可してから、同じかより狭い範囲で委任してください。')
+      const value={...structuredClone(request),automation:request.automation??null,ownerId:current.profileId,datasetId:current.datasetId,policyEpoch:policy.epoch,sourcePermissionRevision:policy.sourcePermissionRevision}
       return adoptStatus(await gateway.configure(value))
     },
     async disconnect(event:Event) {
@@ -165,35 +210,23 @@ export function createFileBridgeController(gateway:FileBridgeGateway) {
     },
     async applyFromUI(prepared:PreparedFileBridgeApplication,event:Event,checkedProtectedFields:TaskChangeField[]=[]):Promise<FileBridgeApplicationOutcome> {
       trustedClick(event);await verifyPrepared(prepared);await assertCurrent(prepared)
-      const prior=await readFileBridgeApplicationReceipt(prepared.entry.prepared.command.command_id)
-      if(prior){if(prior.applicationDigest!==prepared.digest)rejectFileBridge('IDEMPOTENCY_MISMATCH');const existingLease=leases.get(prepared.id);if(!existingLease)rejectFileBridge('RECEIPT_ALREADY_APPLIED','このコマンドは保存済みです。受信箱の結果を更新してください。');return notify(prepared,prior,existingLease)}
+      const prior=await priorOutcome(prepared);if(prior)return prior
       let approval:UIChangeApproval|null=null
       if(prepared.changeSet)approval=await approveChangeSetFromUI(prepared.changeSet,prepared.humanContext,event,checkedProtectedFields)
-      const lease=await gateway.authorizeApplication(binding(prepared))
-      const reg=prepared.registration
-      try{
-        assertFileBridgeLease(lease)
-        if(canonicalJSON(binding(prepared))!==canonicalJSON({reference:lease.reference,fileDigest:lease.fileDigest,applicationDigest:lease.applicationDigest,ownerId:lease.ownerId,datasetId:lease.datasetId,policyEpoch:lease.policyEpoch,sourcePermissionRevision:lease.sourcePermissionRevision})||lease.clientId!==reg.client.id||lease.registrationRevision!==reg.client.revision||lease.grantEpoch!==reg.client.grant_epoch||Date.parse(lease.expiresAt)<=Date.now()||Date.parse(lease.expiresAt)>Date.parse(prepared.entry.prepared.expiresAt))rejectFileBridge('LEASE_INVALID')
-      }catch(error){if(lease&&typeof lease.leaseId==='string')await gateway.cancelApplication({leaseId:lease.leaseId,reference:prepared.reference}).catch(()=>{});throw error}
-      leases.set(prepared.id,freeze(structuredClone(lease)))
-      let receipt:FileBridgeApplicationReceipt
-      try{
-        receipt=await db.transaction('rw',[db.tasks,db.assessments,db.commands,db.audits,db.containers,db.settings,db.labelGroups,db.labelDefinitions,db.tripBundles],async()=>{
-          await verifyPrepared(prepared);await assertCurrent(prepared)
-          if(Date.parse(lease.expiresAt)<=Date.now())rejectFileBridge('EXPIRED')
-          const command=prepared.entry.prepared.command,key=fileBridgeReceiptKey(command.command_id),existing=await db.commands.get(key)
-          if(existing){const previous=JSON.parse(existing.resultId) as FileBridgeApplicationReceipt;if(!validReceipt(previous)||existing.hash!==prepared.digest||previous.applicationDigest!==prepared.digest||previous.fileDigest!==prepared.entry.prepared.digest)rejectFileBridge('IDEMPOTENCY_MISMATCH');return previous}
-          const today=new Date().toISOString().slice(0,10),receipts=await db.commands.toArray()
-          const count=receipts.filter(item=>item.key.startsWith('filebridge:applied:')&&item.at.slice(0,10)===today).reduce((sum,item)=>{try{const stored=JSON.parse(item.resultId);return sum+(validReceipt(stored)&&stored.clientId===reg.client.id&&stored.ownerId===reg.owner_id&&stored.datasetId===reg.dataset_id?1:0)}catch{return sum}},0)
-          if(count>=reg.client.grant.max_operations_per_day)rejectFileBridge('DAILY_BOUND')
-          const taskIds=prepared.changeSet?(await applyChangeSet(prepared.changeSet,approval,prepared.actorContext,`filebridge:${command.command_id}`)).taskIds:prepared.assisted?await applyAssistedTasks(prepared.assisted,prepared.assisted.digest):rejectFileBridge('INVALID_APPLICATION')
-          const appliedAt=new Date().toISOString(),result:FileBridgeApplicationReceipt={version:1,commandId:command.command_id,fileDigest:prepared.entry.prepared.digest,applicationDigest:prepared.digest,ownerId:reg.owner_id,datasetId:reg.dataset_id,clientId:reg.client.id,policyEpoch:reg.policy_epoch,sourcePermissionRevision:reg.source_permission_revision,registrationRevision:reg.client.revision,grantEpoch:reg.client.grant_epoch,taskIds,appliedAt}
-          await db.commands.add({key,hash:prepared.digest,resultId:JSON.stringify(result),at:appliedAt})
-          await db.audits.add({id:uid(),taskId:taskIds[0]??null,operation:'filebridge.approved',at:appliedAt,detail:JSON.stringify({...result,approvedBy:reg.owner_id,snapshotId:command.snapshot_id,operation:command.type})})
-          return result
-        })
-      }catch(error){await gateway.cancelApplication({leaseId:lease.leaseId,reference:prepared.reference}).catch(()=>{});throw error}
-      return notify(prepared,receipt,lease)
+      return commit(prepared,approval,await gateway.authorizeApplication(binding(prepared)),false)
+    },
+    /** No click. Only for an owner-delegated auto grant where the shared N09 engine decides auto; otherwise the entry waits for approval. */
+    async applyAutomatically(prepared:PreparedFileBridgeApplication):Promise<FileBridgeApplicationOutcome> {
+      await verifyPrepared(prepared);await assertCurrent(prepared)
+      const reg=prepared.registration,current=changePolicyFor(await settings())
+      if(!prepared.changeSet||reg.client.grant.mutation_mode!=='auto_within_bounds'||!gateway.authorizeAutomaticApplication)rejectFileBridge('AUTOMATION_NOT_GRANTED','この接続には範囲内の自動適用が委任されていません。')
+      const decision=decideChangePolicy(prepared.changeSet,current,{autoCountToday:await autoChangeCountsToday()})
+      if(decision.status!=='auto')rejectFileBridge('APPROVAL_REQUIRED',decision.reason)
+      // The agent saw these notes with source-quote lines withheld, so its replacement would drop them unseen.
+      const command=prepared.entry.prepared.command,target=command.target_id?await db.tasks.get(command.target_id):undefined
+      if(target&&Object.hasOwn(command.payload,'notes')&&ownerNotesForEgress(target.notes).notes!==target.notes)rejectFileBridge('APPROVAL_REQUIRED','資料由来の行を伏せたメモへの変更は、本人が確認して適用してください。')
+      const prior=await priorOutcome(prepared);if(prior)return prior
+      return commit(prepared,null,await gateway.authorizeAutomaticApplication(binding(prepared)),true)
     },
     async retryResultFromUI(prepared:PreparedFileBridgeApplication,event:Event):Promise<FileBridgeApplicationOutcome> {
       trustedClick(event);await verifyPrepared(prepared)

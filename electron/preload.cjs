@@ -24,6 +24,8 @@ contextBridge.exposeInMainWorld('michiFileBridge', {
   exportSnapshot: request => ipcRenderer.invoke('michi:filebridge-exportSnapshot', request),
   scanInbox: () => ipcRenderer.invoke('michi:filebridge-scanInbox'),
   authorizeApplication: request => fileBridgeNativeCall('authorizeApplication', 'approve', request?.reference, request),
+  // No native proof: main grants this only from its own signed auto grant and bounds.
+  authorizeAutomaticApplication: request => ipcRenderer.invoke('michi:filebridge-authorizeAutomaticApplication', request),
   recordApplied: request => ipcRenderer.invoke('michi:filebridge-recordApplied', request),
   cancelApplication: request => ipcRenderer.invoke('michi:filebridge-cancelApplication', request),
   invalidate: () => ipcRenderer.invoke('michi:filebridge-invalidate')

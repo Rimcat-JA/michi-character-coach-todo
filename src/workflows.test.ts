@@ -25,3 +25,18 @@ it('版付きプリセットを共有・適用してもAPIと通知の許可を�
   const applied = (await db.settings.get('main'))!
   expect(applied).toMatchObject({ navDesktop: ['today', 'tasks'], navMobile: ['today'], hiddenFeatures: ['wall'], daySectionMode: 'category', taskListLimit: 5, dailyMinutes: 120, dailyPoints: 25, aiEnabled: false, notifications: false, automation: 'A0', aiModel: 'private-model' })
 })
+
+it('画面内の機能を隠すプリセットも、キー・許可・自動化設定を持ち込まずに適用できる', async () => {
+  await db.settings.update('main', { hiddenFeatures: ['voice', 'localActions', 'externalImport'], aiEnabled: true, aiModel: 'private-model', notifications: true })
+  const presetId = await saveWorkflowPreset('静かな画面')
+  const shared = exportWorkflowPreset((await db.settings.get('main'))!.workflowPresets!.find(preset => preset.id === presetId)!)
+  expect(JSON.parse(shared).preset.config.hiddenFeatures).toEqual(['voice', 'localActions', 'externalImport'])
+  await db.settings.update('main', { hiddenFeatures: [], aiEnabled: false, notifications: false, automation: 'A1' })
+  const before = (await db.settings.get('main'))!.changePolicy
+  await applyWorkflowPreset(await importWorkflowPreset(shared))
+  const applied = (await db.settings.get('main'))!
+  expect(applied).toMatchObject({ hiddenFeatures: ['voice', 'localActions', 'externalImport'], aiEnabled: false, notifications: false, automation: 'A1' })
+  expect(applied.changePolicy).toEqual(before)
+  const injected = JSON.parse(shared); injected.preset.config.hiddenFeatures.push('unknownPanel')
+  await expect(importWorkflowPreset(JSON.stringify(injected))).rejects.toThrow('ワークフロー設定')
+})
