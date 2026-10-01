@@ -4,7 +4,7 @@ import { db } from './db'
 import { completeTask, createTask, newTaskInput, updateTask } from './commands'
 import { applyChangeSet, approveChangeSetFromUI, prepareTaskChanges, type ChangeContext } from './change-set'
 import { validateSnapshot } from './backup-validation'
-import { captureSnapshot } from './backup'
+import { captureSnapshot, restoreBackup } from './backup'
 import { purgeExpiredCalendarOriginals } from './calendar-import-retention'
 import { emptyCoachNotificationState, reserveCoachNotification, type NotificationGuard, type NotificationRequest } from './coach-notifications'
 import { prepareCoachNotificationDelivery } from './coach-notification-save'
@@ -61,6 +61,17 @@ describe('I05 移行中の凍結（DATASET_FROZEN）', () => {
     await move()
     await expect(completeMoveOnSender('AAAA-AAAA', humanClick())).rejects.toThrow('一致しません')
     expect(await currentDatasetMode()).toBe('frozen')
+  })
+
+  it('本人の明示的な復元は凍結中の端末にも適用でき、有効な状態へ戻して保留中の移行を無効にする', async () => {
+    await switchDevice('A')
+    await manualTask('復元前', 10)
+    const saved = await captureSnapshot()
+    await move()
+    await restoreBackup(saved)
+    expect(await currentDatasetMode()).toBe('active'); expect((await db.localDevice.get('main'))!.pendingMove).toBeNull()
+    await createTask({ ...newTaskInput(), title: '復元後の新規' })
+    await expect(cancelMove(humanClick())).rejects.toThrow('取り消せる移行')
   })
 
   it('A→Bの移行: Bは検証後に有効、Aは完了コードで読み取り専用になり完了操作は日本語で失敗する', async () => {
