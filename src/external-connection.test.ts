@@ -14,3 +14,9 @@ it('PC操作側の同期例外でもファイル接続の取消を完了する',
   await expect(invalidateExternalConnection()).rejects.toMatchObject({ errors: [failure] })
   expect(files).toHaveBeenCalledOnce()
 })
+it('別接続の取消失敗でもGitHub公開の承認を取り消す', async () => {
+  const github = vi.fn().mockResolvedValue(undefined), failure = new Error('connection unavailable')
+  vi.stubGlobal('window', { michiFileBridge: { invalidate: () => Promise.reject(failure) }, michiGitHubAchievements: { invalidate: github } })
+  await expect(invalidateExternalConnection()).rejects.toMatchObject({ errors: [failure] })
+  expect(github).toHaveBeenCalledOnce()
+})

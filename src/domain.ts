@@ -39,7 +39,11 @@ export type SmartListField = 'status' | 'title' | 'project' | 'labels' | 'schedu
 export type SmartListAst = { type: 'all' | 'any'; children: SmartListAst[] } | { type: 'not'; child: SmartListAst } | { type: 'condition'; field: SmartListField; operator: 'eq' | 'neq' | 'lte' | 'gte' | 'contains' | 'is_unknown'; value?: string | number }
 export type SmartList = { id: string; ownerId: string; name: string; ast: SmartListAst; revision: number; createdAt: string; updatedAt: string }
 export type FocusProjectSelection = { id: string; ownerId: string; date: string; projects: string[]; source: 'user' | 'coach'; revision: number; updatedAt: string }
-export type Assessment = { id: string; taskId: string; score: ScoreInput; result: ScoreResult; createdAt: string; origin: 'human' | 'routine'; ruleVersion: 'v1' }
+export type AssessmentInstruction = { id: string; digest: string; ownerId: string; datasetId: string; actorId: string; actorKind: 'coach' | 'external-agent'; model: string | null; taskRevision: number; approvedBy: string }
+export type Assessment = { id: string; taskId: string; score: ScoreInput; result: ScoreResult; createdAt: string; ruleVersion: 'v1' } & (
+  { origin: 'human' | 'routine'; instruction?: never } |
+  { origin: 'user_instruction_via_agent'; instruction: AssessmentInstruction }
+)
 export type Completion = { id: string; taskId: string; originalAt: string; currentAt: string | null; localDate?: string; timezone?: string; originalPoints: number | null; netPoints: number | null; lastConfirmedPoints?: number | null; scoreState: 'pending' | 'confirmed'; title: string; project: string }
 export type LedgerEntry = { id: string; completionId: string; taskId: string; kind: 'award' | 'adjust' | 'reverse' | 'restore'; delta: number; at: string; reason: string }
 export type Routine = { id: string; title: string; cadence: 'daily' | 'weekly' | 'monthly' | 'after_completion'; interval: number; weekdays: number[]; monthDay: number; startDate: string; endDate: string | null; excludedDates?: string[]; afterTaskId: string | null; score: ScoreInput; project: string; active: boolean; revision: number; createdAt: string }

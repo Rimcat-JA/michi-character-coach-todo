@@ -1,5 +1,6 @@
 import type { FileBridgeWindow } from './file-bridge-types'
 import type { LocalActionWindow } from './local-action-types'
+import type { GitHubAchievementsGateway } from './github-publish-types'
 
 /** Permission reduction is allowed without a new human approval. */
 export async function invalidateExternalConnection(): Promise<void> {
@@ -7,6 +8,7 @@ export async function invalidateExternalConnection(): Promise<void> {
   const results = await Promise.allSettled([
     Promise.resolve().then(() => (window as FileBridgeWindow).michiFileBridge?.invalidate()),
     Promise.resolve().then(() => (window as LocalActionWindow).michiLocalActions?.invalidate()),
+    Promise.resolve().then(() => (window as unknown as { michiGitHubAchievements?: GitHubAchievementsGateway }).michiGitHubAchievements?.invalidate()),
   ])
   const errors = results.flatMap(result => result.status === 'rejected' ? [result.reason] : [])
   if (errors.length) throw new AggregateError(errors, '外部接続の取消中にエラーが発生しました。接続状態を確認してください')

@@ -1,27 +1,34 @@
 import Dexie from 'dexie'
 import { db } from './db'
 import { contentDigest, canonicalJSON } from './canonical'
-import { uid, validateDate, type Settings, type Task } from './domain'
+import { calculateScore, uid, validateDate, validateTaskInput, type ScoreInput, type Settings, type Task } from './domain'
+import { assertTripTaskScoreChangeAllowed } from './trip-bundles'
+import { cancelCoachNotificationTarget } from './coach-notification-save'
+import { assertTaskInstruction, clearTaskInstructionAuthority, type VerifiedTaskInstruction } from './task-user-instruction'
 
-export const taskChangeFields = ['notes', 'scheduledDate'] as const
+export const taskChangeFields = ['title', 'notes', 'scheduledDate', 'dueDate', 'manualPoints'] as const
 export type TaskChangeField = typeof taskChangeFields[number]
-export type TaskChangePatch = Partial<Pick<Task, TaskChangeField>>
+export type TaskChangePatch = Partial<Pick<Task, 'title'|'notes'|'scheduledDate'|'dueDate'>> & { manualPoints?: number }
 export type ChangePrincipal = { id: string; kind: 'human' | 'coach' | 'external-agent'; model?: string | null }
 export type SourceRevision = { id: string; revision: number }
 /** Constructed by the authenticated app/transport layer, never by a model payload. */
-export type ChangeContext = { principal: ChangePrincipal; ownerId: string; datasetId: string; allowedFields: TaskChangeField[]; sourceRevisions: SourceRevision[] }
+export type TaskFieldOrigin = 'human'|'agent_proposal'|'human_override'|'user_instruction_via_agent'
+export type ChangeContext = { principal: ChangePrincipal; ownerId: string; datasetId: string; allowedFields: TaskChangeField[]; sourceRevisions: SourceRevision[]; fieldOrigins?:Partial<Record<TaskChangeField,TaskFieldOrigin>> }
 export type ChangePolicy = {
   epoch: number; sourcePermissionRevision: number; aiChangesEnabled: boolean
   taskUpdate: 'deny' | 'require_approval' | 'auto_within_bounds'
   bounds: { maxTasks: number; maxScheduledDayShift: number; maxNotesCharacters: number }
   locks: Partial<Record<TaskChangeField, 'unlocked' | 'protect_from_autonomous' | 'locked_until_human_approval'>>
+  /** New fields never inherit the old notes/schedule automatic permission. */
+  fieldRules?: Partial<Record<'title'|'dueDate'|'manualPoints', 'deny'|'require_approval'>>
 }
 export type TaskChangeRequest = { taskId: string; expectedRevision: number; patch: TaskChangePatch }
-export type TaskChange = { taskId: string; baseRevision: number; title: string; before: Pick<Task, TaskChangeField>; after: Pick<Task, TaskChangeField>; fields: TaskChangeField[] }
+export type TaskChangeValues = Pick<Task,'title'|'notes'|'scheduledDate'|'dueDate'> & { manualPoints: number|null }
+export type TaskChange = { taskId: string; baseRevision: number; title: string; before: TaskChangeValues; after: TaskChangeValues; fields: TaskChangeField[]; patch: TaskChangePatch; scoreBefore: ScoreInput; scoreAfter: ScoreInput; assessmentBefore: string; effectivePointsBefore: number|null; fieldOrigins:Partial<Record<TaskChangeField,TaskFieldOrigin>> }
 export type PreparedChangeSet = {
   version: 1; id: string; principal: ChangePrincipal; ownerId: string; datasetId: string
   policyEpoch: number; sourcePermissionRevision: number; aiEnabledAtPrepare: boolean; sourceRevisions: SourceRevision[]
-  createdAt: string; expiresAt: string; changes: TaskChange[]; reason: string; digest: string
+  createdAt: string; expiresAt: string; changes: TaskChange[]; reason: string; instruction: VerifiedTaskInstruction|null; digest: string
 }
 export type UIChangeApproval = Readonly<{ id: string; changeSetId: string; digest: string; approvedBy: string; expiresAt: string }>
 export type ChangeReceipt = { changeSetId: string; digest: string; taskIds: string[]; revisions: { taskId: string; revision: number }[]; appliedAt: string }
@@ -38,22 +45,23 @@ const now = () => new Date().toISOString()
 const principal = (value: ChangePrincipal): ChangePrincipal => ({ id: value.id, kind: value.kind, model: value.model ?? null })
 const sourceOrder = (a:SourceRevision,b:SourceRevision) => a.id<b.id?-1:a.id>b.id?1:0
 /** Dataset restore/logout only reduces authority; no serialized grant is trusted. */
-export function clearChangeSetAuthority() { proposals.clear() }
+export function clearChangeSetAuthority() { proposals.clear(); clearTaskInstructionAuthority() }
 function record(value: unknown): value is Record<string, unknown> { return Boolean(value && typeof value === 'object' && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype) }
 function exactKeys(value: Record<string, unknown>, keys: readonly string[]) { return Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key)) }
 function integer(value: unknown, min: number, max: number) { return Number.isInteger(value) && Number(value) >= min && Number(value) <= max }
 function id(value: unknown) { return typeof value === 'string' && value.length > 0 && value.length <= 200 }
 
-export const defaultChangePolicy = (): ChangePolicy => ({ epoch: 0, sourcePermissionRevision: 0, aiChangesEnabled: true, taskUpdate: 'require_approval', bounds: { maxTasks: 20, maxScheduledDayShift: 3, maxNotesCharacters: 1000 }, locks: {} })
+export const defaultChangePolicy = (): ChangePolicy => ({ epoch: 0, sourcePermissionRevision: 0, aiChangesEnabled: true, taskUpdate: 'require_approval', bounds: { maxTasks: 20, maxScheduledDayShift: 3, maxNotesCharacters: 1000 }, locks: {}, fieldRules: { title:'require_approval', dueDate:'require_approval', manualPoints:'require_approval' } })
 export function validateChangePolicy(value: unknown): asserts value is ChangePolicy {
-  if (!record(value) || !exactKeys(value, ['epoch','sourcePermissionRevision','aiChangesEnabled','taskUpdate','bounds','locks']) || !integer(value.epoch,0,Number.MAX_SAFE_INTEGER) || !integer(value.sourcePermissionRevision,0,Number.MAX_SAFE_INTEGER) || typeof value.aiChangesEnabled !== 'boolean' || !['deny','require_approval','auto_within_bounds'].includes(value.taskUpdate as string)) fail('POLICY_INVALID','変更の権限設定が不正です')
+  if (!record(value) || !['epoch','sourcePermissionRevision','aiChangesEnabled','taskUpdate','bounds','locks'].every(key=>Object.hasOwn(value,key)) || Object.keys(value).some(key=>!['epoch','sourcePermissionRevision','aiChangesEnabled','taskUpdate','bounds','locks','fieldRules'].includes(key)) || !integer(value.epoch,0,Number.MAX_SAFE_INTEGER) || !integer(value.sourcePermissionRevision,0,Number.MAX_SAFE_INTEGER) || typeof value.aiChangesEnabled !== 'boolean' || !['deny','require_approval','auto_within_bounds'].includes(value.taskUpdate as string)) fail('POLICY_INVALID','変更の権限設定が不正です')
   if (!record(value.bounds) || !exactKeys(value.bounds,['maxTasks','maxScheduledDayShift','maxNotesCharacters']) || !integer(value.bounds.maxTasks,1,100) || !integer(value.bounds.maxScheduledDayShift,0,3650) || !integer(value.bounds.maxNotesCharacters,0,50000)) fail('POLICY_INVALID','変更の上限設定が不正です')
   if (!record(value.locks) || Object.entries(value.locks).some(([field, lock]) => !taskChangeFields.includes(field as TaskChangeField) || !['unlocked','protect_from_autonomous','locked_until_human_approval'].includes(lock as string))) fail('POLICY_INVALID','保護する項目の設定が不正です')
+  if (value.fieldRules !== undefined && (!record(value.fieldRules) || Object.entries(value.fieldRules).some(([field, rule])=>!['title','dueDate','manualPoints'].includes(field)||!['deny','require_approval'].includes(rule as string)))) fail('POLICY_INVALID','追加項目の変更設定が不正です')
 }
 export function changePolicyFor(settings: Settings): ChangePolicy {
   const value = (settings as Settings & { changePolicy?: ChangePolicy }).changePolicy ?? defaultChangePolicy()
   validateChangePolicy(value)
-  return structuredClone(value)
+  return { ...structuredClone(value), fieldRules: { ...defaultChangePolicy().fieldRules, ...value.fieldRules } }
 }
 /** Policy updates invalidate queued work; only the owner's trusted setting UI may call this. */
 export async function setChangePolicyFromUI(context: ChangeContext, event: Event, next: Omit<ChangePolicy, 'epoch'>): Promise<ChangePolicy> {
@@ -70,6 +78,7 @@ export async function setChangePolicyFromUI(context: ChangeContext, event: Event
 }
 function validateContext(context: ChangeContext) {
   if (!context || !id(context.ownerId) || !id(context.datasetId) || !context.principal || !id(context.principal.id) || !['human','coach','external-agent'].includes(context.principal.kind) || context.principal.model != null && (typeof context.principal.model!=='string'||context.principal.model.length>200) || context.principal.kind === 'human' && context.principal.id !== context.ownerId || !Array.isArray(context.allowedFields) || context.allowedFields.some(field => !taskChangeFields.includes(field)) || !Array.isArray(context.sourceRevisions) || context.sourceRevisions.some(source => !record(source) || !exactKeys(source,['id','revision']) || !id(source.id) || !integer(source.revision,0,Number.MAX_SAFE_INTEGER)) || new Set(context.sourceRevisions.map(source=>source.id)).size !== context.sourceRevisions.length) fail('UNAUTHORIZED','この領域の変更は許可されていません')
+  if(context.fieldOrigins!==undefined&&(!record(context.fieldOrigins)||Object.entries(context.fieldOrigins).some(([field,origin])=>!taskChangeFields.includes(field as TaskChangeField)||!['human','agent_proposal','human_override','user_instruction_via_agent'].includes(origin))))fail('UNAUTHORIZED','変更項目の由来が不正です')
 }
 async function currentSettings(context: ChangeContext): Promise<Settings> {
   validateContext(context)
@@ -87,19 +96,21 @@ function trustedHumanEvent(context: ChangeContext, event: Event) {
   catch { fail('HUMAN_APPROVAL_REQUIRED','アプリの本人確認ボタンから承認してください') }
 }
 function validatePatch(value: unknown): asserts value is TaskChangePatch {
-  if (!record(value) || !Object.keys(value).length || Object.keys(value).some(field => !taskChangeFields.includes(field as TaskChangeField))) fail('UNSUPPORTED_FIELD','この変更ではメモと予定日だけを編集できます。点数・期限・完了・権限の変更には対応していません。')
+  if (!record(value) || !Object.keys(value).length || Object.keys(value).some(field => !taskChangeFields.includes(field as TaskChangeField))) fail('UNSUPPORTED_FIELD','タイトル・メモ・予定日・期限・本人指定ポイントだけを編集できます。完了・配分・系列・権限には別の操作が必要です。')
+  if (Object.hasOwn(value,'title') && (typeof value.title !== 'string' || !value.title.trim() || value.title.length > 300)) fail('INVALID_INPUT','タイトルは1〜300文字で入力してください')
   if (Object.hasOwn(value,'notes') && (typeof value.notes !== 'string' || value.notes.length > 50000)) fail('INVALID_INPUT','メモは50,000文字以内で入力してください')
-  if (Object.hasOwn(value,'scheduledDate')) {
-    if (value.scheduledDate !== null && typeof value.scheduledDate !== 'string') fail('INVALID_INPUT','予定日が不正です')
-    try { validateDate(value.scheduledDate as string|null,'予定日') } catch { fail('INVALID_INPUT','予定日が不正です') }
+  for (const field of ['scheduledDate','dueDate'] as const) if (Object.hasOwn(value,field)) {
+    if (value[field] !== null && typeof value[field] !== 'string') fail('INVALID_INPUT','日付が不正です')
+    try { validateDate(value[field] as string|null,'日付') } catch { fail('INVALID_INPUT','日付が不正です') }
   }
+  if (Object.hasOwn(value,'manualPoints') && !integer(value.manualPoints,0,100000)) fail('INVALID_INPUT','本人指定ポイントは0〜100000の整数にしてください')
 }
 function freeze<T>(value: T): T {
   if (value && typeof value === 'object') { for (const child of Object.values(value)) freeze(child); Object.freeze(value) }
   return value
 }
 async function verifyProposal(value: PreparedChangeSet): Promise<PreparedChangeSet> {
-  if (!record(value) || !exactKeys(value,['version','id','principal','ownerId','datasetId','policyEpoch','sourcePermissionRevision','aiEnabledAtPrepare','sourceRevisions','createdAt','expiresAt','changes','reason','digest'])) fail('INVALID_CHANGE_SET','変更案の形式が不正です')
+  if (!record(value) || !exactKeys(value,['version','id','principal','ownerId','datasetId','policyEpoch','sourcePermissionRevision','aiEnabledAtPrepare','sourceRevisions','createdAt','expiresAt','changes','reason','instruction','digest'])) fail('INVALID_CHANGE_SET','変更案の形式が不正です')
   const saved = proposals.get(value.id)
   if (!saved) fail('UNVERIFIED_CHANGE_SET','この変更案をアプリで作り直してください')
   const copy = structuredClone(value)
@@ -118,6 +129,18 @@ function authorizeProposal(prepared: PreparedChangeSet, context: ChangeContext, 
   if (Date.parse(prepared.expiresAt) <= Date.now()) fail('EXPIRED','変更案の確認期限が切れました。差分を作り直してください')
   return policy
 }
+const requiresInstruction = (changes: TaskChange[]) => changes.some(change=>change.fields.some(field=>['title','dueDate','manualPoints'].includes(field)))
+const instructionRequests = (changes: TaskChange[]): TaskChangeRequest[] => changes.map(change=>({taskId:change.taskId,expectedRevision:change.baseRevision,patch:change.patch}))
+function verifyInstruction(prepared: PreparedChangeSet, context: ChangeContext, settings: Settings) {
+  if (requiresInstruction(prepared.changes) || prepared.instruction) {
+    try { assertTaskInstruction(prepared.instruction,instructionRequests(prepared.changes),context,settings) }
+    catch (error) { fail('USER_INSTRUCTION_REQUIRED',error instanceof Error?error.message:'本人の指示を確認してください') }
+  }
+}
+async function ownedTaskContainer(task:Task,ownerId:string) {
+  if (task.containerId) { const container=await db.containers.get(task.containerId); if(!container||container.deletedAt||container.ownerId!==ownerId) fail('UNAUTHORIZED','このタスクの所属領域を編集する権限がありません') }
+}
+function values(task:Task):TaskChangeValues { return {title:task.title,notes:task.notes,scheduledDate:task.scheduledDate,dueDate:task.dueDate,manualPoints:task.score.manualPoints} }
 function changedCharacters(before: string, after: string) {
   let prefix = 0, suffix = 0
   while (prefix < before.length && prefix < after.length && before[prefix] === after[prefix]) prefix++
@@ -127,8 +150,10 @@ function changedCharacters(before: string, after: string) {
 export function decideChangePolicy(prepared: PreparedChangeSet, policy: ChangePolicy): ChangePolicyDecision {
   validateChangePolicy(policy)
   const agent = prepared.principal.kind !== 'human'
-  const protectedFields = [...new Set(prepared.changes.flatMap(change => change.fields.filter(field => policy.locks[field] === 'locked_until_human_approval' || agent && policy.locks[field] === 'protect_from_autonomous')))]
+  const protectedFields = [...new Set(prepared.changes.flatMap(change => change.fields.filter(field => field==='manualPoints'||field==='dueDate'||policy.locks[field] === 'locked_until_human_approval' || agent && policy.locks[field] === 'protect_from_autonomous')))]
   if (agent && (!policy.aiChangesEnabled || policy.taskUpdate === 'deny')) return {status:'denied',reason:'AIによる変更は停止しています',protectedFields}
+  if (agent && prepared.changes.some(change=>change.fields.some(field=>policy.fieldRules?.[field as 'title'|'dueDate'|'manualPoints']==='deny'))) return {status:'denied',reason:'この項目の代理変更は停止しています',protectedFields}
+  if (requiresInstruction(prepared.changes)) return {status:'awaiting_approval',reason:'本人が指定したタイトル・期限・ポイントの変更は毎回内容を確認します',protectedFields}
   if (!agent || policy.taskUpdate !== 'auto_within_bounds' || protectedFields.length) return {status:'awaiting_approval',reason:protectedFields.length?'保護された項目の本人確認が必要です':'この変更の本人確認が必要です',protectedFields}
   if (prepared.changes.length > policy.bounds.maxTasks) return {status:'awaiting_approval',reason:'自動変更の件数上限を超えています',protectedFields}
   for (const change of prepared.changes) {
@@ -141,7 +166,7 @@ export function decideChangePolicy(prepared: PreparedChangeSet, policy: ChangePo
   return {status:'auto',reason:'本人が設定した自動変更の範囲内です',protectedFields}
 }
 
-export async function prepareTaskChanges(requests: TaskChangeRequest[], context: ChangeContext, reason = 'メモと予定日の変更'): Promise<PreparedChangeSet> {
+export async function prepareTaskChanges(requests: TaskChangeRequest[], context: ChangeContext, reason = '選択したタスクの変更', instruction:VerifiedTaskInstruction|null=null): Promise<PreparedChangeSet> {
   for (const [key,proposal] of proposals) if (Date.parse(proposal.expiresAt)<=Date.now()) proposals.delete(key)
   requests=freeze(structuredClone(requests)); context=freeze(structuredClone(context))
   validateContext(context)
@@ -152,21 +177,32 @@ export async function prepareTaskChanges(requests: TaskChangeRequest[], context:
     validatePatch(request.patch)
     if (Object.keys(request.patch).some(field=>!context.allowedFields.includes(field as TaskChangeField))) fail('UNAUTHORIZED','この項目の変更は許可されていません')
   }
-  const payload = await db.transaction('r',db.tasks,db.settings,async()=>{
+  const payload = await db.transaction('r',db.tasks,db.settings,db.containers,db.tripBundles,async()=>{
     const settings = await currentSettings(context), policy=changePolicyFor(settings)
     if (context.principal.kind !== 'human' && (!settings.aiEnabled || !policy.aiChangesEnabled || policy.taskUpdate==='deny')) fail('CHANGES_STOPPED','AIによる変更は停止しています')
     const changes: TaskChange[] = []
     for (const request of requests) {
       const task=await db.tasks.get(request.taskId)
       if (!task || task.deletedAt) fail('UNAUTHORIZED','この領域の変更は許可されていません')
+      await ownedTaskContainer(task,context.ownerId)
       if (task.revision!==request.expectedRevision) fail('CONFLICT','タスクが更新されています。新しい版で差分を作り直してください')
-      const before={notes:task.notes,scheduledDate:task.scheduledDate},after={...before,...request.patch}
-      const fields=taskChangeFields.filter(field=>before[field]!==after[field])
+      const before=values(task),after={...before,...request.patch,...(request.patch.title!==undefined?{title:request.patch.title.trim()}:{})}
+      const scoreAfter=Object.hasOwn(request.patch,'manualPoints')?{...task.score,mode:'manual' as const,manualPoints:request.patch.manualPoints!}:structuredClone(task.score)
+      validateTaskInput({...task,...after,score:scoreAfter})
+      const fields=taskChangeFields.filter(field=>Object.hasOwn(request.patch,field)&&(before[field]!==after[field]||field==='manualPoints'&&task.score.mode!=='manual'))
       if (!fields.length) fail('NO_CHANGE','変更する内容がありません')
-      changes.push({taskId:task.id,baseRevision:task.revision,title:task.title,before,after,fields})
+      if(fields.includes('manualPoints')) assertTripTaskScoreChangeAllowed(task.id,task.score,scoreAfter,await db.tripBundles.toArray())
+      const fieldOrigins=Object.fromEntries(fields.map(field=>[field,context.principal.kind==='human'?'human':context.fieldOrigins?.[field]==='human_override'?'human_override':instruction?'user_instruction_via_agent':'agent_proposal']))
+      changes.push({taskId:task.id,baseRevision:task.revision,title:task.title,before,after,fields,patch:request.patch,scoreBefore:structuredClone(task.score),scoreAfter,assessmentBefore:task.assessmentId,effectivePointsBefore:task.effectivePoints,fieldOrigins})
     }
+    if(requiresInstruction(changes)||instruction){
+      try { assertTaskInstruction(instruction,requests,context,settings) }
+      catch(error){fail('USER_INSTRUCTION_REQUIRED',error instanceof Error?error.message:'本人の指示を確認してください')}
+      if(changes.some((change,index)=>canonicalJSON(change.scoreBefore)!==canonicalJSON(instruction.changes[index].scoreBefore))) fail('CONFLICT','本人指示を確認した後にポイントの状態が変わりました')
+    }
+    if(context.principal.kind!=='human'&&changes.some(change=>change.fields.some(field=>policy.fieldRules?.[field as 'title'|'dueDate'|'manualPoints']==='deny')))fail('CHANGES_STOPPED','この項目の代理変更は停止しています')
     const createdAt=now()
-    return {version:1 as const,id:uid(),principal:principal(context.principal),ownerId:context.ownerId,datasetId:context.datasetId,policyEpoch:policy.epoch,sourcePermissionRevision:policy.sourcePermissionRevision,aiEnabledAtPrepare:settings.aiEnabled,sourceRevisions:structuredClone(context.sourceRevisions.slice().sort(sourceOrder)),createdAt,expiresAt:new Date(Date.now()+24*60*60*1000).toISOString(),changes,reason}
+    return {version:1 as const,id:uid(),principal:principal(context.principal),ownerId:context.ownerId,datasetId:context.datasetId,policyEpoch:policy.epoch,sourcePermissionRevision:policy.sourcePermissionRevision,aiEnabledAtPrepare:settings.aiEnabled,sourceRevisions:structuredClone(context.sourceRevisions.slice().sort(sourceOrder)),createdAt,expiresAt:instruction?.expiresAt??new Date(Date.now()+24*60*60*1000).toISOString(),changes,reason,instruction}
   })
   const prepared=freeze({...payload,digest:await Dexie.waitFor(contentDigest(payload))})
   proposals.set(prepared.id,prepared)
@@ -186,6 +222,7 @@ export async function approveChangeSetFromUI(value: PreparedChangeSet, context: 
   trustedHumanEvent(context,event)
   const prepared=await verifyProposal(value)
   const settings=await currentSettings(context),policy=authorizeProposal(prepared,context,settings,true)
+  verifyInstruction(prepared,context,settings)
   const decision=decideChangePolicy(prepared,policy)
   if (decision.status==='denied') fail('CHANGES_STOPPED',decision.reason)
   if (checkedProtectedFields.some(field=>!taskChangeFields.includes(field)) || decision.protectedFields.some(field=>!checkedProtectedFields.includes(field))) fail('PROTECTED_FIELD_APPROVAL_REQUIRED','保護された項目を個別に確認してください')
@@ -195,15 +232,17 @@ export async function approveChangeSetFromUI(value: PreparedChangeSet, context: 
 }
 
 export async function applyChangeSet(value: PreparedChangeSet, approval: UIChangeApproval | null, context: ChangeContext, requestKey: string): Promise<ChangeReceipt> {
+  const enclosing=Dexie.currentTransaction
   context=freeze(structuredClone(context))
   validateContext(context)
   if (!id(requestKey)) fail('INVALID_REQUEST_KEY','実行キーを指定してください')
   const prepared=await verifyProposal(value)
   const requestStorageKey=`changeset:request:${await Dexie.waitFor(contentDigest({principalId:context.principal.id,requestKey}))}`
   const appliedStorageKey=`changeset:applied:${prepared.id}`
-  const receipt=await db.transaction('rw',db.tasks,db.settings,db.commands,db.audits,async()=>{
+  const receipt=await db.transaction('rw',[db.tasks,db.settings,db.commands,db.audits,db.assessments,db.tripBundles,db.containers],async()=>{
     if (proposals.get(prepared.id)!==prepared) fail('UNVERIFIED_CHANGE_SET','この変更案は取り消されました')
     const settings=await currentSettings(context),policy=authorizeProposal(prepared,context,settings)
+    verifyInstruction(prepared,context,settings)
     const decision=decideChangePolicy(prepared,policy)
     if (decision.status==='denied') fail('CHANGES_STOPPED',decision.reason)
     const grant=approval ? approvals.get(approval) : undefined
@@ -223,13 +262,25 @@ export async function applyChangeSet(value: PreparedChangeSet, approval: UIChang
     }
     if (grant?.consumed) fail('APPROVAL_CONSUMED','この本人承認は既に使用されています')
     const tasks=await Promise.all(prepared.changes.map(change=>db.tasks.get(change.taskId)))
-    if (tasks.some((task,index)=>!task || task.deletedAt || task.revision!==prepared.changes[index].baseRevision || task.title!==prepared.changes[index].title || task.notes!==prepared.changes[index].before.notes || task.scheduledDate!==prepared.changes[index].before.scheduledDate)) fail('CONFLICT','タスクが更新されています。新しい版で差分を確認してください')
+    if (tasks.some((task,index)=>!task || task.deletedAt || task.revision!==prepared.changes[index].baseRevision || canonicalJSON(values(task))!==canonicalJSON(prepared.changes[index].before) || canonicalJSON(task.score)!==canonicalJSON(prepared.changes[index].scoreBefore)||task.assessmentId!==prepared.changes[index].assessmentBefore||task.effectivePoints!==prepared.changes[index].effectivePointsBefore)) fail('CONFLICT','タスクが更新されています。新しい版で差分を確認してください')
     const at=now(),revisions:ChangeReceipt['revisions']=[]
     for (const [index,change] of prepared.changes.entries()) {
       const task=tasks[index]!
-      await db.tasks.put({...task,...change.after,firstScheduledDate:task.firstScheduledDate??task.scheduledDate??change.after.scheduledDate,revision:task.revision+1,updatedAt:at})
+      await ownedTaskContainer(task,context.ownerId)
+      let assessmentId=task.assessmentId
+      const scoreChanged=change.fields.includes('manualPoints')
+      const result=calculateScore(change.scoreAfter)
+      if(scoreChanged){
+        assertTripTaskScoreChangeAllowed(task.id,task.score,change.scoreAfter,await db.tripBundles.toArray())
+        assessmentId=uid()
+        const agent=prepared.principal.kind!=='human'
+        await db.assessments.add({id:assessmentId,taskId:task.id,score:structuredClone(change.scoreAfter),result,createdAt:at,origin:agent?'user_instruction_via_agent':'human',ruleVersion:'v1',...(agent?{instruction:{id:prepared.instruction!.id,digest:prepared.instruction!.digest,ownerId:prepared.ownerId,datasetId:prepared.datasetId,actorId:prepared.principal.id,actorKind:prepared.principal.kind as 'coach'|'external-agent',model:prepared.principal.model??null,taskRevision:task.revision,approvedBy:grant!.userId}}:{})})
+      }
+      const {manualPoints:_manualPoints,...after}=change.after
+      await db.tasks.put({...task,...after,score:structuredClone(change.scoreAfter),assessmentId,effectivePoints:result.effective,firstScheduledDate:task.firstScheduledDate??task.scheduledDate??change.after.scheduledDate,revision:task.revision+1,updatedAt:at})
+      await cancelCoachNotificationTarget(task.id,at)
       revisions.push({taskId:task.id,revision:task.revision+1})
-      await db.audits.add({id:uid(),taskId:task.id,operation:'changeset.update',at,detail:JSON.stringify({changeSetId:prepared.id,digest:prepared.digest,principal:prepared.principal,approvedBy:grant?.userId??null,policyEpoch:policy.epoch,sourcePermissionRevision:policy.sourcePermissionRevision,sourceRevisions:prepared.sourceRevisions,before:change.before,after:change.after,reason:prepared.reason,undo:{expectedRevision:task.revision+1,patch:Object.fromEntries(change.fields.map(field=>[field,change.before[field]]))}})})
+      await db.audits.add({id:uid(),taskId:task.id,operation:'changeset.update',at,detail:JSON.stringify({changeSetId:prepared.id,digest:prepared.digest,principal:prepared.principal,origin:prepared.principal.kind==='human'?'human':prepared.instruction?'user_instruction_via_agent':'agent_proposal',approvedBy:grant?.userId??null,policyEpoch:policy.epoch,sourcePermissionRevision:policy.sourcePermissionRevision,sourceRevisions:prepared.sourceRevisions,instruction:prepared.instruction,before:change.before,after:change.after,scoreBefore:change.scoreBefore,scoreAfter:change.scoreAfter,assessmentBefore:task.assessmentId,assessmentAfter:assessmentId,fieldOrigins:change.fieldOrigins,reason:prepared.reason,undo:{expectedRevision:task.revision+1,patch:Object.fromEntries(change.fields.map(field=>[field,change.before[field]])),...(scoreChanged?{score:change.scoreBefore,requiresNewInstruction:true}:{})}})})
     }
     const result:ChangeReceipt={changeSetId:prepared.id,digest:prepared.digest,taskIds:prepared.changes.map(change=>change.taskId),revisions,appliedAt:at}
     const resultId=JSON.stringify(result)
@@ -237,6 +288,6 @@ export async function applyChangeSet(value: PreparedChangeSet, approval: UIChang
     await db.commands.add({key:requestStorageKey,hash:prepared.digest,resultId,at})
     return result
   })
-  if (approval) { const grant=approvals.get(approval); if(grant) grant.consumed=true }
+  if (approval) { const grant=approvals.get(approval); if(grant) { if(enclosing){let root=enclosing;while(root.parent)root=root.parent;root.on('complete',()=>{grant.consumed=true})}else grant.consumed=true } }
   return receipt
 }

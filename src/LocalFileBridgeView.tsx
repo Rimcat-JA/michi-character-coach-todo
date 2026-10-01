@@ -6,7 +6,7 @@ import type { FileBridgeField, FileBridgeGateway, FileBridgeHost, FileBridgeInbo
 import type { Settings, Task } from './domain'
 
 const labels:Record<FileBridgeField,string>={title:'タスク名',notes:'メモ',scheduled_date:'予定日'}
-const changeLabels:Record<TaskChangeField,string>={notes:'メモ',scheduledDate:'予定日'}
+const changeLabels:Record<TaskChangeField,string>={title:'タイトル',notes:'メモ',scheduledDate:'予定日',dueDate:'締め切り',manualPoints:'ポイント'}
 export default function LocalFileBridgeView({settings,tasks,gateway,onApplied}: {settings:Settings;tasks:Task[];gateway?:FileBridgeGateway;onApplied?:(receipt:FileBridgeApplicationOutcome['receipt'])=>void}) {
   const connection=gateway??(window as FileBridgeWindow).michiFileBridge
   const controller=useMemo(()=>connection?createFileBridgeController(connection):null,[connection])

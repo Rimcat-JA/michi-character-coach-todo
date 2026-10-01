@@ -17,7 +17,7 @@ declare global {
       summarize: (request: { model: string; kind: 'day-note' | 'goal-checkin' | 'review' | 'source'; text: string }) => Promise<string>
       assistTask: (request: { model: string; text: string }) => Promise<string>
       assessScore: (request: { model: string; text: string }) => Promise<string>
-      proposeTaskChange: (request: { model: string; message: string; task: { id: string; title: string; notes: string; scheduledDate: string | null; dueDate: string | null; revision: number } }) => Promise<string>
+      proposeTaskChange: (request: { model: string; message: string; task: { id: string; title: string; notes: string; scheduledDate: string | null; dueDate: string | null; revision: number; scoreMode: Task['score']['mode']; manualPoints: number | null } }) => Promise<string>
       detectObligations: (input: { model: string; request: DetectionRequest }) => Promise<string>
       verifyObligations: (input: { model: string; request: DetectionRequest; change: DetectionChange }) => Promise<string>
       usage: () => Promise<AIUsageSnapshot>
