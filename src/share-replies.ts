@@ -1,8 +1,9 @@
 import { db } from './db'
-import { uid, validateDate } from './domain'
+import { today, uid, validateDate } from './domain'
 import { prepareTaskChanges, type ChangeContext, type PreparedChangeSet, type TaskChangePatch } from './change-set'
 import { openShareEnvelope, sealShareEnvelope, ShareError } from './share-crypto'
 import { trustedShareClick } from './share-identity'
+import { confirmTaskInstructionFromUI } from './task-user-instruction'
 import { PROPOSAL_FIELDS, type ProposalField, type ShareProposal } from './share-types'
 
 export type ReplyComment = { id: string; share_task_id: string; body: string }
@@ -78,8 +79,12 @@ export async function importShareReply(raw: string): Promise<ReplyImportResult> 
     return { added, duplicates, proposalId }
   })
 }
-/** Turns a pending proposal into a normal owner ChangeSet; it changes nothing until the owner approves it with a native click. */
-export async function prepareShareProposal(proposalId: string): Promise<{ prepared: PreparedChangeSet; context: ChangeContext; proposal: ShareProposal }> {
+/**
+ * Turns a pending proposal into a normal owner ChangeSet. The owner's native click confirms the proposed values as the owner's own instruction
+ * (titles require one), and the ChangeSet still changes nothing until it is approved with a second native click.
+ */
+export async function prepareShareProposal(proposalId: string, event: Event): Promise<{ prepared: PreparedChangeSet; context: ChangeContext; proposal: ShareProposal }> {
+  trustedShareClick(event)
   const proposal = await db.shareProposals.get(proposalId), settings = await db.settings.get('main')
   if (!proposal || proposal.state !== 'pending' || !settings) throw new ShareError('確認待ちの提案がありません')
   const grant = await db.resourceGrants.get(proposal.grantId)
@@ -90,7 +95,9 @@ export async function prepareShareProposal(proposalId: string): Promise<{ prepar
   if ('title' in proposal.fields) patch.title = proposal.fields.title!
   if ('scheduled_date' in proposal.fields) patch.scheduledDate = proposal.fields.scheduled_date ?? null
   const context: ChangeContext = { principal: { id: settings.profileId, kind: 'human' }, ownerId: settings.profileId, datasetId: settings.datasetId, allowedFields: ['title', 'scheduledDate'], sourceRevisions: [] }
-  const prepared = await prepareTaskChanges([{ taskId: task.id, expectedRevision: task.revision, patch }], context, `共有相手「${proposal.authorLabel}」からの編集提案`)
+  const requests = [{ taskId: task.id, expectedRevision: task.revision, patch }], reason = `共有相手「${proposal.authorLabel}」からの編集提案`
+  const instruction = 'title' in patch ? await confirmTaskInstructionFromUI({ message: `${reason}を本人が確認: ${Object.entries(proposal.fields).map(([field, value]) => `${field === 'title' ? 'タイトル' : '予定日'}→${value ?? '未設定'}`).join('、')}`, referenceDate: today(), timezone: Intl.DateTimeFormat().resolvedOptions().timeZone, changes: requests }, context, event) : null
+  const prepared = await prepareTaskChanges(requests, context, reason, instruction)
   return { prepared, context, proposal }
 }
 export async function settleShareProposal(proposalId: string, state: 'applied' | 'dismissed', event: Event): Promise<void> {
