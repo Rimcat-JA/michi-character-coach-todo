@@ -1,6 +1,7 @@
 import { ConflictError, newTaskInput } from './commands'
 import { db } from './db'
 import { calculateScore, emptyScore, uid, type Assessment, type Task } from './domain'
+import { synchronizeAllocationCompletion } from './allocation-completion'
 
 export type ResistanceReason = 'unclear' | 'large' | 'waiting' | 'priority' | 'difficult'
 export type BreakdownStep = { title: string; points: number }
@@ -29,7 +30,7 @@ export async function applyBreakdownProposal(proposal: BreakdownProposal): Promi
   const steps = proposal.steps.map(step => ({ title: step.title.trim(), points: step.points }))
   if (steps.some(step => !step.title || step.title.length > 300 || !Number.isInteger(step.points) || step.points < 0 || step.points > 100000)) throw new Error('各手順の名前と配分ポイントを確認してください')
   const hash = JSON.stringify({ operation: 'breakdown', proposal: { ...proposal, steps } })
-  return db.transaction('rw', [db.tasks, db.assessments, db.checklistItems, db.audits, db.commands, db.tripBundles], async () => {
+  return db.transaction('rw', [db.tasks, db.assessments, db.completions, db.checklistItems, db.audits, db.commands, db.tripBundles], async () => {
     const prior = await db.commands.get(`breakdown:${proposal.id}`)
     if (prior) {
       if (prior.hash !== hash) throw new Error('同じ分割案を変更して再採用できません')
@@ -49,6 +50,7 @@ export async function applyBreakdownProposal(proposal: BreakdownProposal): Promi
     const ids: string[] = []
     await db.tasks.put({ ...parent, score: parentScore, effectivePoints: 0, assessmentId: parentAssessmentId, revision: parent.revision + 1, updatedAt: at })
     await db.assessments.add(parentAssessment)
+    await synchronizeAllocationCompletion(parent, parentAssessmentId, 0)
     for (const [index, step] of steps.entries()) {
       const id = uid(), itemId = uid(), assessmentId = uid()
       const score = { ...emptyScore(), mode: 'allocated' as const, manualPoints: step.points }
