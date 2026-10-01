@@ -7,6 +7,7 @@ import { verifySourceDigests } from './source-validation'
 import { clearDetectionAuthority } from './detection-run'
 import { clearCoachTurnAuthority } from './chat-history'
 import { clearCalendarRulesAuthority } from './calendar-rules-save'
+import { clearRoutineAssistanceAuthority } from './routine-assist-save'
 import { invalidateExternalConnection } from './external-connection'
 import { restoreCoachNotificationState } from './coach-notifications'
 import { purgeExpiredSources } from './source-library'
@@ -125,6 +126,7 @@ export async function restoreBackup(snapshot: Snapshot) {
   clearDetectionAuthority()
   clearCoachTurnAuthority()
   clearCalendarRulesAuthority()
+  clearRoutineAssistanceAuthority()
   clearAchievementAuthority()
   await purgeExpiredSources()
   await purgeExpiredMemories()

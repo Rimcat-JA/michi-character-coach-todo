@@ -32,7 +32,8 @@ async function resolvedProject(input: TaskInput): Promise<string> {
   return containerPath(item.id, containers)
 }
 
-export async function addTask(input: TaskInput, generationKey: string, routineId: string | null): Promise<string> {
+export async function addTask(input: TaskInput, generationKey: string, routineId: string | null, origin: 'human' | 'routine' = routineId ? 'routine' : 'human'): Promise<string> {
+  if (origin !== 'human' && origin !== 'routine') throw new Error('タスク生成の由来が不正です')
   validateTaskInput(input)
   await validateLabelsForOwner(input.labels)
   for (const [name, value] of [['予定日', input.scheduledDate], ['締め切り', input.dueDate], ['目標日', input.targetDate], ['見直し日', input.reviewDate], ['開始可能日', input.availableFrom], ['延期終了日', input.deferredUntil ?? null]] as const) validateDate(value, name)
@@ -40,9 +41,9 @@ export async function addTask(input: TaskInput, generationKey: string, routineId
   const project = await resolvedProject(input)
   const id = uid(), assessmentId = uid(), at = now()
   const task: Task = { ...input, project, firstScheduledDate: input.scheduledDate, title: input.title.trim(), labels: [...input.labels], score: { ...input.score }, id, generationKey, routineId, effectivePoints: result.effective, assessmentId, status: 'open', revision: 1, createdAt: at, updatedAt: at, deletedAt: null }
-  const assessment: Assessment = { id: assessmentId, taskId: id, score: { ...input.score }, result, createdAt: at, origin: routineId ? 'routine' : 'human', ruleVersion: 'v1' }
+  const assessment: Assessment = { id: assessmentId, taskId: id, score: { ...input.score }, result, createdAt: at, origin, ruleVersion: 'v1' }
   await db.tasks.add(task); await db.assessments.add(assessment)
-  await db.audits.add({ id: uid(), taskId: id, operation: 'create', at, detail: routineId ? 'ルーティンから作成' : '本人が作成' })
+  await db.audits.add({ id: uid(), taskId: id, operation: 'create', at, detail: origin === 'routine' ? 'ルーティンから作成' : '本人が作成' })
   return id
 }
 export async function createTask(input: TaskInput, key: string = uid()) {

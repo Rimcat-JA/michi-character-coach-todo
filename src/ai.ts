@@ -2,6 +2,7 @@ import type { CharacterProfile, Goal, GoalCheckIn, Task } from './domain'
 import { currentCheckInContext } from './goals'
 import type { AIUsageLimits, AIUsageSnapshot } from './AIUsageView'
 import type { DetectionRequest, DetectionChange } from './detection-contract'
+import type { RoutineAssistRequest } from './routine-assist'
 
 export type AIStatus = { secureStorage: boolean; configured: boolean }
 export type AIRequest = { model: string; message: string; selectedTask: string | null; character?: CharacterProfile }
@@ -18,6 +19,7 @@ declare global {
       assistTask: (request: { model: string; text: string }) => Promise<string>
       assessScore: (request: { model: string; text: string }) => Promise<string>
       proposeTaskChange: (request: { model: string; message: string; task: { id: string; title: string; notes: string; scheduledDate: string | null; dueDate: string | null; revision: number; scoreMode: Task['score']['mode']; manualPoints: number | null } }) => Promise<string>
+      proposeRoutine: (request: RoutineAssistRequest) => Promise<string>
       detectObligations: (input: { model: string; request: DetectionRequest }) => Promise<string>
       verifyObligations: (input: { model: string; request: DetectionRequest; change: DetectionChange }) => Promise<string>
       usage: () => Promise<AIUsageSnapshot>

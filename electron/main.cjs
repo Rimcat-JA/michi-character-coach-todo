@@ -4,6 +4,7 @@ const path = require('node:path')
 const { pathToFileURL } = require('node:url')
 const { createAIBudget, estimateReservationTokens } = require('./ai-budget.cjs')
 const { scoreAssistMessages } = require('./score-assist.cjs')
+const { routineAssistMessages } = require('./routine-assist.cjs')
 const { detectionMessages } = require('./detection.cjs')
 const { installFileBridgeIPC } = require('./file-bridge-ipc.cjs')
 const { installLocalActionIPC } = require('./local-action-ipc.cjs')
@@ -144,6 +145,15 @@ async function proposeTaskChangeWithOpenRouter({ model, message, task }) {
   return answer.trim()
 }
 
+async function proposeRoutineWithOpenRouter(request) {
+  const messages = routineAssistMessages(request)
+  const body = await openRouterCompletion('assist', { model: request.model, max_tokens: 1600, reasoning: { effort: 'low' }, messages })
+  if (body?.choices?.[0]?.finish_reason === 'length') throw new Error('周期の候補が途中で切れました。指示と入力欄はそのまま残します')
+  const answer = body?.choices?.[0]?.message?.content
+  if (typeof answer !== 'string' || !answer.trim() || answer.length > 16000) throw new Error('周期の候補を読めませんでした。指示と入力欄はそのまま残します')
+  return answer.trim()
+}
+
 async function detectWithOpenRouter({ model, request, change }, verify) {
   if (typeof model !== 'string' || !/^[\w~./:-]{3,120}$/.test(model)) throw new Error('モデルIDを確認してください')
   if (verify && change === undefined || !verify && change !== undefined) throw new Error('検証対象が不正です')
@@ -224,6 +234,13 @@ if (hasInstanceLock) app.whenReady().then(() => {
     if (chatInFlight) throw new Error('前のAI応答を待っています')
     chatInFlight = true
     try { return await proposeTaskChangeWithOpenRouter(request) }
+    finally { chatInFlight = false }
+  })
+  ipcMain.handle('michi:ai-propose-routine', async (event, request) => {
+    assertAppFrame(event)
+    if (chatInFlight) throw new Error('前のAI応答を待っています')
+    chatInFlight = true
+    try { return await proposeRoutineWithOpenRouter(request) }
     finally { chatInFlight = false }
   })
   for (const [channel, verify] of [['michi:ai-detect-obligations', false], ['michi:ai-verify-obligations', true]]) ipcMain.handle(channel, async (event, request) => {

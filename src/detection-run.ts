@@ -1,11 +1,15 @@
 import Dexie from 'dexie'
-import { contentDigest } from './canonical'
+import { canonicalJSON, contentDigest } from './canonical'
 import { changePolicyFor } from './change-set'
 import { newTaskInput } from './commands'
-import { uid, type Settings } from './domain'
+import { emptyScore, uid, type Settings } from './domain'
 import { normalizeSourceText, readSource, sourceSpans, sourceDb as db } from './source-library'
 import { applyAssistedTasks, prepareAssistedTasks, type PreparedAssistedTasks } from './task-assist'
 import { detectionClaims, detectionDeliveryMode, detectionSemanticsPassed, inspectDetectionOutput, parseDetectionOutput, parseDetectionVerification, type DetectionChange, type DetectionOutput, type DetectionRequest, type DetectionVerification } from './detection-contract'
+import { loadCalendarRulesState } from './calendar-rules-save'
+import { validateRoutineAssistCandidate, validateRoutineAssistSelection, validateRoutineInstructionPeriod, type RoutineAssistCandidate, type RoutineAssistInput } from './routine-assist'
+import { applyRoutineAssistConfigurationFromUI, prepareSourceRoutineConfiguration, type PreparedRoutineAssistance, type RoutineSourceGuard } from './routine-assist-save'
+import { verifiedRecurrenceTrigger } from './detection-recurrence-pattern'
 
 export type DetectionSourceGuard = {sourceId:string;sourceRevision:number;snapshotRevision:number;permissionRevision:number;sha256:string}
 export type DetectionIdentityOptions = {
@@ -29,7 +33,8 @@ export type DetectionTransport = {
 export type PreparedDetectionCreate = {runId:string;candidateId:string;sourceDigest:string;assisted:PreparedAssistedTasks;digest:string}
 export type DetectionCreationReceipt = {runId:string;candidateId:string;taskIds:string[];digest:string;appliedAt:string}
 const preparedRegistry=new Map<string,PreparedDetection>(),runRegistry=new Map<string,DetectionRun>(),creationRegistry=new Map<string,PreparedDetectionCreate>()
-export function clearDetectionAuthority(){preparedRegistry.clear();runRegistry.clear();creationRegistry.clear()}
+const recurrenceRegistry=new Map<string,{run:DetectionRun;candidateId:string;prepared:PreparedRoutineAssistance}>()
+export function clearDetectionAuthority(){preparedRegistry.clear();runRegistry.clear();creationRegistry.clear();recurrenceRegistry.clear()}
 function freeze<T>(value:T):T{if(value&&typeof value==='object'){Object.freeze(value);for(const nested of Object.values(value))freeze(nested)}return value}
 function trustedClick(event:Event){
   if(!(event instanceof Event)||!event.isTrusted||!['click','submit'].includes(event.type))throw new Error('本人がアプリの確認ボタンから操作してください')
@@ -45,7 +50,7 @@ function validIdentity(options:DetectionIdentityOptions){
 }
 async function assertCurrent(value:Pick<PreparedDetection,'ownerId'|'datasetId'|'policyEpoch'|'sourcePermissionRevision'|'source'|'expiresAt'>,model:string):Promise<Settings>{
   const current=await settings(),policy=changePolicyFor(current)
-  if(current.profileId!==value.ownerId||current.datasetId!==value.datasetId||!current.aiEnabled||policy.epoch!==value.policyEpoch||policy.sourcePermissionRevision!==value.sourcePermissionRevision||Date.parse(value.expiresAt)<=Date.now())throw new Error('本人・資料・利用許可または有効期限が変わりました。もう一度検出してください')
+  if(current.profileId!==value.ownerId||current.datasetId!==value.datasetId||!current.aiEnabled||current.aiModel!==model||policy.epoch!==value.policyEpoch||policy.sourcePermissionRevision!==value.sourcePermissionRevision||Date.parse(value.expiresAt)<=Date.now())throw new Error('本人・資料・利用許可または有効期限が変わりました。もう一度検出してください')
   const {source,snapshot}=await readSource(value.source.sourceId)
   const spansMatch=await Dexie.waitFor(Promise.all([contentDigest(snapshot.spans),contentDigest(sourceSpans(snapshot.id,snapshot.text))]))
   if(source.revision!==value.source.sourceRevision||source.latestRevision!==value.source.snapshotRevision||source.permissionRevision!==value.source.permissionRevision||snapshot.revision!==value.source.snapshotRevision||snapshot.sha256!==value.source.sha256||await Dexie.waitFor(sourceHash(snapshot.text))!==value.source.sha256||normalizeSourceText(snapshot.originalText)!==snapshot.text||spansMatch[0]!==spansMatch[1]||!source.permissions.index||!source.permissions.aiEgress||source.aiProvider!=='openrouter'||!source.allowedModels.includes(model))throw new Error('資料本文の版・ハッシュまたはAI送信許可が変わりました。もう一度検出してください')
@@ -103,6 +108,55 @@ export async function detectObligationsForSource(prepared:PreparedDetection,tran
 }
 export function isLiveDetectionRun(run:DetectionRun){return runRegistry.get(run.id)===run}
 function registeredRun(run:DetectionRun){if(!isLiveDetectionRun(run))throw new Error('保存済み候補の承認権限は復元しません。資料をもう一度検出してください')}
+function recurrenceCandidate(run:DetectionRun,candidateId:string){
+  registeredRun(run)
+  const candidate=run.candidates.find(item=>item.id===candidateId)
+  if(!candidate||candidate.status!=='ready-for-review'||!candidate.verification||!detectionSemanticsPassed(candidate.change,candidate.verification)||candidate.change.action!=='define_recurrence'||!candidate.change.recurrence||!candidate.change.title?.trim())throw new Error('この候補は検証済みの周期定義として採用できません')
+  if(!candidate.change.evidence.some(reference=>reference.supports.includes('recurrence')&&reference.quote.includes(candidate.change.recurrence!.raw)))throw new Error('周期の原文が検証対象の証拠引用と一致しません')
+  if(candidate.change.due.kind==='datetime')throw new Error('時刻付き期限は周期の予定時刻へ置き換えません。原文を確認して本人が手動編集してください')
+  return candidate
+}
+export function detectionRecurrenceMessage(run:DetectionRun,candidateId:string){const candidate=recurrenceCandidate(run,candidateId);return `${candidate.change.title}\n${candidate.change.recurrence!.raw}`}
+/** The owner supplies all calendar, participation, period and time selections.
+ * Document text never becomes a current owner instruction or an approval token. */
+export async function prepareDetectionRecurrenceFromUI(run:DetectionRun,candidateId:string,input:RoutineAssistInput,event:Event):Promise<PreparedRoutineAssistance>{
+  trustedClick(event)
+  const selected=recurrenceCandidate(run,candidateId),change=selected.change
+  await assertCurrent(run,run.detectorModel)
+  if(input.message!==detectionRecurrenceMessage(run,candidateId)||input.targetRuleId!==null||input.expectedRuleRevision!==null)throw new Error('確認した周期の原文と新しい系列の対象が変わりました')
+  const state=await loadCalendarRulesState()
+  validateRoutineAssistSelection(input,state)
+  const selection=input.selection
+  const trigger=verifiedRecurrenceTrigger(change.recurrence!.raw,selection.time)
+  for(const quote of new Set(change.evidence.filter(reference=>reference.supports.includes('recurrence')).map(reference=>reference.quote))){
+    if(canonicalJSON(verifiedRecurrenceTrigger(quote,selection.time))!==canonicalJSON(trigger))throw new Error('周期の引用を短くして原文の条件を省略できません。本人が手動で確認してください')
+    if(/今日|明日|明後日|昨日|来週|来月|今週|今月|来年|今年/.test(quote))throw new Error('資料の相対的な開始・終了日は原文の日時を確認して具体的な日付で手動入力してください')
+    validateRoutineInstructionPeriod({...input,message:quote},true)
+  }
+  const candidate:RoutineAssistCandidate={input:structuredClone(input),definition:{title:change.title!,enabled:true,trigger,steps:[{key:'main',title:change.title!,kind:selection.stepKind,scheduledOffsetDays:selection.scheduledOffsetDays,dueOffsetDays:selection.dueOffsetDays,score:selection.stepKind==='task'?emptyScore():null,durationMinutes:selection.durationMinutes}]},notices:['検証済みの原文と本人の選択だけから、一つの周期を設定します。ポイントや準備作業は推定しません。発生回の作成は別の本人確認が必要です。']}
+  validateRoutineAssistCandidate(candidate,state)
+  // Citation content is the stable source identity: reimporting a selected quote
+  // or changing an unrelated line must not create another copy of this series.
+  // Snapshot SHA/revisions remain separate, mandatory currentness guards.
+  const sourceIdentity=await contentDigest([...new Set(change.evidence.map(reference=>normalizeSourceText(reference.quote).trim()))].sort())
+  const businessDigest=await contentDigest({sourceIdentity,contextId:selection.contextId,bindingId:selection.bindingId,calendarId:selection.calendarId,activityId:selection.activityId,stepKind:selection.stepKind})
+  const source=await readSource(run.source.sourceId)
+  const guard:RoutineSourceGuard={businessKey:`detection-recurrence-business:${run.ownerId}:${run.datasetId}:${businessDigest}`,candidateKey:`detection-recurrence:${run.ownerId}:${run.datasetId}:${run.id}:${candidateId}`,detail:{runId:run.id,candidateId,runDigest:run.digest,sourceIdentity,source:structuredClone(run.source),permissions:structuredClone(source.source.permissions),retentionUntil:source.source.retentionUntil,detectorModel:run.detectorModel,verifierModel:run.verifierModel,independentModelHoldout:false,verifiedClaims:selected.verification!.checks.map(check=>({field:check.field,verdict:check.verdict,source_refs:[...check.source_refs]}))},assertCurrent:async()=>{
+    recurrenceCandidate(run,candidateId)
+    await assertCurrent(run,run.detectorModel)
+    const artifact=await db.sourceArtifacts.get(`detection:${run.id}`)
+    if(!artifact||artifact.ownerId!==run.ownerId||artifact.sourceId!==run.source.sourceId||artifact.sourceRevision!==run.source.snapshotRevision||artifact.permissionRevision!==run.source.permissionRevision||artifact.kind!=='candidate'||artifact.payload!==JSON.stringify(run))throw new Error('検出候補が破棄または変更されました。もう一度検出してください')
+  }}
+  const prepared=await prepareSourceRoutineConfiguration(input,candidate,run.detectorModel,guard,event)
+  recurrenceRegistry.set(prepared.id,{run,candidateId,prepared})
+  return prepared
+}
+export async function applyDetectionRecurrenceFromUI(run:DetectionRun,candidateId:string,prepared:PreparedRoutineAssistance,confirmedDigest:string,event:Event):Promise<string>{
+  trustedClick(event);recurrenceCandidate(run,candidateId)
+  const registered=recurrenceRegistry.get(prepared.id)
+  if(!registered||registered.run!==run||registered.candidateId!==candidateId||registered.prepared!==prepared||confirmedDigest!==prepared.digest)throw new Error('本人が確認した周期の設定案が変わりました')
+  return applyRoutineAssistConfigurationFromUI(prepared,confirmedDigest,event)
+}
 export async function prepareDetectionCreate(run:DetectionRun,candidateId:string):Promise<PreparedDetectionCreate>{
   registeredRun(run);await assertCurrent(run,run.detectorModel)
   const candidate=run.candidates.find(item=>item.id===candidateId)
@@ -141,6 +195,7 @@ export async function discardDetectionRun(run:DetectionRun){
   await db.transaction('rw',[db.settings,db.sourceArtifacts],async()=>{if((await settings()).profileId!==run.ownerId)throw new Error('本人の候補ではありません');await db.sourceArtifacts.delete(`detection:${run.id}`)})
   runRegistry.delete(run.id)
   for(const [id,value] of creationRegistry)if(value.runId===run.id)creationRegistry.delete(id)
+  for(const [id,value] of recurrenceRegistry)if(value.run.id===run.id)recurrenceRegistry.delete(id)
 }
 /** Persisted history is display-only; serialized review data cannot restore an approval. */
 export async function savedDetectionRuns(ownerId:string):Promise<DetectionRun[]>{

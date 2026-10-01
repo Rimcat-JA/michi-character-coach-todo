@@ -17,7 +17,19 @@ export type CalendarConfigurationProposal = ProposalBase & { kind: 'configuratio
 export type CalendarGenerationProposal = ProposalBase & { kind: 'generation'; plan: CalendarChangePlan }
 type Proposal = CalendarConfigurationProposal | CalendarGenerationProposal
 const authority = new Map<string, Proposal>()
-export function clearCalendarRulesAuthority() { authority.clear() }
+export type CalendarConfigurationGuard = {
+  assertCurrent: (settings: Settings, state: CalendarRulesState) => Promise<void>
+  resultId: string; businessKey: string | null; candidateKey: string | null
+  businessHash: string; candidateHash: string; detail: Record<string, unknown>
+}
+const configurationGuards = new Map<string, CalendarConfigurationGuard>()
+export function clearCalendarRulesAuthority() { authority.clear(); configurationGuards.clear() }
+export function discardCalendarConfigurationProposal(proposal: CalendarConfigurationProposal) { if (authority.get(proposal.id) === proposal) { authority.delete(proposal.id); configurationGuards.delete(proposal.id) } }
+/** Guards are process-owned callbacks and cannot be recovered from a JSON proposal. */
+export function bindCalendarConfigurationGuard(proposal: CalendarConfigurationProposal, guard: CalendarConfigurationGuard) {
+  if (authority.get(proposal.id) !== proposal || configurationGuards.has(proposal.id) || typeof guard.assertCurrent !== 'function') throw new Error('登録済みの周期確認案へ一度だけ根拠確認を結び付けてください')
+  configurationGuards.set(proposal.id, guard)
+}
 function freeze<T>(value: T): T { if (value && typeof value === 'object') { Object.freeze(value); Object.values(value).forEach(freeze) }; return value }
 function humanEvent(event: Event) {
   if (!(event instanceof Event) || !event.isTrusted || !['click', 'submit'].includes(event.type)) throw new Error('アプリの本人確認ボタンから適用してください')
@@ -56,15 +68,16 @@ async function register<T extends Proposal>(unsigned: Omit<T, 'digest'>): Promis
   for (const [id, value] of authority) if (Date.parse(value.expiresAt) <= Date.now()) authority.delete(id)
   return candidate
 }
-export async function prepareCalendarConfiguration(next: CalendarRulesConfiguration, expectedRevision: number, from: string, to: string): Promise<CalendarConfigurationProposal> {
+export async function prepareCalendarConfiguration(next: CalendarRulesConfiguration, expectedRevision: number, from: string, to: string, previewRuleId?: string): Promise<CalendarConfigurationProposal> {
   const keys = ['contexts', 'bindings', 'calendars', 'activities', 'sources', 'facts', 'rules']
   if (!next || typeof next !== 'object' || Object.keys(next).length !== keys.length || keys.some(key => !Object.hasOwn(next, key))) throw new Error('本人設定には対象・適用条件・カレンダー・活動・資料・事実・ルールだけを指定してください')
   const state = await loadCalendarRulesState()
   if (state.revision !== expectedRevision) throw new ConflictError()
   const proposed: CalendarRulesState = { ...state, ...structuredClone(next), revision: state.revision + 1 }
   validateCalendarRulesState(proposed, state.ownerId, state.datasetId)
+  if (previewRuleId !== undefined && (typeof previewRuleId !== 'string' || !proposed.rules.some(rule => rule.id === previewRuleId))) throw new Error('次の10回を確認するルールがありません')
   const plan = buildCalendarChangePlan(proposed, [], from, to)
-  return register<CalendarConfigurationProposal>({ ...await captureBase(state), kind: 'configuration', next: config(proposed), preview: plan.creates.sort((a, b) => (a.scheduledDate ?? a.startAt!).localeCompare(b.scheduledDate ?? b.startAt!)).slice(0, 10), conflicts: plan.conflicts, importPreview: null })
+  return register<CalendarConfigurationProposal>({ ...await captureBase(state), kind: 'configuration', next: config(proposed), preview: plan.creates.filter(spec => previewRuleId === undefined || spec.ruleId === previewRuleId).sort((a, b) => (a.scheduledDate ?? a.startAt!).localeCompare(b.scheduledDate ?? b.startAt!)).slice(0, 10), conflicts: plan.conflicts, importPreview: null })
 }
 export async function prepareCalendarScheduleImport(contextId: string, input: unknown, from: string, to: string): Promise<CalendarConfigurationProposal> {
   const state = await loadCalendarRulesState(), importPreview = await prepareScheduleImport(state, contextId, input), proposed = mergeScheduleImport(state, importPreview)
@@ -91,11 +104,26 @@ export async function applyCalendarProposalFromUI(input: Proposal, event: Event)
   const { digest, ...unsigned } = proposal
   if (await contentDigest(unsigned) !== digest) throw new Error('確認後に案が変わりました')
   const calendarTable = table()
-  return db.transaction('rw', [calendarTable, db.settings, db.tasks, db.calendarEvents, db.assessments, db.completions, db.sessions, db.tripBundles, db.audits, db.commands, db.containers, db.labelGroups, db.labelDefinitions], async () => {
+  return db.transaction('rw', [calendarTable, db.settings, db.tasks, db.calendarEvents, db.assessments, db.completions, db.sessions, db.tripBundles, db.audits, db.commands, db.containers, db.labelGroups, db.labelDefinitions, db.contextSources, db.contextSnapshots, db.sourceArtifacts], async () => {
     const current = await settings(), state = await calendarTable.get('main') ?? emptyCalendarRulesState(current.profileId, current.datasetId)
     validateCalendarRulesState(state, current.profileId, current.datasetId)
+    const guard = configurationGuards.get(proposal.id)
+    if (guard) await guard.assertCurrent(current, state)
     const receipt = await db.commands.get(key)
     if (receipt) { if (receipt.hash !== hash || current.profileId !== proposal.ownerId || current.datasetId !== proposal.datasetId) throw new Error('IDEMPOTENCY_MISMATCH'); return receipt.resultId }
+    if (guard?.candidateKey) {
+      const prior = await db.commands.get(guard.candidateKey)
+      if (prior) { if (prior.hash !== guard.candidateHash) throw new Error('同じ検出候補を別の系列として再採用できません'); await db.commands.add({ key, hash, resultId: prior.resultId, at: new Date().toISOString() }); return prior.resultId }
+    }
+    if (guard?.businessKey) {
+      const prior = await db.commands.get(guard.businessKey)
+      if (prior) {
+        if (prior.hash !== guard.businessHash) throw new Error('同じ根拠の系列を変更して再採用できません')
+        const at = new Date().toISOString()
+        if (guard.candidateKey) await db.commands.add({ key: guard.candidateKey, hash: guard.candidateHash, resultId: prior.resultId, at })
+        await db.commands.add({ key, hash, resultId: prior.resultId, at }); return prior.resultId
+      }
+    }
     checkContext(proposal, current, state)
     const at = new Date().toISOString()
     if (proposal.kind === 'configuration') {
@@ -112,7 +140,7 @@ export async function applyCalendarProposalFromUI(input: Proposal, event: Event)
       const next = structuredClone(state), trips = await db.tripBundles.toArray()
       for (const spec of rebuilt.creates) {
         if (await db.tasks.where('generationKey').equals(spec.generationKey).first() || next.instances.some(instance => instance.generationKey === spec.generationKey)) throw new ConflictError()
-        const id = spec.kind === 'task' ? await addTask({ ...newTaskInput(), title: spec.title, scheduledDate: spec.scheduledDate, dueDate: spec.dueDate, score: spec.score! }, spec.generationKey, null) : uid()
+        const id = spec.kind === 'task' ? await addTask({ ...newTaskInput(), title: spec.title, scheduledDate: spec.scheduledDate, dueDate: spec.dueDate, score: spec.score! }, spec.generationKey, null, 'routine') : uid()
         if (spec.kind === 'event') await db.calendarEvents.add(eventFrom(spec, id, current.profileId, at))
         next.instances.push({ generationKey: spec.generationKey, entityId: id, entityRevision: 1, status: 'active', spec: structuredClone(spec) })
       }
@@ -142,6 +170,12 @@ export async function applyCalendarProposalFromUI(input: Proposal, event: Event)
       validateCalendarRulesState(next, current.profileId, current.datasetId); await calendarTable.put(next)
       await db.audits.add({ id: uid(), taskId: null, operation: 'calendar.apply', at, detail: JSON.stringify({ proposalId: proposal.id, digest: proposal.digest, approvedBy: current.profileId, policyEpoch: proposal.policyEpoch, scope: rebuilt.scope, creates: rebuilt.creates, updates: rebuilt.updates, cancels: rebuilt.cancels, completedUnchanged: rebuilt.skippedCompleted }) })
     }
-    await db.commands.add({ key, hash, resultId: proposal.id, at }); return proposal.id
+    const resultId = guard?.resultId ?? proposal.id
+    if (guard) {
+      if (guard.businessKey) await db.commands.add({ key: guard.businessKey, hash: guard.businessHash, resultId, at })
+      if (guard.candidateKey) await db.commands.add({ key: guard.candidateKey, hash: guard.candidateHash, resultId, at })
+      await db.audits.add({ id: uid(), taskId: null, operation: 'routine.assistance.approved', at, detail: JSON.stringify({ ...guard.detail, configurationId: proposal.id, digest: proposal.digest, ruleId: resultId, approvedBy: current.profileId }) })
+    }
+    await db.commands.add({ key, hash, resultId, at }); return resultId
   })
 }
