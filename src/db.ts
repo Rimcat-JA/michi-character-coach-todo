@@ -9,7 +9,7 @@ import type { AchievementPolicy, AchievementEvidence, AchievementExport } from '
 import type { TaskSourceEvidence } from './task-source-evidence'
 import type { HandoffRecord, LocalDevice } from './handoff-heads'
 import type { ResourceGrant, SharedInbound, ShareContact, ShareIdentity, ShareProposal } from './share-types'
-import { datasetGuardMiddleware } from './dataset-guard'
+import { datasetGuardMiddleware, type DatasetState } from './dataset-guard'
 import type { Assessment, Audit, CalendarEvent, ChecklistItem, CommandReceipt, Completion, Container, DayNote, FocusProjectSelection, Goal, GoalCheckIn, Habit, HabitLog, LabelDefinition, LabelGroup, LedgerEntry, PlanningBucket, PomodoroCycle, RolloverEntry, Routine, SavedTemplate, Settings, SmartList, Task, TaskAttachment, TaskComment, TaskDependency, TaskNote, ThemeRule, TimeBlock, TrackerDefinition, TrackerEntry, WorkSession } from './domain'
 
 export const db = new Dexie('character-coach-v1') as Dexie & {
@@ -62,6 +62,7 @@ export const db = new Dexie('character-coach-v1') as Dexie & {
   achievementExports: EntityTable<AchievementExport, 'id'>
   taskSourceEvidence: EntityTable<TaskSourceEvidence, 'id'>
   localDevice: EntityTable<LocalDevice, 'id'>
+  datasetState: EntityTable<DatasetState, 'id'>
   handoffHeads: EntityTable<HandoffRecord, 'id'>
   shareIdentity: EntityTable<ShareIdentity, 'id'>
   shareContacts: EntityTable<ShareContact, 'id'>
@@ -204,7 +205,7 @@ db.version(23).stores({ achievementPolicies: 'id,&repositoryId,ownerId,datasetId
 // Source quotes behind adopted detection tasks live here, never in task notes, so source erasure can reach them.
 db.version(24).stores({ taskSourceEvidence: 'id, ownerId, taskId, sourceId, runId' })
 // I05/I06 device-local tables: never exported in a .coachbundle and never cleared by a restore.
-db.version(25).stores({ localDevice: 'id', handoffHeads: 'id, bundleId, datasetId, direction, createdAt', shareIdentity: 'id', shareContacts: 'id, verifiedAt', resourceGrants: 'id, recipientId, revokedAt', sharedInbound: 'id, ownerFp, revokedAt', shareProposals: 'id, grantId, taskId, state' })
+db.version(25).stores({ localDevice: 'id', datasetState: 'id', handoffHeads: 'id, bundleId, datasetId, direction, createdAt', shareIdentity: 'id', shareContacts: 'id, verifiedAt', resourceGrants: 'id, recipientId, revokedAt', sharedInbound: 'id, ownerFp, revokedAt', shareProposals: 'id, grantId, taskId, state' })
 db.use(datasetGuardMiddleware)
 
 export async function ensureSettings() {

@@ -261,7 +261,7 @@ export async function expandRoutines(from = addDays(today(), -30), days = 120) {
   const owner = await db.settings.get('main')
   if (owner?.changePolicy?.stops?.routines) return 0
   // I05: a frozen or moved-away dataset generates nothing; the receiving device continues the routines.
-  if (owner?.datasetMode === 'frozen' || owner?.datasetMode === 'read_only') return 0
+  if (((await db.datasetState.get('main'))?.mode ?? 'active') !== 'active') return 0
   const routines = await db.routines.filter(r => r.active).toArray()
   let count = 0
   for (const r of routines) {

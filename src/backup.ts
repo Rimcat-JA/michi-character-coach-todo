@@ -152,10 +152,7 @@ export async function restoreBackup(snapshot: Snapshot) {
       if (!Number.isSafeInteger(policy.epoch + 1) || !Number.isSafeInteger(policy.sourcePermissionRevision + 1)) throw new Error('資料の権限版が上限に達しています')
       next = { ...next, changePolicy: { ...policy, epoch: policy.epoch + 1, sourcePermissionRevision: policy.sourcePermissionRevision + 1 } }
     }
-    // A restored dataset is active on this device; a move bundle's frozen mode belongs to the sender only.
-    const { datasetMode: _mode, ...active } = current ? stricterAuthority(next, current) : next
-    void _mode
-    return active
+    return current ? stricterAuthority(next, current) : next
   }) }
   const prepared: Snapshot = snapshot.containers === undefined ? { ...restorable, containers: legacyContainers, tasks: snapshot.tasks.map(task => ({ ...task, containerId: task.project.trim() ? byName.get(task.project.trim()) : null })) } : restorable
   validateSnapshot(prepared)
@@ -200,6 +197,6 @@ export async function restoreBackup(snapshot: Snapshot) {
   // No-op safety net: the erasures were already written by the restore transaction.
   for (const id of consent.erased) { const source = await db.contextSources.get(id); if (source && !source.deletedAt && source.ownerId === ownerId) await deleteSource(id, source.revision) }
   await migrateLegacyDetectionNotes()
-  // A pending move is void once this device holds another restored dataset.
-  await db.localDevice.where('id').equals('main').modify({ pendingMove: null })
+  // A restored dataset is active on this device, and a pending move is void once another dataset is restored.
+  await db.transaction('rw', db.datasetState, db.localDevice, async () => { await db.datasetState.put({ id: 'main', mode: 'active', updatedAt: new Date().toISOString(), moveId: null }); await db.localDevice.where('id').equals('main').modify({ pendingMove: null }) })
 }
