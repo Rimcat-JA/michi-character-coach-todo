@@ -18,6 +18,10 @@ import { purgeExpiredCalendarOriginals } from './calendar-import-retention'
 import { redactExpiredICSRecords } from './calendar-import-redaction'
 import { changePolicyFor } from './change-set'
 import { verifyCalendarOriginalDigests } from './calendar-import'
+import { verifyCSVOriginalDigests } from './calendar-csv-import'
+import { purgeExpiredCSVOriginals } from './calendar-csv-retention'
+import { applyCurrentCSVRetention, redactExpiredCSVRecords } from './calendar-csv-redaction'
+import { clearCalendarCSVImportAuthority } from './calendar-csv-import-save'
 import { clearAchievementAuthority, reconcileAchievementExports } from './achievements-save'
 import { restoreAchievementExports, verifyAchievementDigests } from './achievements-validation'
 
@@ -41,6 +45,7 @@ export async function captureSnapshot(): Promise<Snapshot> {
   await purgeExpiredMemories()
   await purgeExpiredConversations()
   await purgeExpiredCalendarOriginals()
+  await purgeExpiredCSVOriginals()
   await reconcileAchievementExports()
   let attachmentRows: TaskAttachment[] = []
   const snapshot: Snapshot = await db.transaction('r', [db.tasks, db.assessments, db.completions, db.ledger, db.routines, db.sessions, db.commands, db.audits, db.settings, db.containers, db.checklistItems, db.labelGroups, db.labelDefinitions, db.savedTemplates, db.taskNotes, db.taskComments, db.taskAttachments, db.taskDependencies, db.planningBuckets, db.timeBlocks, db.calendarEvents, db.rollovers, db.themeRules, db.smartLists, db.focusSelections, db.habits, db.habitLogs, db.goals, db.goalCheckIns, db.trackerDefinitions, db.trackerEntries, db.dayNotes, db.pomodoroCycles, db.reviewRecords, db.tripBundles, db.coachMemories, db.memoryTombstones, db.contextSources, db.contextSnapshots, db.sourceSummaries, db.sourceArtifacts, db.coachConversations, db.coachMessages, db.calendarRules, db.achievementPolicies, db.achievementEvidence, db.achievementExports], async () => {
@@ -52,6 +57,7 @@ export async function captureSnapshot(): Promise<Snapshot> {
   snapshot.taskAttachments = await Promise.all(attachmentRows.map(async ({ blob, ...metadata }) => ({ ...metadata, contentBase64: b64(new Uint8Array(await blob.arrayBuffer())) })))
   validateSnapshot(snapshot)
   await verifyCalendarOriginalDigests(snapshot.calendarRules ?? [])
+  await verifyCSVOriginalDigests(snapshot.calendarRules ?? [])
   await verifyAchievementDigests(snapshot.achievementEvidence ?? [], snapshot.achievementExports ?? [])
   return snapshot
 }
@@ -92,12 +98,17 @@ export async function restoreBackup(snapshot: Snapshot) {
   validateSnapshot(snapshot)
   await verifySourceDigests(snapshot.contextSnapshots, snapshot.sourceSummaries)
   await verifyCalendarOriginalDigests(snapshot.calendarRules ?? [])
+  await verifyCSVOriginalDigests(snapshot.calendarRules ?? [])
   await verifyAchievementDigests(snapshot.achievementEvidence ?? [], snapshot.achievementExports ?? [])
   const names = snapshot.containers === undefined ? [...new Set(snapshot.tasks.map(task => task.project.trim()).filter(Boolean))] : []
   const at = new Date().toISOString(), ownerId = snapshot.settings[0].profileId
   const legacyContainers = names.map(name => ({ id: crypto.randomUUID(), parentId: null, kind: 'project' as const, name, ownerId, revision: 1, createdAt: at, updatedAt: at, deletedAt: null }))
   const byName = new Map(legacyContainers.map(container => [container.name, container.id]))
-  const clean = redactExpiredICSRecords({ calendarRules: snapshot.calendarRules ?? [], calendarEvents: snapshot.calendarEvents ?? [], audits: snapshot.audits, commands: snapshot.commands }, at)
+  // Erasures and earlier CSV deadlines chosen since the backup was taken are re-applied, never undone.
+  const ceiled = applyCurrentCSVRetention(snapshot.calendarRules ?? [], await db.calendarRules.toArray())
+  const icsClean = redactExpiredICSRecords({ calendarRules: ceiled, calendarEvents: snapshot.calendarEvents ?? [], audits: snapshot.audits, commands: snapshot.commands }, at)
+  const csvClean = redactExpiredCSVRecords(icsClean, at)
+  const clean = { ...csvClean, expiredSourceIds: [...new Set([...icsClean.expiredSourceIds, ...csvClean.expiredSourceIds])] }
   const restorable: Snapshot = { ...snapshot, achievementExports: restoreAchievementExports(snapshot.achievementExports ?? [], at), calendarRules: clean.calendarRules, calendarEvents: clean.calendarEvents, audits: clean.audits, commands: clean.commands.filter(command => !command.key.startsWith('filebridge:scope:')), settings: snapshot.settings.map(settings => {
     let next = settings.notificationState ? { ...settings, notificationState: restoreCoachNotificationState(settings.notificationState, settings.profileId, settings.datasetId, at) } : settings
     if (clean.expiredSourceIds.length) {
@@ -118,6 +129,7 @@ export async function restoreBackup(snapshot: Snapshot) {
   }))
   await invalidateExternalConnection()
   clearCompletionReconfirmationAuthority()
+  clearCalendarCSVImportAuthority()
   await db.transaction('rw', [db.tasks, db.assessments, db.completions, db.ledger, db.routines, db.sessions, db.commands, db.audits, db.settings, db.containers, db.checklistItems, db.labelGroups, db.labelDefinitions, db.savedTemplates, db.taskNotes, db.taskComments, db.taskAttachments, db.taskDependencies, db.planningBuckets, db.timeBlocks, db.calendarEvents, db.rollovers, db.themeRules, db.smartLists, db.focusSelections, db.habits, db.habitLogs, db.goals, db.goalCheckIns, db.trackerDefinitions, db.trackerEntries, db.dayNotes, db.pomodoroCycles, db.reviewRecords, db.tripBundles, db.coachMemories, db.memoryTombstones, db.contextSources, db.contextSnapshots, db.sourceSummaries, db.sourceArtifacts, db.coachConversations, db.coachMessages, db.calendarRules, db.achievementPolicies, db.achievementEvidence, db.achievementExports], async () => {
     await Promise.all([db.tasks.clear(), db.assessments.clear(), db.completions.clear(), db.ledger.clear(), db.routines.clear(), db.sessions.clear(), db.commands.clear(), db.audits.clear(), db.settings.clear(), db.containers.clear(), db.checklistItems.clear(), db.labelGroups.clear(), db.labelDefinitions.clear(), db.savedTemplates.clear(), db.taskNotes.clear(), db.taskComments.clear(), db.taskAttachments.clear(), db.taskDependencies.clear(), db.planningBuckets.clear(), db.timeBlocks.clear(), db.calendarEvents.clear(), db.rollovers.clear(), db.themeRules.clear(), db.smartLists.clear(), db.focusSelections.clear(), db.habits.clear(), db.habitLogs.clear(), db.goals.clear(), db.goalCheckIns.clear(), db.trackerDefinitions.clear(), db.trackerEntries.clear(), db.dayNotes.clear(), db.pomodoroCycles.clear(), db.reviewRecords.clear(), db.tripBundles.clear(), db.coachMemories.clear(), db.memoryTombstones.clear(), db.contextSources.clear(), db.contextSnapshots.clear(), db.sourceSummaries.clear(), db.sourceArtifacts.clear(), db.coachConversations.clear(), db.coachMessages.clear(), db.calendarRules.clear(), db.achievementPolicies.clear(), db.achievementEvidence.clear(), db.achievementExports.clear()])
     await db.tasks.bulkAdd(prepared.tasks); await db.assessments.bulkAdd(prepared.assessments); await db.completions.bulkAdd(prepared.completions); await db.ledger.bulkAdd(prepared.ledger)
@@ -130,9 +142,11 @@ export async function restoreBackup(snapshot: Snapshot) {
   clearCalendarRulesAuthority()
   clearRoutineAssistanceAuthority()
   clearCompletionReconfirmationAuthority()
+  clearCalendarCSVImportAuthority()
   clearAchievementAuthority()
   await purgeExpiredSources()
   await purgeExpiredMemories()
   await purgeExpiredConversations()
   await purgeExpiredCalendarOriginals()
+  await purgeExpiredCSVOriginals()
 }

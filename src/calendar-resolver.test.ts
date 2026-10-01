@@ -11,6 +11,16 @@ function current(state: CalendarRulesState, from = '2026-10-01', to = '2026-10-3
   return resolveCalendarOccurrences(state, from, to).occurrences.map((spec, index) => ({ generationKey: spec.generationKey, entityId: `entity-${index}`, revision: 1, status: 'active', completed: false, edited: false, started: false, spec }))
 }
 
+describe('ルール有効期間外の月', () => {
+  it('有効期間が終わった月次営業日ルールは、期間外の月で未設定カレンダーの確認待ちを作らない', () => {
+    const state = calendarFixture(); state.rules = [monthlyRule({ validTo: '2026-10-31' })]
+    const next = { ...state, contexts: state.contexts.map(row => ({ ...row, validTo: '2027-12-31' })), bindings: state.bindings.map(row => ({ ...row, validTo: '2027-12-31' })) }
+    const result = resolveCalendarOccurrences(next, '2027-02-01', '2027-02-28')
+    expect(result.conflicts).toEqual([]); expect(result.blockedSeries).toEqual([]); expect(result.occurrences.filter(row => row.ruleId === 'payroll')).toEqual([])
+    expect(resolveCalendarOccurrences(next, '2026-10-01', '2026-10-31').occurrences.filter(row => row.ruleId === 'payroll')).toHaveLength(1)
+  })
+})
+
 describe('共通本人カレンダー resolver', () => {
   it('活動は占有予定だけで、頻度から準備タスクを創作しない。明示周期だけがタスクを作る', () => {
     const state = calendarFixture()

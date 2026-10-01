@@ -10,12 +10,17 @@ function text(value: unknown, name: string, max = 300): asserts value is string 
 function id(value: unknown) { text(value, 'ID', 200); if (!/^[A-Za-z0-9_.:-]+$/.test(value)) throw new Error('IDには英数字・_ . : - を使ってください') }
 function integer(value: unknown, low: number, high: number) { if (!Number.isInteger(value) || Number(value) < low || Number(value) > high) throw new Error('カレンダーの数値が範囲外です') }
 function revision(value: unknown) { integer(value, 1, Number.MAX_SAFE_INTEGER) }
+function hash(value: unknown) { if (typeof value !== 'string' || !/^[a-f0-9]{64}$/.test(value)) throw new Error('CSVの内容hashが不正です') }
+function anonymousId(value: unknown) { if (typeof value !== 'string' || !/^sha256:[a-f0-9]{64}$/.test(value)) throw new Error('CSVの外部ID・本人参照は匿名hashです') }
 function date(value: unknown) { if (typeof value !== 'string') throw new Error('日付が不正です'); validateDate(value, 'カレンダー日付'); if (!value) throw new Error('日付を指定してください') }
 function range(from: unknown, to: unknown) { date(from); date(to); if (String(from) > String(to)) throw new Error('有効期間の順序が不正です') }
 function bool(value: unknown) { if (typeof value !== 'boolean') throw new Error('確認・公開状態が不正です') }
 function choice(value: unknown, values: string[]) { if (typeof value !== 'string' || !values.includes(value)) throw new Error('カレンダー資料の種別が不正です') }
 function instant(value: unknown) { if (typeof value !== 'string' || !Number.isFinite(Date.parse(value)) || new Date(value).toISOString() !== value) throw new Error('時刻はUTCのISO形式で指定してください') }
 function clock(value: unknown) { if (typeof value !== 'string' || !/^([01]\d|2[0-3]):[0-5]\d$/.test(value)) throw new Error('時刻を確認してください') }
+function localDateTime(value: unknown) { if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}T([01]\d|2[0-3]):[0-5]\d$/.test(value)) throw new Error('CSV勤務表の現地日時が不正です'); date(value.slice(0, 10)) }
+/** CSV feeds keep at most this many import records; fully duplicated older records are pruned on import. */
+export const csvSnapshotLimit = 100, csvEvidenceRowLimit = 5000
 function zone(value: unknown) { text(value, 'タイムゾーン', 100); try { new Intl.DateTimeFormat('en-US', { timeZone: value }) } catch { throw new Error('タイムゾーンが不正です') } }
 function array(value: unknown, max = 5000): asserts value is unknown[] { if (!Array.isArray(value) || value.length > max) throw new Error('カレンダー資料の件数が不正です') }
 function ids(value: unknown, max = 1000) { array(value, max); value.forEach(id); if (new Set(value).size !== value.length) throw new Error('IDが重複しています') }
@@ -79,7 +84,7 @@ export function validateCalendarRulesState(value: unknown, ownerId?: string, dat
   rows(value.activities, ['id', 'contextId', 'bindingId', 'calendarId', 'title', 'eventKind', 'weekdays', 'startTime', 'endTime', 'endDayOffset', 'validFrom', 'validTo', 'revision'], 1000)
   value.activities.forEach(row => { id(row.contextId); id(row.bindingId); id(row.calendarId); text(row.title, '活動名'); choice(row.eventKind, ['class', 'meeting', 'other']); weekdays(row.weekdays); clock(row.startTime); clock(row.endTime); integer(row.endDayOffset, 0, 6); range(row.validFrom, row.validTo); revision(row.revision); if (row.endDayOffset === 0 && String(row.startTime) >= String(row.endTime)) throw new Error('開始・終了の順序を確認してください') })
   array(value.sources, 1000)
-  for (const source of value.sources) { if (!source || typeof source !== 'object') throw new Error('資料が不正です'); object(source, ['id', 'contextId', 'title', 'authorityScope', 'coverageFrom', 'coverageTo', 'status', 'revision', 'importedAt', 'bodyHash', ...('ics' in source ? ['ics'] : [])]); id(source.id) }
+  for (const source of value.sources) { if (!source || typeof source !== 'object') throw new Error('資料が不正です'); object(source, ['id', 'contextId', 'title', 'authorityScope', 'coverageFrom', 'coverageTo', 'status', 'revision', 'importedAt', 'bodyHash', ...('ics' in source ? ['ics'] : []), ...('csv' in source ? ['csv'] : [])]); id(source.id); if ('ics' in source && 'csv' in source) throw new Error('ICSとCSVの資料を混ぜられません') }
   if (new Set(value.sources.map(source => (source as Row).id)).size !== value.sources.length) throw new Error('資料IDが重複しています')
   const sourceRows = value.sources as Row[]
   let originalBytes = 0
@@ -102,7 +107,58 @@ export function validateCalendarRulesState(value: unknown, ownerId?: string, dat
       const key = JSON.stringify([component.uid, component.recurrenceId]); if (componentKeys.has(key)) throw new Error('ICS componentが重複しています'); componentKeys.add(key)
     }
   }
-  if (originalBytes > 8 * 1048576) throw new Error('保持するICS原文は全体で8MiB以内です')
+  for (const source of sourceRows) if (source.csv !== undefined) {
+    object(source.csv, ['format', 'feedId', 'readOnly', 'retentionUntil', 'retiredAt', 'target', 'heads', 'snapshots'])
+    const csv = source.csv
+    choice(csv.format, ['calendar', 'roster']); text(csv.feedId, 'CSV取込元', 120)
+    if (csv.readOnly !== true || source.authorityScope !== csv.format) throw new Error('CSVは読取専用の会社暦・本人勤務表です')
+    if (csv.retentionUntil !== null) instant(csv.retentionUntil)
+    if (csv.retiredAt !== null) instant(csv.retiredAt)
+    object(csv.target, ['bindingId', 'bindingRevision', 'calendarId', 'activityId', 'timezone', 'personRef', 'personRefHash'])
+    id(csv.target.bindingId); revision(csv.target.bindingRevision); id(csv.target.calendarId); zone(csv.target.timezone)
+    if (csv.format === 'calendar') { if (csv.target.activityId !== null || csv.target.personRef !== null || csv.target.personRefHash !== null) throw new Error('会社暦CSVには勤務表の本人情報を付けられません') }
+    else { id(csv.target.activityId); if (csv.target.personRef !== null) text(csv.target.personRef, 'CSV本人識別子', 200); anonymousId(csv.target.personRefHash) }
+    array(csv.snapshots, csvSnapshotLimit); if (!csv.snapshots.length) throw new Error('CSVの選択行の記録がありません')
+    if ((csv.snapshots as Row[]).reduce((sum, snapshot) => sum + (Array.isArray(snapshot?.rows) ? snapshot.rows.length : 0), 0) > csvEvidenceRowLimit) throw new Error('CSV取込元の保存行数が上限を超えています')
+    let previous = 0
+    for (const raw of csv.snapshots) {
+      object(raw, ['revision', 'fingerprint', 'bodyHash', 'importedAt', 'fromDate', 'toDate', 'retentionUntil', 'rows'])
+      revision(raw.revision); if (Number(raw.revision) <= previous || Number(raw.revision) > Number(source.revision)) throw new Error('CSV記録の版が不正です'); previous = Number(raw.revision)
+      hash(raw.fingerprint); hash(raw.bodyHash); instant(raw.importedAt); range(raw.fromDate, raw.toDate); if (raw.retentionUntil !== null) instant(raw.retentionUntil)
+      array(raw.rows, 1000); const rowIndices = new Set<number>(), recordIds = new Set<string>(); let priorByteEnd = 0
+      for (const row of raw.rows) {
+        object(row, ['recordId', 'recordRevision', 'value', 'digest', 'factId', 'rowIndex', 'lineStart', 'lineEnd', 'byteStart', 'byteEnd', 'quote', 'quoteSha256'])
+        anonymousId(row.recordId); integer(row.recordRevision, 1, 2147483647); hash(row.digest); if (row.factId !== null) id(row.factId)
+        if (csv.format === 'calendar') { object(row.value, ['kind', 'date', 'status']); if (row.value.kind !== 'calendar') throw new Error('CSV選択行の内容型が不正です'); date(row.value.date); choice(row.value.status, ['open', 'closed', 'withdrawn']); if ((row.value.status === 'withdrawn') !== (row.factId === null)) throw new Error('CSV撤回行と事実参照が不正です') }
+        else { object(row.value, ['kind', 'status', 'startAt', 'endAt', 'startLocal', 'endLocal']); if (row.value.kind !== 'roster') throw new Error('CSV選択行の内容型が不正です'); choice(row.value.status, ['scheduled', 'cancelled']); instant(row.value.startAt); instant(row.value.endAt); localDateTime(row.value.startLocal); localDateTime(row.value.endLocal); if (String(row.value.startAt) >= String(row.value.endAt) || Date.parse(String(row.value.endAt)) - Date.parse(String(row.value.startAt)) > 7 * 86400000 || row.factId === null) throw new Error('CSV勤務表行の時刻・事実参照が不正です') }
+        integer(row.rowIndex, 2, 10001); integer(row.lineStart, 2, 25000); integer(row.lineEnd, Number(row.lineStart), 25000)
+        integer(row.byteStart, priorByteEnd, 1048576); integer(row.byteEnd, Number(row.byteStart) + 1, 1048576); priorByteEnd = Number(row.byteEnd)
+        hash(row.quoteSha256)
+        if (row.quote !== null) {
+          if (typeof row.quote !== 'string' || !row.quote || new TextDecoder().decode(new TextEncoder().encode(row.quote)) !== row.quote || new TextEncoder().encode(row.quote).length !== Number(row.byteEnd) - Number(row.byteStart)) throw new Error('CSV選択行の原文・byte範囲が不正です')
+          originalBytes += new TextEncoder().encode(row.quote).length
+        }
+        if (rowIndices.has(Number(row.rowIndex)) || recordIds.has(String(row.recordId))) throw new Error('CSV選択行が重複しています')
+        rowIndices.add(Number(row.rowIndex)); recordIds.add(String(row.recordId))
+      }
+    }
+    const latest = csv.snapshots.at(-1) as Row
+    if (latest.revision !== source.revision || latest.bodyHash !== source.bodyHash || latest.retentionUntil !== csv.retentionUntil) throw new Error('CSV選択行の最新版・hash・保持期限が一致しません')
+    array(csv.heads, 1000); const records = new Set<string>(), factIds = new Set<string>()
+    for (const head of csv.heads) {
+      object(head, ['recordId', 'recordRevision', 'digest', 'factId', 'status', 'snapshotRevision', 'rowIndex'])
+      anonymousId(head.recordId); integer(head.recordRevision, 1, 2147483647); hash(head.digest); choice(head.status, ['current', 'expired', 'withdrawn']); revision(head.snapshotRevision); integer(head.rowIndex, 2, 10001)
+      if (head.factId !== null) { id(head.factId); if (factIds.has(String(head.factId))) throw new Error('CSVの最新版事実が重複しています'); factIds.add(String(head.factId)) }
+      if (records.has(String(head.recordId))) throw new Error('CSVの外部recordが重複しています'); records.add(String(head.recordId))
+      if (head.status === 'withdrawn' && (csv.format !== 'calendar' || head.factId !== null) || head.status === 'current' && head.factId === null) throw new Error('CSV recordの撤回・最新版が不正です')
+      const snapshot = (csv.snapshots as Row[]).find(row => row.revision === head.snapshotRevision), row = (snapshot?.rows as Row[] | undefined)?.find(row => row.rowIndex === head.rowIndex)
+      if (!row || row.recordId !== head.recordId || row.recordRevision !== head.recordRevision || row.digest !== head.digest || row.factId !== head.factId || head.status !== 'expired' && row.quote === null) throw new Error('CSV recordの最新版と選択行の参照が一致しません')
+      const versions = (csv.snapshots as Row[]).flatMap(snapshot => snapshot.rows as Row[]).filter(row => row.recordId === head.recordId)
+      if (versions.some(row => Number(row.recordRevision) > Number(head.recordRevision))) throw new Error('CSV recordの古い版を最新版にできません')
+    }
+    if (csv.format === 'roster' && csv.target.personRef === null && (csv.heads as Row[]).some(head => head.status !== 'expired')) throw new Error('保持中のCSV勤務表の本人識別子がありません')
+  }
+  if (originalBytes > 8 * 1048576) throw new Error('保持するカレンダー原文は全体で8MiB以内です')
   sourceRows.forEach(row => { id(row.contextId); text(row.title, '公式資料名'); choice(row.authorityScope, ['calendar', 'activity', 'roster']); range(row.coverageFrom, row.coverageTo); choice(row.status, ['current', 'stale']); revision(row.revision); instant(row.importedAt); if (typeof row.bodyHash !== 'string' || !/^[a-f0-9]{64}$/.test(row.bodyHash)) throw new Error('資料の内容ハッシュが不正です') })
   array(value.facts); value.facts.forEach(row => fact(row)); if (new Set(value.facts.map(row => (row as ScheduleFact).id)).size !== value.facts.length) throw new Error('事実IDが重複しています')
   array(value.rules, 1000)
@@ -149,6 +205,29 @@ export function validateCalendarRulesState(value: unknown, ownerId?: string, dat
   for (const row of [...state.bindings, ...state.calendars, ...state.sources]) contextExists(row.contextId)
   const checkLinks = (row: { contextId: string; calendarId: string; bindingId: string }) => { contextExists(row.contextId); if (!state.calendars.some(item => item.id === row.calendarId && item.contextId === row.contextId) || !state.bindings.some(item => item.id === row.bindingId && item.contextId === row.contextId)) throw new Error('本人適用・カレンダーの参照が不正です') }
   state.activities.forEach(checkLinks); state.rules.forEach(checkLinks)
+  for (const source of state.sources) if (source.csv) {
+    const csv = source.csv, binding = state.bindings.find(row => row.id === csv.target.bindingId && row.contextId === source.contextId), calendar = state.calendars.find(row => row.id === csv.target.calendarId && row.contextId === source.contextId)
+    if (!binding || binding.personId !== state.ownerId || !calendar || csv.target.bindingRevision > binding.revision) throw new Error('CSVの本人適用・会社暦参照が不正です')
+    if (csv.format === 'roster') {
+      const activity = state.activities.find(row => row.id === csv.target.activityId && row.contextId === source.contextId && row.bindingId === binding.id && row.calendarId === calendar.id)
+      if (!activity || activity.weekdays.length) throw new Error('CSV勤務表には週次発生のない本人活動を指定してください')
+    }
+    const evidence = csv.snapshots.flatMap(snapshot => snapshot.rows)
+    for (const row of evidence) if (row.factId !== null) {
+      const fact = state.facts.find(fact => fact.id === row.factId && fact.sourceId === source.id && fact.contextId === source.contextId)
+      if (!fact || fact.revision !== row.recordRevision || row.value.kind === 'calendar' && (!(fact.kind === 'open' || fact.kind === 'closed') || fact.calendarId !== calendar.id || fact.kind !== row.value.status || fact.date !== row.value.date) || row.value.kind === 'roster' && (fact.kind !== 'roster_assignment' || fact.activityId !== csv.target.activityId || fact.externalId !== row.recordId || fact.personRef !== csv.target.personRefHash || fact.published !== true || fact.status !== row.value.status || fact.startAt !== row.value.startAt || fact.endAt !== row.value.endAt)) throw new Error('CSV選択行と資料の事実が一致しません')
+    }
+    for (const fact of state.facts.filter(fact => fact.sourceId === source.id)) {
+      if (!evidence.some(row => row.factId === fact.id)) throw new Error('CSV資料に選択行の根拠がない事実があります')
+      const head = csv.heads.find(head => head.factId === fact.id)
+      if (fact.validity === 'active' && (!head || head.status !== 'current')) throw new Error('CSVの旧版・期限後の事実を有効にできません')
+    }
+    // The reverse direction: a current record must point at its active fact of the same version.
+    for (const head of csv.heads) if (head.status === 'current') {
+      const fact = state.facts.find(fact => fact.id === head.factId && fact.sourceId === source.id)
+      if (!fact || fact.validity !== 'active' || fact.revision !== head.recordRevision) throw new Error('CSVの最新版の事実が有効ではありません')
+    }
+  }
   for (const binding of state.bindings) if (binding.activityIds.some(activityId => !state.activities.some(activity => activity.id === activityId && activity.bindingId === binding.id && activity.contextId === binding.contextId))) throw new Error('本人の活動対応が不正です')
   for (const base of state.rules) for (const rule of [base, ...(base.editions ?? []).map(edition => ({ ...base, ...edition.definition }))]) if (rule.trigger.kind === 'activity_relative') { const activity = state.activities.find(item => item.id === (rule.trigger as { activityId: string }).activityId); if (!activity || activity.contextId !== rule.contextId || activity.bindingId !== rule.bindingId) throw new Error('イベント相対ルールの本人対象が一致しません') }
   for (const entry of state.facts) {
@@ -182,6 +261,8 @@ export async function prepareScheduleImport(state: CalendarRulesState, contextId
   const source: ScheduleSource = { ...(input.source as Omit<ScheduleSource, 'contextId' | 'status' | 'importedAt' | 'bodyHash'>), contextId, status: 'current', importedAt: at, bodyHash: await contentDigest(input) }
   const facts = input.facts.map(value => ({ ...(value as Omit<ScheduleFact, 'sourceId' | 'contextId'>), sourceId: source.id, contextId })) as ScheduleFact[]
   const before = state.sources.find(value => value.id === source.id)
+  // CSV sources carry their own evidence; a manual JSON file can neither claim nor replace them.
+  if (source.id.startsWith('csv-source:') || before?.csv) throw new Error('csv-source: はCSV取込専用の資料IDです。別の資料IDを指定してください')
   if (before && (before.contextId !== contextId || before.authorityScope !== source.authorityScope || before.revision > source.revision || before.revision === source.revision && before.bodyHash !== source.bodyHash)) throw new Error('資料の対象・範囲・版が既存資料と一致しません')
   for (const entry of facts) { const previous = state.facts.find(value => value.id === entry.id); if (previous && (previous.sourceId !== source.id || previous.contextId !== contextId || previous.revision > entry.revision || previous.revision === entry.revision && canonicalJSON(previous) !== canonicalJSON(entry))) throw new Error('事実の版・内容が既存記録と一致しません') }
   const next: CalendarRulesState = { ...state, sources: [...state.sources.filter(value => value.id !== source.id), source], facts: [...state.facts.filter(value => !facts.some(entry => entry.id === value.id)), ...facts] }

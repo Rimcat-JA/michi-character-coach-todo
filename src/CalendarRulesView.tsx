@@ -118,7 +118,7 @@ export function CalendarRulesView({ state, onPrepareConfiguration, onPrepareImpo
       <button disabled={busy || !chosenContext}>設定内容と次の10回を確認</button>
     </form>
     <h3>本人が選んだ予定資料</h3><p>授業の振替、会社休日、勤務日変更、本人の公開シフトを共通のJSON形式で取り込みます。資料の範囲・版・本人適用を確認してから保存します。</p>
-    {state.sources.map(source => <p key={source.id}>{source.title} / v{source.revision} / {source.coverageFrom}〜{source.coverageTo} / {source.status === 'current' ? '取込済みスナップショット' : '取得が古い・確認待ち'} / {source.importedAt}</p>)}
+    {state.sources.map(source => <p key={source.id}>{source.title} / v{source.revision} / {source.coverageFrom}〜{source.coverageTo} / {source.csv?.retiredAt ? '終了したCSV取込元（新しい根拠に使わない）' : source.status === 'current' ? '取込済みスナップショット' : '取得が古い・確認待ち'} / {source.importedAt}</p>)}
     <label><input type="checkbox" checked={importConfirmed} onChange={event => setImportConfirmed(event.target.checked)} />選択した資料を「{chosenContext?.name ?? '対象未選択'}」の範囲に適用する</label>
     <label>予定JSONを選択<input type="file" accept=".json,application/json" disabled={busy || !chosenContext || !importConfirmed} onChange={event => { const file = event.target.files?.[0]; if (file) { if (file.size > 2000000) { setMessage('資料JSONは2MB以内にしてください'); return }; void prepare(async () => onPrepareImport(chosenContextId, JSON.parse(await file.text()), from, to)) }; event.target.value = '' }} /></label>
     <details><summary>休日JSONの形式例</summary><pre>{JSON.stringify(importSample, null, 2)}</pre><p>activity資料はreschedule/cancel、roster資料は公開済み本人のroster_assignmentを指定します。削除・資料取得失敗を取消として扱いません。</p></details>

@@ -1,0 +1,3 @@
+record_id,record_revision,date,status
+example-closed-day,1,2026-10-12,closed
+example-extra-open-day,1,2026-10-17,open

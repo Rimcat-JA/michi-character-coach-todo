@@ -8,6 +8,8 @@ import { assertTripTaskScoreChangeAllowed } from './trip-bundles'
 import { buildCalendarChangePlan, prepareCalendarChangePlan, type CalendarChangePlan, type CalendarChangeScope, type CalendarRulesState, type CurrentCalendarEntity, type ResolvedCalendarSpec, type ResolverConflict } from './calendar-resolver'
 import { emptyCalendarRulesState, mergeScheduleImport, prepareScheduleImport, validateCalendarRulesState, type ScheduleImportPreview } from './calendar-rules-validation'
 import { redactICSForAudit } from './calendar-import-redaction'
+import { redactCSVForAudit } from './calendar-csv-redaction'
+import { csvHeadHasRetainedEvidence } from './calendar-resolver'
 
 const calendarDB = db as typeof db & { calendarRules: EntityTable<CalendarRulesState, 'id'> }
 const table = () => { if (!calendarDB.calendarRules) throw new Error('共通カレンダーの保存先がありません。アプリを更新してください'); return calendarDB.calendarRules }
@@ -19,6 +21,7 @@ type Proposal = CalendarConfigurationProposal | CalendarGenerationProposal
 const authority = new Map<string, Proposal>()
 export type CalendarConfigurationGuard = {
   assertCurrent: (settings: Settings, state: CalendarRulesState) => Promise<void>
+  assertLive?: () => void
   resultId: string; businessKey: string | null; candidateKey: string | null
   businessHash: string; candidateHash: string; detail: Record<string, unknown>
 }
@@ -108,31 +111,40 @@ export async function applyCalendarProposalFromUI(input: Proposal, event: Event)
     const current = await settings(), state = await calendarTable.get('main') ?? emptyCalendarRulesState(current.profileId, current.datasetId)
     validateCalendarRulesState(state, current.profileId, current.datasetId)
     const guard = configurationGuards.get(proposal.id)
+    const registeredProposal = authority.get(proposal.id)
+    const assertLive = () => { if (!registeredProposal || authority.get(proposal.id) !== registeredProposal) throw new Error('登録済みの確認案ではありません。差分を作り直してください'); if (guard && configurationGuards.get(proposal.id) !== guard) throw new Error('確認案の根拠が失効しました'); guard?.assertLive?.() }
+    assertLive()
     if (guard) await guard.assertCurrent(current, state)
+    assertLive()
     const receipt = await db.commands.get(key)
+    assertLive()
     if (receipt) { if (receipt.hash !== hash || current.profileId !== proposal.ownerId || current.datasetId !== proposal.datasetId) throw new Error('IDEMPOTENCY_MISMATCH'); return receipt.resultId }
     if (guard?.candidateKey) {
       const prior = await db.commands.get(guard.candidateKey)
-      if (prior) { if (prior.hash !== guard.candidateHash) throw new Error('同じ検出候補を別の系列として再採用できません'); await db.commands.add({ key, hash, resultId: prior.resultId, at: new Date().toISOString() }); return prior.resultId }
+      assertLive()
+      if (prior) { if (prior.hash !== guard.candidateHash) throw new Error('同じ検出候補を別の系列として再採用できません'); await db.commands.add({ key, hash, resultId: prior.resultId, at: new Date().toISOString() }); assertLive(); return prior.resultId }
     }
     if (guard?.businessKey) {
       const prior = await db.commands.get(guard.businessKey)
+      assertLive()
       if (prior) {
         if (prior.hash !== guard.businessHash) throw new Error('同じ根拠の系列を変更して再採用できません')
         const at = new Date().toISOString()
-        if (guard.candidateKey) await db.commands.add({ key: guard.candidateKey, hash: guard.candidateHash, resultId: prior.resultId, at })
-        await db.commands.add({ key, hash, resultId: prior.resultId, at }); return prior.resultId
+        if (guard.candidateKey) { await db.commands.add({ key: guard.candidateKey, hash: guard.candidateHash, resultId: prior.resultId, at }); assertLive() }
+        await db.commands.add({ key, hash, resultId: prior.resultId, at }); assertLive(); return prior.resultId
       }
     }
     checkContext(proposal, current, state)
     const at = new Date().toISOString()
     if (proposal.kind === 'configuration') {
       if (proposal.next.sources.some(source => source.ics?.retentionUntil && source.ics.retentionUntil <= at && source.ics.snapshots.some(snapshot => snapshot.originalText !== null))) throw new Error('ICS原本の保持期限に達しました。差分を確認し直してください')
-      if (proposal.importPreview?.noOp && canonicalJSON(proposal.next) === canonicalJSON(config(state))) { await db.commands.add({ key, hash, resultId: proposal.id, at }); return proposal.id }
+      if (proposal.next.sources.some(source => source.csv && source.csv.heads.some(head => head.status !== 'expired' && !csvHeadHasRetainedEvidence(source.csv!, head, at)))) throw new Error('CSV選択行の保持期限に達しました。差分を確認し直してください')
+      if (proposal.importPreview?.noOp && canonicalJSON(proposal.next) === canonicalJSON(config(state))) { await db.commands.add({ key, hash, resultId: proposal.id, at }); assertLive(); return proposal.id }
       const next = { ...state, ...structuredClone(proposal.next), revision: state.revision + 1 }
       validateCalendarRulesState(next, current.profileId, current.datasetId)
-      await calendarTable.put(next)
-      await db.audits.add({ id: uid(), taskId: null, operation: 'calendar.configuration', at, detail: JSON.stringify({ proposalId: proposal.id, digest: proposal.digest, approvedBy: current.profileId, policyEpoch: proposal.policyEpoch, fromRevision: state.revision, toRevision: next.revision, before: redactICSForAudit(config(state)), after: redactICSForAudit(proposal.next), import: proposal.importPreview ? { sourceId: proposal.importPreview.source.id, revision: proposal.importPreview.source.revision, coverageFrom: proposal.importPreview.source.coverageFrom, coverageTo: proposal.importPreview.source.coverageTo, bodyHash: proposal.importPreview.source.bodyHash } : null }) })
+      await calendarTable.put(next); assertLive()
+      await db.audits.add({ id: uid(), taskId: null, operation: 'calendar.configuration', at, detail: JSON.stringify({ proposalId: proposal.id, digest: proposal.digest, approvedBy: current.profileId, policyEpoch: proposal.policyEpoch, fromRevision: state.revision, toRevision: next.revision, before: redactCSVForAudit(redactICSForAudit(config(state))), after: redactCSVForAudit(redactICSForAudit(proposal.next)), import: proposal.importPreview ? { sourceId: proposal.importPreview.source.id, revision: proposal.importPreview.source.revision, coverageFrom: proposal.importPreview.source.coverageFrom, coverageTo: proposal.importPreview.source.coverageTo, bodyHash: proposal.importPreview.source.bodyHash } : null }) })
+      assertLive()
     } else {
       const entities = await currentCalendarEntities(state), rebuilt = buildCalendarChangePlan(state, entities, proposal.plan.from, proposal.plan.to, proposal.plan.scope), { digest: _planDigest, ...expected } = proposal.plan
       if (canonicalJSON(rebuilt) !== canonicalJSON(expected)) throw new ConflictError()
@@ -141,7 +153,8 @@ export async function applyCalendarProposalFromUI(input: Proposal, event: Event)
       for (const spec of rebuilt.creates) {
         if (await db.tasks.where('generationKey').equals(spec.generationKey).first() || next.instances.some(instance => instance.generationKey === spec.generationKey)) throw new ConflictError()
         const id = spec.kind === 'task' ? await addTask({ ...newTaskInput(), title: spec.title, scheduledDate: spec.scheduledDate, dueDate: spec.dueDate, score: spec.score! }, spec.generationKey, null, 'routine') : uid()
-        if (spec.kind === 'event') await db.calendarEvents.add(eventFrom(spec, id, current.profileId, at))
+        assertLive()
+        if (spec.kind === 'event') { await db.calendarEvents.add(eventFrom(spec, id, current.profileId, at)); assertLive() }
         next.instances.push({ generationKey: spec.generationKey, entityId: id, entityRevision: 1, status: 'active', spec: structuredClone(spec) })
       }
       for (const update of rebuilt.updates) {
@@ -159,23 +172,28 @@ export async function applyCalendarProposalFromUI(input: Proposal, event: Event)
           await db.calendarEvents.put(eventFrom(update.after, instance.entityId, current.profileId, old?.createdAt ?? at)); instance.entityRevision++
         }
         instance.status = 'active'; instance.spec = structuredClone(update.after)
+        assertLive()
       }
       for (const cancel of rebuilt.cancels) {
         const instance = next.instances.find(row => row.generationKey === cancel.before.generationKey)!
         if (instance.spec.kind === 'task') { const task = (await db.tasks.get(instance.entityId))!; if (task.status === 'completed') throw new ConflictError(); await db.tasks.put({ ...task, deletedAt: at, revision: task.revision + 1, updatedAt: at }); instance.entityRevision = task.revision + 1 }
         else { await db.calendarEvents.delete(instance.entityId); instance.entityRevision++ }
         instance.status = 'cancelled'
+        assertLive()
       }
       next.revision++
-      validateCalendarRulesState(next, current.profileId, current.datasetId); await calendarTable.put(next)
+      validateCalendarRulesState(next, current.profileId, current.datasetId); await calendarTable.put(next); assertLive()
       await db.audits.add({ id: uid(), taskId: null, operation: 'calendar.apply', at, detail: JSON.stringify({ proposalId: proposal.id, digest: proposal.digest, approvedBy: current.profileId, policyEpoch: proposal.policyEpoch, scope: rebuilt.scope, creates: rebuilt.creates, updates: rebuilt.updates, cancels: rebuilt.cancels, completedUnchanged: rebuilt.skippedCompleted }) })
+      assertLive()
     }
     const resultId = guard?.resultId ?? proposal.id
     if (guard) {
-      if (guard.businessKey) await db.commands.add({ key: guard.businessKey, hash: guard.businessHash, resultId, at })
-      if (guard.candidateKey) await db.commands.add({ key: guard.candidateKey, hash: guard.candidateHash, resultId, at })
-      await db.audits.add({ id: uid(), taskId: null, operation: 'routine.assistance.approved', at, detail: JSON.stringify({ ...guard.detail, configurationId: proposal.id, digest: proposal.digest, ruleId: resultId, approvedBy: current.profileId }) })
+      if (guard.businessKey) { await db.commands.add({ key: guard.businessKey, hash: guard.businessHash, resultId, at }); assertLive() }
+      if (guard.candidateKey) { await db.commands.add({ key: guard.candidateKey, hash: guard.candidateHash, resultId, at }); assertLive() }
+      const csvApproval = guard.detail.origin === 'manual_csv'
+      await db.audits.add({ id: uid(), taskId: null, operation: csvApproval ? 'calendar.csv.approved' : 'routine.assistance.approved', at, detail: JSON.stringify({ ...guard.detail, configurationId: proposal.id, digest: proposal.digest, ...(csvApproval ? { sourceId: resultId } : { ruleId: resultId }), approvedBy: current.profileId }) })
+      assertLive()
     }
-    await db.commands.add({ key, hash, resultId, at }); return resultId
+    await db.commands.add({ key, hash, resultId, at }); assertLive(); return resultId
   })
 }
