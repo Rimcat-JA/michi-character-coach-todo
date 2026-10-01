@@ -94,8 +94,8 @@ origin/main（N09/H01を含む）へ載せ替えた後、Vitest 120ファイル1
 
 | ID | 状態 | 根拠 |
 |---|---|---|
-| 01 | PC：自動テスト・Electron/Chromiumで確認。Windows画面は下記TODO | 新規datasetにアカウント・キー・URLなし（`runtime-profile.test.ts`）、ハーネス2、Electron本体のCDP確認。スマホは未実施 |
-| 02 | PC：既存の証拠＋ハーネス5。再起動はWindows画面で確認予定 | 単一トランザクションと再送抑止（`src/commands.test.ts`の「再送しても一回だけ作成・加点する」）。スマホは未実施 |
+| 01 | PC：自動テスト・Electron/Chromium・Windows画面で確認 | 新規datasetにアカウント・キー・URLなし（`runtime-profile.test.ts`）、ハーネス2、Windows画面（新しいプロファイルの初回カード）。スマホは未実施 |
+| 02 | PC：既存の証拠＋ハーネス5＋Windows画面（アプリの再起動後の保持） | 単一トランザクションと再送抑止（`src/commands.test.ts`の「再送しても一回だけ作成・加点する」）。スマホは未実施 |
 | 03 | 既存の証拠 | `src/domain.test.ts`「未設定と手動0ptを分ける」、`src/commands.test.ts`の25pt。`offline-time.test.ts`で0pt/25ptの台帳 |
 | 04 | 既存の証拠 | `src/domain.test.ts`の計算例・外出最低点、`src/trip-bundles.test.ts`、`src/allocation-completion.test.ts`。AI不要 |
 | 05 | 既存の証拠 | `src/commands.test.ts`、40→35→取消→再完了の正味35pt（[本人再確認の検証記録](verification-2026-10-01-completion-reconfirmation.md)） |
@@ -104,12 +104,12 @@ origin/main（N09/H01を含む）へ載せ替えた後、Vitest 120ファイル1
 | 08 | 確認（注入による） | `storage-status.test.tsx`、ハーネス7。孤立ファイルは構造上発生しない（上記）。実容量の枯渇は未実施 |
 | 09 | 確認（合成の時計） | `routine-catchup.test.ts`（時計を進めた後に戻す場合、N09の停止、1回5,000回の上限を含む）、`offline-restore-refire.test.ts`。実機で端末を放置した試験ではありません |
 | 10 | 既存の証拠 | `src/calendar-resolver.test.ts`ほかM06・CSV取込の試験（[CSV取込の検証記録](verification-2026-10-01-calendar-csv-import.md)） |
-| 11 | 確認（unit・Electron本体のCDP） | `CapabilityView.test.tsx`、Electron本体で`michiAI.chat`の遮断。画面はWindows画面で確認予定 |
+| 11 | 確認（unit・Electron本体のCDP・Windows画面） | `CapabilityView.test.tsx`、Electron本体で`michiAI.chat`の遮断、Windows画面のコーチの表示・下書き保存（キー設定済みの状態はQAの仮応答で再現） |
 | 12 | 対象外（Windows）・表示のみ確認 | WindowsのOS予約通知は未実装のため、OS予約の取消・照合は該当なし。制約の表示を`CapabilityView.test.tsx`で確認。スマホは未実施 |
 | 13 | 表示のみ確認 | 通知拒否でもToDoを使える表示（`CapabilityView.test.tsx`）。exact alarm・省電力はスマホの項目で未実施 |
-| 14 | 未実施 | 端末（OS）の再起動はしていません。アプリの再起動はWindows画面で確認予定 |
+| 14 | 一部（アプリの再起動のみ） | 端末（OS）の再起動はしていません。アプリの再起動後の保持はWindows画面で確認 |
 | 15 | 確認（Chromiumエミュレーション・PC） | ハーネス1〜6・9。スマホのブラウザは未実施 |
-| 16 | 確認（アプリの経路） | `network-gateway.node-tests.mjs`、ハーネス10、Electron本体のCDP確認。プロセスの接続の観測はWindows画面で確認予定 |
+| 16 | 確認（アプリの経路・プロセスの接続の観測） | `network-gateway.node-tests.mjs`、ハーネス10、Electron本体のCDP確認、Windows画面の`Get-NetTCPConnection`（loopback以外0件）。OSのネットワーク遮断ではありません |
 | 17 | 既存の証拠 | I04の別Windowsプロファイルへの復元（[要件別の進捗](requirements-status.md)のI04行、[検証記録](verification-2026-10-01.md)）、`offline-restore-refire.test.ts` |
 | 18 | 既存の証拠＋確認 | `src/backup.test.ts`の改ざん拒否、`offline-restore-refire.test.ts`の同じバックアップの再取込 |
 | 19 | 未実施 | 接続型（personal-pc・hosted）が未提供のため |
@@ -121,14 +121,63 @@ origin/main（N09/H01を含む）へ載せ替えた後、Vitest 120ファイル1
 
 ## Windows画面
 
-TODO：最新のポータブル版`michi.exe`で、試験用の新しい`--user-data-dir`と`--host-resolver-rules="MAP * ~NOTFOUND, EXCLUDE localhost"`（アプリ内のDNS遮断で、システムの設定は変えない）を使い、次を確認する予定です。
+2026-10-02に、Windows 11のポータブル版`C:\toodoapp\app\release\michi-portable-20261001-095727\michi.exe`で確認しました。`resources\app\dist`と`resources\app\electron`を、このブランチ（N05への載せ替えとN05との組み合わせの修正の後、コミット`9f0a09c`）の`npm run build`の出力と`electron\`で置き換え、コピー後のSHA-256が全ファイル（dist 9件・electron 37件）で一致することを確かめました（画面のbundleは`index-BeknS04r.js`）。electron側に、作業ツリーにない古いファイルはありませんでした。
 
-- 初回カードで「この端末だけで始める」を選び、アカウント・キー・URLなしでdatasetができること。
-- タスクの作成・編集・完了と、アプリの再起動後に同じ値（タスク・台帳・ポモドーロの時刻・通知ルール）。
-- AIの接続テスト・コーチの送信・GitHub実績の確認・Live2Dのリンクが日本語の表示で止まり、能力表の回数が送信0回のままであること。
-- セッション中に各`michi.exe`のPIDで`Get-NetTCPConnection -OwningProcess`を読み取り、loopback以外の接続先がないこと。記録は「アプリ経路の遮断とプロセス通信の観測」とし、OSのネットワーク遮断とは呼びません。
-- 試験用プロファイルに古い展開位置を入れ、今日の画面に「前回起動から N 日」のカードが出て、重複がないこと。
-- 「設定とデータ」の保存保護・未バックアップ変更数・能力表の表示と、390px幅での表示。
+操作はQA用スクリプト`work\test-offline-ui.mjs`（CDP、`work\qa-cdp.mjs`を使用）です。本人の操作に当たるボタン・ラジオ・チェックはすべてCDPのマウス入力（ネイティブのクリック）で押しました。試験中はメインプロセスに次の見張りを入れ、終了時に元へ戻しました。
+
+- メインプロセスの`fetch`を遮断して回数を数える。OpenRouterのキーファイル（`openrouter-key.bin`）の読み込みを遮断して回数を数える。
+- 送信に当たる`michi:ai-*`（`ai-usage`系を除く）と、GitHub実績の`michi:githubpublish-*`（端末内だけを読む`storedStatus`を除く）のIPCを遮断して回数を数える。
+- `michi:ai-status`はQAの仮応答に置き換えました（新しいプロファイルでは`configured:true`、既存のQAプロファイルでは`configured:false`）。キーファイルは作らず、読んでいません。
+- 画面側はCDPの`Network`イベントで、`michi:`・`data:`・`blob:`以外の要求を数える。
+- あわせて`michiNetwork.status()`でNetworkGatewayの回数（起動後の送信・設定で遮断・送信先で遮断・失敗）を読む。
+
+結果の記録（JSONと画面写し）は作業フォルダーの`work\offline-1790872299575-*`（既存QAプロファイル）と`work\offline-1790872439170-*`（新しいプロファイル）です。
+
+### 新しいプロファイル（初回起動・オフライン）
+
+試験用の新しい`--user-data-dir`（`work\qa-offline-fresh-1790872439170`）、`--remote-debugging-port=29920 --inspect=29922`、`--host-resolver-rules="MAP * ~NOTFOUND, EXCLUDE localhost"`で起動しました。この引数はアプリ内（Chromium）の名前解決を止めるもので、システムの設定は変えていません。試験の後にこのインスタンスは停止しました（プロファイルのフォルダーは残しています）。
+
+- 起動直後の設定に`runtimeProfile`はなく、`aiEnabled=false`・モデルなし・タスク0件・設定にURLなし。キーファイルなし。`michiNetwork.status()`は`offline_only`・移行判定false。
+- 今日の画面の初回カード「この端末での使い方」：「この端末だけで始める」（主ボタン）、「この端末だけで始め、必要な時だけ通信を許可」、無効の「自分のPCサーバーへ接続（未提供）」「クラウドへ接続（未提供）」の4つで、「アカウント・APIキー・サーバーURLなしで」と表示。「この端末だけで始める」を押すと、`standalone`・`authority=local`・`network_policy=offline_only`・`server_url=null`・現在の`dataset_id`のprofileと`runtime.network_policy`監査（`previous:null`）が保存され、カードは消えました。
+- タスク：今日の予定日・手動25ptで作成（revision 1）、編集画面で名前とメモを変更（revision 2）、一覧の完了ボタンで完了（revision 3）。台帳は`award +25`の1行、完了記録あり。
+- コーチ：試験用DBに`aiEnabled=true`・モデル`qa/offline-stub-model`を直接書き、上記の仮応答でキー設定済みの状態にしました（AIを設定して`offline_only`の状態の再現です）。見出しは「AIはオフライン」、会話欄に「AIはオフラインのため利用できません（オフライン専用の設定です）。…」を表示し、送信ボタンは「下書きを保存」でした。
+  - 「通知を止めて」を送ると、AIを使わずに通知の停止（`stops.notifications=true`）を実行し、本人の文章と「端末内の定型文」の応答の2行を作りました。
+  - 続けて「オフラインの相談 …」で「下書きを保存」を押すと、「AIはオフラインのため利用できません。入力は下書きとして保存しました。通信が戻っても自動では送信しません。」を表示し、下書きを保存して入力欄にも残し、会話の行は2行のまま増えませんでした（応答・応答状況の行なし）。
+  - コーチ画面のLive2Dの条件ページは、`offline_only`では「Live2DのSDK利用・公開条件を確認（通信が必要・オフライン専用のため開きません）」という文字で、リンクではありませんでした。
+- 設定とデータ：
+  - 「端末単独で使える機能」は16行で、「通信の許可」は`offline_only`が選択済み。タスク・ポイント・ビュー・繰り返し・計測・ファイル・履歴・バックアップは○、新しいLLM会話とGitHubへの投稿は「通信が必要」（投稿は「オフライン専用の設定のため送信しません…」）、通知・音声・ファイルブリッジは「条件付き」、新着取得・LINE等・同期は「このPCでは未提供」。サーバー接続は未提供と表示。
+  - 「接続とバックグラウンド」は、OpenRouter AIとGitHub実績の「外部通信」がともに「オフライン専用のため送信前に遮断（今回の起動後 送信0回・設定で遮断0回）」で、用途別の一覧も3用途とも送信0回。GitHub実績の行に「GitHubに接続して状態を確認」ボタンはなく、「状態確認は通信が必要です（オフライン専用のため確認しません）」を表示。
+  - 「ローカルデータ」は、保存保護「保存保護あり」（`persisted()`がtrue）、使用量「0 MB / 104702 MB」、最後の書き出し「まだありません」、未バックアップ変更数「16件」、データセットの先頭8文字。
+  - 「通信の許可」で「必要な時だけ通信を許可」を押すと`explicit_online`が保存され、GitHub実績の行に状態確認ボタンが戻り、外部通信の表示は「本人の操作時だけ許可…」、能力表のGitHub投稿は「本人の確認ボタンから送るときだけ通信します…」に変わりました。コーチ画面のLive2Dの条件ページはリンクになりました。どのボタンも押していません。「オフライン専用」に戻すと、状態確認ボタンは再び消えました。
+- アプリの再起動：このインスタンスを停止して同じプロファイルで起動し直し、`offline_only`のまま、タスク（行全体が一致）・台帳・完了記録・コーチの下書き（入力欄にも表示）・会話の行数が同じで、初回カードは出ず、一覧の「完了」に同じタスクがあり、外部通信の表示は今回の起動後の回数（送信0回）でした。1回目の再起動では、確認の途中で画面写しの指定（QAスクリプトのセレクター）を誤って止まったため、もう一度起動し直して全項目を確認しました。
+- 新しいプロファイルでの確認は、最初のプロファイル（`work\qa-offline-fresh-1790872299575`）で、QAスクリプトが試験用DBへの直接の書き込みの後に再読込をしていなかったためコーチの確認で止まりました。スクリプトを直し、別の新しいプロファイルで最初からやり直しました（最初のプロファイルのインスタンスも停止済み）。
+
+### 既存のQAプロファイル（移行・既存データ）
+
+`work\qa-reminders-profile`（ポート29910/29912）です。差し替え前の版で起動中だったインスタンスから、読み取りだけで状態を記録してから停止し、新しい版で起動し直しました。このプロファイルにはOpenRouterのキーファイルはなく、GitHub実績の登録（`connection.bin`）があります。`aiEnabled`はfalseでした。
+
+- 移行：差し替え前は`runtimeProfile`なし。新しい版の起動時に、GitHubの登録があるため`explicit_online`（`standalone`・`authority=local`・`server_url=null`・同じ`dataset_id`）へ移行し、`runtime.migrate`監査（`previous:null`）が1件残りました。初回カードは出ません。`aiEnabled`・モデルID・`profileId`・`datasetId`は変わりませんでした。
+- 既存データ：タスク174件・完了52件・台帳107行（合計600pt）・評価204件・旧ルーティン7件・コーチの会話の行10件・予定18件を、行ごとに差し替え前と比べて、変更・欠落0件、追加0件。共通ルーティンの状態（`calendarRules`）も一致し、generation keyの重複はありませんでした。繰り返しの展開は今回0回作成で、今日の画面に報告カードは出ませんでした。
+- 「接続とバックグラウンド」は、OpenRouter AIとGitHub実績とも「本人の操作時だけ許可（今回の起動後 送信0回・設定で遮断0回）」で、状態確認ボタンあり（押していません）。「通信の許可」は「必要な時だけ通信を許可」が選択済み。「ローカルデータ」は保存保護あり、使用量「6 MB / 104744 MB」、最後の書き出し「まだありません」、未バックアップ変更数「1600件」（書き出したことがないため全行）。コーチ画面はキーがないためオフラインの表示を出さず、Live2Dの条件ページはリンクでした。
+- 「オフライン専用」へ切り替えると、GitHub実績の状態確認ボタンが消え、外部通信は「オフライン専用のため送信前に遮断…」、Live2Dの条件ページは文字になりました。その後「必要な時だけ通信を許可」へ戻し、移行後と同じ`explicit_online`に戻しました。この往復で`runtime.network_policy`監査が2件（`explicit_online→offline_only`、`offline_only→explicit_online`）残っています。
+
+### 通信・キー・AIの見張り
+
+- 新しいプロファイル（初回・再起動後）と既存QAプロファイルのいずれも、メインプロセスの`fetch`0回、キーファイルの読み込み0回、送信に当たるAIのIPC 0回、GitHub実績のIPC（`storedStatus`以外）0回、画面側の外部要求0件でした。NetworkGatewayの回数も、起動時（見張りを入れる前の分を含む）と終了時のどちらも全用途で送信0回・失敗0回でした。
+- 新しいプロファイルの各回の終了時と既存QAプロファイルで、そのインスタンスの全`michi.exe`のPIDについて`Get-NetTCPConnection`を読みました。あったのはCDPとインスペクターの待受（127.0.0.1）だけで、loopback以外の接続先は0件でした。これはその時点のプロセスの接続の観測で、OSのネットワーク遮断ではありません。
+
+### 390px幅のエミュレーション
+
+CDPの`Emulation.setDeviceMetricsOverride`（390×844）で、初回カード、「端末単独で使える機能」、「接続とバックグラウンド」、「ローカルデータ」、コーチのオフライン表示（新しいプロファイル）と、既存QAプロファイルの前の3つを表示し、各要素と文字がカードの幅を超えず、文書の幅が390以下であることを確かめました。Windows版の画面幅を変えたエミュレーションで、Android・iPhoneの実機の試験ではありません。PWAのハーネス（上記）もChromium(Electron)のエミュレーションです。
+
+### Windows画面で確認していないこと
+
+- ポモドーロの時刻と通知ルールの、アプリ再起動後の保持。
+- 古い展開位置を入れたプロファイルでの「前回起動から N 日」のカードの表示（合成の時計の自動テストだけです）。
+- コーチの「接続テスト」ボタン、`explicit_online`でのGitHubの状態確認（実際の通信になるため押していません）。
+- OSのネットワーク遮断、OSの再起動。
+
+試験の後、既存QAプロファイルの設定は試験前と同じ（`explicit_online`、`aiEnabled=false`、モデルIDは同じ）で、このインスタンスは起動したままです。新しいプロファイルのインスタンスは停止しました。
 
 ## 残る範囲
 
