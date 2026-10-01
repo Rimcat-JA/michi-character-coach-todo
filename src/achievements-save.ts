@@ -3,6 +3,8 @@ import { db } from './db'
 import { uid } from './domain'
 import { canonicalJSON, contentDigest } from './canonical'
 import { changePolicyFor } from './change-set'
+import { assertOperationAllowed } from './automation-policy'
+import { onFeatureHidden } from './features'
 import { achievementCompletionDigest, achievementEvidenceOrder, achievementTextHash, buildAchievementManifest, completionScoreMode, publicAchievementText, type AchievementEvidence, type AchievementEvidenceKind, type AchievementExport, type AchievementFacts, type AchievementPolicy, type AchievementPublicSelection } from './achievements'
 import { validateAchievementEvidence, validateAchievementExport, validateAchievementPolicy, verifyAchievementDigests } from './achievements-validation'
 import type { GitHubAchievementsGateway, GitHubPublishResult } from './github-publish-types'
@@ -13,6 +15,7 @@ const tables = () => [db.settings,db.tasks,db.completions,db.ledger,db.assessmen
 export type AchievementProposal = { row: AchievementExport; previousRevision: number | null; fingerprint: string }
 const authority = new Map<string, AchievementProposal>()
 export function clearAchievementAuthority() { authority.clear() }
+onFeatureHidden('achievements', clearAchievementAuthority)
 function human(event: Event) { const getter=Object.getOwnPropertyDescriptor(Event.prototype,'type')?.get; if(!(event instanceof Event)||!event.isTrusted||!getter||!['click','submit'].includes(getter.call(event)))throw new Error('本人確認ボタンから操作してください') }
 function gateway(): GitHubAchievementsGateway { const api=(window as unknown as {michiGitHubAchievements?:GitHubAchievementsGateway}).michiGitHubAchievements; if(!api)throw new Error('integration_not_configured'); return api }
 function frozen<T>(value:T):T{if(value&&typeof value==='object'){Object.freeze(value);Object.values(value).forEach(frozen)}return value}
@@ -35,7 +38,7 @@ export async function saveAchievementDraftFromUI(completionId:string,title:strin
 export async function prepareAchievementExport(completionId:string,policyId:string,selection:AchievementPublicSelection,api=gateway()):Promise<AchievementProposal>{
   const captured=await db.transaction('r',tables(),async()=>({facts:await facts(completionId,policyId),published:await store.achievementExports.toArray()})),value=captured.facts,previous=captured.published.find(item=>item.repositoryId===value.policy.repositoryId&&item.completionId===completionId)??null
   if(previous&&['unknown','committing','preparing'].includes(previous.state))throw new Error('公開結果が不明です。照合が終わるまで再送しません');if(previous?.commitSha&&!selection.correctionReason.trim())throw new Error('既存の公開recordへの訂正理由を指定してください')
-  await verifyOrigins(value,selection.evidenceIds);const status=await api.status(),policy=changePolicyFor(value.settings),at=new Date().toISOString(),clean={...structuredClone(selection),title:publicAchievementText(selection.title,300),body:publicAchievementText(selection.body),evidenceIds:selection.evidenceIds.slice().sort()}
+  await verifyOrigins(value,selection.evidenceIds);const policy=changePolicyFor(value.settings);assertOperationAllowed(policy,'achievement.publish');const status=await api.status(),at=new Date().toISOString(),clean={...structuredClone(selection),title:publicAchievementText(selection.title,300),body:publicAchievementText(selection.body),evidenceIds:selection.evidenceIds.slice().sort()}
   const manifest=await buildAchievementManifest({facts:value,selection:clean,gateway:status,exportId:previous?.id??uid(),publicId:previous?.publicId??uid(),policyEpoch:policy.epoch,sourcePermissionRevision:policy.sourcePermissionRevision,previous,published:captured.published,preparedAt:at,expiresAt:new Date(Date.now()+15*60000).toISOString()})
   const row:AchievementExport={id:manifest.exportId,ownerId:value.settings.profileId,datasetId:value.settings.datasetId,repositoryId:value.policy.repositoryId,completionId,taskId:value.task.id,publicId:manifest.publicId,revision:(previous?.revision??0)+1,state:'awaiting_review',manifest,selection:clean,publishedSummary:previous?.publishedSummary??null,summary:{title:clean.title,body:clean.body,points:value.completion.currentAt?value.completion.netPoints!:0,scoreMode:completionScoreMode(value.completion,value.assessments,value.ledger),completionAt:value.completion.originalAt,canceled:!value.completion.currentAt},evidenceRefs:value.evidence.filter(item=>selection.evidenceIds.includes(item.id)).map(item=>({id:item.id,revision:item.revision,publicRevision:item.publicRevision,originalSha256:item.origin.sha256,publicSha256:item.publicSha256})),approvedAt:null,approvedBy:null,attemptId:null,attemptStartedAt:null,attemptCount:previous?.attemptCount??0,commitSha:previous?.commitSha??null,branch:previous?.branch??null,recordPath:`records/${manifest.recordDate.slice(0,4)}/${manifest.recordDate.slice(5,7)}/${manifest.publicId}.json`,publishedAt:previous?.publishedAt??null,url:previous?.url??null,pullRequestUrl:previous?.pullRequestUrl??null,contribution:previous?.contribution??'not_published',failureCode:null,previousCommitSha:previous?.commitSha??null,history:previous?.history??[],createdAt:previous?.createdAt??at,updatedAt:at};validateAchievementExport(row);const proposal=frozen({row,previousRevision:previous?.revision??null,fingerprint:fingerprint(value)});authority.set(row.id,proposal);return proposal
 }
@@ -45,6 +48,7 @@ async function revalidate(row: AchievementExport, api: GitHubAchievementsGateway
   await verifyOrigins(value, row.evidenceRefs.map(item => item.id))
   await verifyAchievementDigests(value.evidence.filter(item=>row.selection.evidenceIds.includes(item.id)),[row])
   const current = changePolicyFor(value.settings)
+  assertOperationAllowed(current, 'achievement.publish')
   // The native publish handler consumes its trusted-click proof before network access,
   // then checks its private connection and live repository. Avoid HTTP here between click and IPC.
   const status = checkGateway ? await api.status() : null

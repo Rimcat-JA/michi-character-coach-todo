@@ -1,7 +1,7 @@
 import { db } from './db'
 import { uid, type Settings, type WorkflowConfig, type WorkflowPreset } from './domain'
 import { NAV_FEATURE_IDS, visibleNavigation } from './navigation'
-import { OPTIONAL_FEATURE_IDS } from './features'
+import { OPTIONAL_FEATURE_IDS, revokeHiddenFeatureAuthority } from './features'
 
 const isRecord = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value)
 const exactKeys = (value: Record<string, unknown>, keys: string[]) => Object.keys(value).every(key => keys.includes(key)) && keys.every(key => key in value)
@@ -48,11 +48,14 @@ export async function saveWorkflowPreset(name: string, existingId?: string): Pro
 
 export async function applyWorkflowConfig(config: WorkflowConfig): Promise<void> {
   validateWorkflowConfig(config)
-  await db.transaction('rw', db.settings, async () => {
+  const newlyHidden = await db.transaction('rw', db.settings, async () => {
     const settings = await db.settings.get('main')
     if (!settings) throw new Error('設定がありません')
     await db.settings.put({ ...settings, navDesktop: [...config.navDesktop], navMobile: [...config.navMobile], hiddenFeatures: [...config.hiddenFeatures], daySectionMode: config.daySectionMode, taskListLimit: config.taskListLimit, dailyMinutes: config.dailyMinutes, dailyPoints: config.dailyPoints })
+    return config.hiddenFeatures.filter(id => !settings.hiddenFeatures?.includes(id))
   })
+  // A preset that hides a feature revokes the same pending previews as the individual toggle.
+  revokeHiddenFeatureAuthority(newlyHidden)
 }
 
 export async function applyWorkflowPreset(id: string): Promise<void> {

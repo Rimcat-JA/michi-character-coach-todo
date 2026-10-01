@@ -1,7 +1,7 @@
 import { db } from './db'
 import { validateSnapshot, type Snapshot } from './backup-validation'
 import { tasksToCsv, tasksToIcs } from './data-export'
-import type { TaskAttachment } from './domain'
+import type { Settings, TaskAttachment } from './domain'
 import { clearChangeSetAuthority } from './change-set'
 import { verifySourceDigests } from './source-validation'
 import { clearDetectionAuthority } from './detection-run'
@@ -17,7 +17,7 @@ import { purgeExpiredMemories } from './coach-memory'
 import { purgeExpiredConversations } from './chat-history'
 import { purgeExpiredCalendarOriginals } from './calendar-import-retention'
 import { redactExpiredICSRecords } from './calendar-import-redaction'
-import { changePolicyFor } from './change-set'
+import { changePolicyFor, validateChangePolicy } from './change-set'
 import { verifyCalendarOriginalDigests } from './calendar-import'
 import { verifyCSVOriginalDigests } from './calendar-csv-import'
 import { purgeExpiredCSVOriginals } from './calendar-csv-retention'
@@ -96,6 +96,15 @@ export async function inspectBackup(file: File, password: string): Promise<Snaps
   validateSnapshot(snapshot)
   return snapshot
 }
+/** A restore never lifts a stop made since the backup: the stricter on/off wins and the epoch moves past both. */
+function stricterAuthority(restored: Settings, current: Settings): Settings {
+  const snap = changePolicyFor(restored), cur = changePolicyFor(current), epoch = Math.max(snap.epoch, cur.epoch) + 1
+  if (!Number.isSafeInteger(epoch)) throw new Error('権限の版が上限に達しています')
+  const stops = snap.stops || cur.stops ? { stops: { notifications: Boolean(snap.stops?.notifications || cur.stops?.notifications), routines: Boolean(snap.stops?.routines || cur.stops?.routines) } } : {}
+  const policy = { ...snap, aiChangesEnabled: snap.aiChangesEnabled && cur.aiChangesEnabled, epoch, ...stops }
+  validateChangePolicy(policy)
+  return { ...restored, aiEnabled: restored.aiEnabled && current.aiEnabled, changePolicy: policy }
+}
 export async function restoreBackup(snapshot: Snapshot) {
   validateSnapshot(snapshot)
   await verifySourceDigests(snapshot.contextSnapshots, snapshot.sourceSummaries)
@@ -104,7 +113,7 @@ export async function restoreBackup(snapshot: Snapshot) {
   await verifyAchievementDigests(snapshot.achievementEvidence ?? [], snapshot.achievementExports ?? [])
   await verifyTaskSourceEvidenceDigests(snapshot.taskSourceEvidence)
   const names = snapshot.containers === undefined ? [...new Set(snapshot.tasks.map(task => task.project.trim()).filter(Boolean))] : []
-  const at = new Date().toISOString(), ownerId = snapshot.settings[0].profileId
+  const at = new Date().toISOString(), ownerId = snapshot.settings[0].profileId, current = await db.settings.get('main')
   // Source erasures, revocations and earlier expiries made on this device are applied to the rows before the write, so the original is never restored.
   const consent = applyCurrentSourceConsent(snapshot.contextSources ?? [], await db.contextSources.toArray(), ownerId, at), touched = [...consent.erased, ...consent.revised]
   const sourceRows = { ...withoutTouchedSourceRows({ contextSnapshots: snapshot.contextSnapshots, sourceSummaries: snapshot.sourceSummaries, sourceArtifacts: snapshot.sourceArtifacts, coachMessages: snapshot.coachMessages, coachMemories: snapshot.coachMemories }, consent), ...(snapshot.contextSources || consent.sources.length ? { contextSources: consent.sources } : {}) }
@@ -122,7 +131,7 @@ export async function restoreBackup(snapshot: Snapshot) {
       if (!Number.isSafeInteger(policy.epoch + 1) || !Number.isSafeInteger(policy.sourcePermissionRevision + 1)) throw new Error('資料の権限版が上限に達しています')
       next = { ...next, changePolicy: { ...policy, epoch: policy.epoch + 1, sourcePermissionRevision: policy.sourcePermissionRevision + 1 } }
     }
-    return next
+    return current ? stricterAuthority(next, current) : next
   }) }
   const prepared: Snapshot = snapshot.containers === undefined ? { ...restorable, containers: legacyContainers, tasks: snapshot.tasks.map(task => ({ ...task, containerId: task.project.trim() ? byName.get(task.project.trim()) : null })) } : restorable
   validateSnapshot(prepared)

@@ -238,6 +238,8 @@ function matchesRoutine(r: Routine, date: string) {
   return false
 }
 export async function expandRoutines(from = addDays(today(), -30), days = 120) {
+  // N09 routine stop switch: manual tasks keep working, no occurrences are generated.
+  if ((await db.settings.get('main'))?.changePolicy?.stops?.routines) return 0
   const routines = await db.routines.filter(r => r.active).toArray()
   let count = 0
   for (const r of routines) {

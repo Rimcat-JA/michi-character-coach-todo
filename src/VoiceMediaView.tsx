@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { getBrowserVoiceMediaController, type VoiceMediaController, type VoiceMediaState } from './voice-media'
 
 export function VoiceMediaView({ responseText = '', onTranscript, hidden = false, onHiddenChange, controller: provided }: { responseText?: string; onTranscript?: (text: string) => void; hidden?: boolean; onHiddenChange?: (hidden: boolean) => void; controller?: VoiceMediaController }) {
-  const [media, setMedia] = useState<{ controller: VoiceMediaController; state: VoiceMediaState } | null>(null), [voiceId, setVoiceId] = useState(''), [error, setError] = useState(''), [voiceRevision, setVoiceRevision] = useState(0)
+  const [media, setMedia] = useState<{ controller: VoiceMediaController; state: VoiceMediaState } | null>(() => provided ? { controller: provided, state: provided.snapshot() } : null), [voiceId, setVoiceId] = useState(''), [error, setError] = useState(''), [voiceRevision, setVoiceRevision] = useState(0)
   const controller = media?.controller ?? null, state = media?.state ?? null
   useEffect(() => { const selected = provided ?? getBrowserVoiceMediaController(); const unsubscribe = selected.subscribe(next => setMedia({ controller: selected, state: next })); return () => { unsubscribe(); selected.cancelInput() } }, [provided])
   useEffect(() => { const synth = window.speechSynthesis; if (!synth) return; const changed = () => setVoiceRevision(value => value + 1); synth.addEventListener('voiceschanged', changed); return () => synth.removeEventListener('voiceschanged', changed) }, [])

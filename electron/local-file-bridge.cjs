@@ -29,8 +29,11 @@ function validateRegistration(registration) {
   const client = registration.client
   if (!exact(client, ['id', 'dataset_id', 'intended_host', 'transport', 'status', 'revision', 'grant_epoch', 'grant']) || !uuid(client.id) || client.dataset_id !== registration.dataset_id || !['chatgpt', 'claude', 'codex', 'claude_code', 'other'].includes(client.intended_host) || client.transport !== 'stdio' || client.status !== 'active' || !integer(client.revision, 1) || !integer(client.grant_epoch, 1)) fail('REGISTRATION_INVALID')
   const grant = client.grant
-  if (!exact(grant, ['keys', 'project_ids', 'fields', 'mutation_mode', 'max_operations_per_day', 'max_schedule_shift_days', 'max_point_delta', 'allow_external_context', 'allow_handoffs', 'expires_at'])) fail('REGISTRATION_INVALID')
-  if (!Array.isArray(grant.keys) || grant.keys.some(key => !['tasks:read', 'tasks:prepare', 'changes:submit', 'commands:read'].includes(key)) || new Set(grant.keys).size !== grant.keys.length || !Array.isArray(grant.project_ids) || grant.project_ids.length > 100 || grant.project_ids.some(id => !uuid(id)) || new Set(grant.project_ids).size !== grant.project_ids.length || !Array.isArray(grant.fields) || grant.fields.some(field => !['title', 'notes', 'scheduled_date'].includes(field)) || new Set(grant.fields).size !== grant.fields.length || grant.mutation_mode !== 'require_approval' || !integer(grant.max_operations_per_day) || grant.max_operations_per_day > 100 || !integer(grant.max_schedule_shift_days) || grant.max_schedule_shift_days > 31 || grant.max_point_delta !== 0 || grant.allow_external_context !== false || grant.allow_handoffs !== false || !timestamp(grant.expires_at)) fail('REGISTRATION_INVALID', 'このローカル接続は本人承認によるタイトル・メモ・予定日だけに対応しています')
+  const grantKeys = ['keys', 'project_ids', 'fields', 'mutation_mode', 'max_operations_per_day', 'max_schedule_shift_days', 'max_point_delta', 'allow_external_context', 'allow_handoffs', 'expires_at']
+  if (!exact(grant, grantKeys) && !exact(grant, [...grantKeys, 'automation'])) fail('REGISTRATION_INVALID')
+  if (!Array.isArray(grant.keys) || grant.keys.some(key => !['tasks:read', 'tasks:prepare', 'changes:submit', 'commands:read'].includes(key)) || new Set(grant.keys).size !== grant.keys.length || !Array.isArray(grant.project_ids) || grant.project_ids.length > 100 || grant.project_ids.some(id => !uuid(id)) || new Set(grant.project_ids).size !== grant.project_ids.length || !Array.isArray(grant.fields) || grant.fields.some(field => !['title', 'notes', 'scheduled_date'].includes(field)) || new Set(grant.fields).size !== grant.fields.length || !['require_approval', 'auto_within_bounds'].includes(grant.mutation_mode) || (grant.mutation_mode === 'auto_within_bounds') !== Object.hasOwn(grant, 'automation') || !integer(grant.max_operations_per_day) || grant.max_operations_per_day > 100 || !integer(grant.max_schedule_shift_days) || grant.max_schedule_shift_days > 31 || grant.max_point_delta !== 0 || grant.allow_external_context !== false || grant.allow_handoffs !== false || !timestamp(grant.expires_at)) fail('REGISTRATION_INVALID', 'このローカル接続は本人承認によるタイトル・メモ・予定日だけに対応しています')
+  // Owner-delegated automatic application: notes/scheduled date only, inside stricter bounds than the grant.
+  if (grant.mutation_mode === 'auto_within_bounds' && (!exact(grant.automation, ['max_schedule_shift_days', 'max_operations_per_day']) || !integer(grant.automation.max_schedule_shift_days) || grant.automation.max_schedule_shift_days > grant.max_schedule_shift_days || !integer(grant.automation.max_operations_per_day, 1) || grant.automation.max_operations_per_day > grant.max_operations_per_day || grant.fields.some(field => !['notes', 'scheduled_date'].includes(field)))) fail('REGISTRATION_INVALID', '範囲内の自動適用はメモと予定日だけに設定できます')
 }
 function parseEnvelope(text) {
   if (typeof text !== 'string' || Buffer.byteLength(text, 'utf8') > LIMIT) fail('COMMAND_TOO_LARGE')
@@ -193,14 +196,15 @@ async function createLocalFileBridge({ root, journalDirectory, signingKey, regis
     pending.set(command.command_id, prepared)
     return prepared
   }
-  async function approve(prepared, appProof) {
+  async function approve(prepared, appProof, automatic = false) {
     await currentRegistration()
     if (pending.get(prepared?.command?.command_id) !== prepared || Date.parse(prepared.expiresAt) <= Date.now() || typeof verifyHumanApproval !== 'function') fail('HUMAN_APPROVAL_REQUIRED')
-    const proofContext = { digest: prepared.digest, ownerId: reg.owner_id, datasetId: reg.dataset_id, clientId: reg.client.id, policyEpoch: reg.policy_epoch, sourcePermissionRevision: reg.source_permission_revision, expiresAt: prepared.expiresAt }
+    if (automatic && (reg.client.grant.mutation_mode !== 'auto_within_bounds' || prepared.command.type !== 'task.update' || Object.keys(prepared.command.payload).some(field => !['notes', 'scheduled_date'].includes(field)))) fail('AUTOMATION_NOT_GRANTED')
+    const proofContext = { digest: prepared.digest, ownerId: reg.owner_id, datasetId: reg.dataset_id, clientId: reg.client.id, policyEpoch: reg.policy_epoch, sourcePermissionRevision: reg.source_permission_revision, expiresAt: prepared.expiresAt, automatic: automatic === true }
     if (await verifyHumanApproval(freeze(proofContext), appProof) !== true) fail('HUMAN_APPROVAL_REQUIRED')
     await currentRegistration(); await manifestFor(prepared.command); await unchangedCommand(prepared)
     const token = freeze({ id: crypto.randomUUID(), commandId: prepared.command.command_id, digest: prepared.digest })
-    approvals.set(token, { prepared, used: false }); return token
+    approvals.set(token, { prepared, used: false, automatic: automatic === true }); return token
   }
   async function resultFor(commandId) {
     if (!uuid(commandId)) fail('INVALID_COMMAND_ID')
@@ -256,7 +260,8 @@ async function createLocalFileBridge({ root, journalDirectory, signingKey, regis
         let today = 0
         for (const item of claims.filter(item => UUID.test(item.replace(/\.claim\.json$/, '')) && item.endsWith('.claim.json'))) { const record = await readPrivate(item); if (record.client_id === reg.client.id && record.started_at?.slice(0, 10) === new Date().toISOString().slice(0, 10)) today++ }
         if (today >= reg.client.grant.max_operations_per_day) fail('DAILY_BOUND')
-        const claim = { command_id: prepared.command.command_id, digest: prepared.digest, owner_id: reg.owner_id, dataset_id: reg.dataset_id, client_id: reg.client.id, started_at: new Date().toISOString() }
+        if (approval.automatic && await automaticClaimsToday() >= reg.client.grant.automation.max_operations_per_day) fail('AUTO_DAILY_BOUND')
+        const claim = { command_id: prepared.command.command_id, digest: prepared.digest, owner_id: reg.owner_id, dataset_id: reg.dataset_id, client_id: reg.client.id, started_at: new Date().toISOString(), automatic: approval.automatic === true }
         await writePrivate(name, claim, true)
       }
     } finally { release() }
@@ -281,6 +286,11 @@ async function createLocalFileBridge({ root, journalDirectory, signingKey, regis
       try { results.push({ filename, prepared: await prepareCommand(filename) }) } catch (error) { results.push({ filename, error: error.code || 'COMMAND_REJECTED' }) }
     }
     return results
+  }
+  async function automaticClaimsToday() {
+    let count = 0
+    for (const item of (await fs.readdir(journalRoot)).filter(name => name.endsWith('.claim.json') && UUID.test(name.replace(/\.claim\.json$/, '')))) { const record = await readPrivate(item); if (record.client_id === reg.client.id && record.automatic === true && record.started_at?.slice(0, 10) === new Date().toISOString().slice(0, 10)) count++ }
+    return count
   }
   function clearAuthorities() { pending.clear() }
   async function revoke() { clearAuthorities(); await write('revoked.json', signed({ schema_version: '1', client_id: reg.client.id, dataset_id: reg.dataset_id, revoked_at: new Date().toISOString() })) }

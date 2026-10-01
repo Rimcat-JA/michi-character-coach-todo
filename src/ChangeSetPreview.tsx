@@ -1,5 +1,6 @@
 import { useState } from 'react'
-import { applyChangeSet, approveChangeSetFromUI, cancelChangeSet, decideChangePolicy, type ChangeContext, type ChangePolicy, type ChangeReceipt, type PreparedChangeSet, type TaskChangeField } from './change-set'
+import { useLiveQuery } from 'dexie-react-hooks'
+import { applyChangeSet, approveChangeSetFromUI, autoChangeCountsToday, cancelChangeSet, decideChangePolicy, type ChangeContext, type ChangePolicy, type ChangeReceipt, type PreparedChangeSet, type TaskChangeField } from './change-set'
 
 const labels: Record<TaskChangeField,string> = {title:'タイトル',notes:'メモ',scheduledDate:'予定日',dueDate:'本当の締め切り',manualPoints:'本人指定ポイント'}
 export default function ChangeSetPreview({ prepared, policy, actorContext, humanContext, onApplied, onCancel }: {
@@ -11,7 +12,9 @@ export default function ChangeSetPreview({ prepared, policy, actorContext, human
   const [busy,setBusy]=useState(false)
   const [notice,setNotice]=useState('')
   const requestKey=`ui:${prepared.id}`
-  const decision=decideChangePolicy(prepared,policy)
+  // Same engine and today's automatic count as the apply transaction, which re-decides anyway.
+  const counts=useLiveQuery(()=>autoChangeCountsToday(),[])
+  const decision=decideChangePolicy(prepared,policy,counts?{autoCountToday:counts}:{})
   async function approve(event: Event) {
     if(busy)return
     setBusy(true);setNotice('')

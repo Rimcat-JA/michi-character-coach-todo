@@ -8,7 +8,21 @@ import { clearCompletionReconfirmationAuthority } from './completion-reconfirmat
 import { clearCalendarCSVImportAuthority } from './calendar-csv-import-save'
 import { invalidateExternalConnection } from './external-connection'
 
-export async function updateAIConnection(enabled: boolean, model?: string) {
+/** Every in-memory proposal/approval authority. ChangeSets may be kept so their epoch check reports POLICY_CHANGED. */
+export function clearVolatileAuthorities(options: { keepChangeSets?: boolean } = {}) {
+  if (!options.keepChangeSets) clearChangeSetAuthority()
+  clearDetectionAuthority()
+  clearCoachTurnAuthority()
+  clearCalendarRulesAuthority()
+  clearRoutineAssistanceAuthority()
+  clearCompletionReconfirmationAuthority()
+  clearCalendarCSVImportAuthority()
+}
+
+export async function updateAIConnection(enabled: boolean, model?: string) { await writeAIConnection(() => enabled, model) }
+/** Saves the model and keeps the stored on/off state; turning AI back on goes through the S20 resume preview. */
+export async function saveAIModel(model: string) { await writeAIConnection(current => current, model) }
+async function writeAIConnection(enabled: (current: boolean) => boolean, model?: string) {
   if (model !== undefined && !/^[\w~./:-]{3,120}$/.test(model)) throw new Error('モデルIDを確認してください')
   await db.transaction('rw', db.settings, async () => {
     const settings = await db.settings.get('main')
@@ -16,14 +30,8 @@ export async function updateAIConnection(enabled: boolean, model?: string) {
     const previous = changePolicyFor(settings)
     const policy = { ...previous, epoch: previous.epoch + 1 }
     validateChangePolicy(policy)
-    await db.settings.put({ ...settings, aiEnabled: enabled, ...(model === undefined ? {} : { aiModel: model }), changePolicy: policy })
+    await db.settings.put({ ...settings, aiEnabled: enabled(settings.aiEnabled), ...(model === undefined ? {} : { aiModel: model }), changePolicy: policy })
   })
-  clearChangeSetAuthority()
-  clearDetectionAuthority()
-  clearCoachTurnAuthority()
-  clearCalendarRulesAuthority()
-  clearRoutineAssistanceAuthority()
-  clearCompletionReconfirmationAuthority()
-  clearCalendarCSVImportAuthority()
+  clearVolatileAuthorities()
   await invalidateExternalConnection()
 }

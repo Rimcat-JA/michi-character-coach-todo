@@ -5,6 +5,9 @@ import { createTask,newTaskInput } from './commands'
 import { emptyScore } from './domain'
 import { defaultSourcePermissions,deleteSource,importLocalSource,setSourcePermissions } from './source-library'
 import { defaultChangePolicy } from './change-set'
+import { changePolicyFor } from './change-set'
+import { presetRules } from './automation-policy'
+import { automationRulesFor, type OperationGroup, type OperationMode } from './automation-policy'
 import { applyDetectionCreateFromUI,clearDetectionAuthority,detectObligationsForSource,discardDetectionRun,prepareDetectionCreate,prepareDetectionFromUI,savedDetectionRuns,type DetectionTransport,type PreparedDetection } from './detection-run'
 import { requiredDetectionClaims,type DetectionChange,type DetectionOutput } from './detection-contract'
 import { contentDigest } from './canonical'
@@ -146,5 +149,24 @@ describe('資料からの検出Inboxと本人の採用境界',()=>{
     const {digest:_oldInjection,...injectedPayload}=injection;injection.digest=await contentDigest(injectedPayload)
     await db.sourceArtifacts.update(artifactId,{payload:JSON.stringify(injection)})
     expect(await savedDetectionRuns(value.ownerId)).toEqual([])
+  })
+})
+async function setOperation(operation: OperationGroup, mode: OperationMode) { const current = (await db.settings.get('main'))!, policy = changePolicyFor(current); await db.settings.put({ ...current, changePolicy: { ...policy, operations: automationRulesFor(policy).map(rule => rule.operation === operation ? { ...rule, mode } : rule) } }) }
+describe('N09 detection.register gate and A1/A2 parity',()=>{
+  it('detection.register=deny refuses adoption but keeps the candidates for review',async()=>{
+    const value=await prepared(),run=await detectObligationsForSource(value,transport(value))
+    await setOperation('detection.register','deny')
+    await expect(prepareDetectionCreate(run,run.candidates[0].id)).rejects.toThrow('検出した必要タスクの登録は停止')
+    expect(await db.tasks.count()).toBe(0);expect((await savedDetectionRuns(value.ownerId))[0].candidates).toHaveLength(1)
+  })
+  it('the same detection fixture yields identical review-only candidates under A1 and A2 presets end to end',async()=>{
+    const runUnder=async(preset:'A1'|'A2')=>{
+      const current=(await db.settings.get('main'))!,policy=changePolicyFor(current)
+      await db.settings.put({...current,automation:preset,changePolicy:{...policy,operations:presetRules(preset)}})
+      const value=await prepared(),run=await detectObligationsForSource(value,transport(value))
+      return {gate:run.evaluationGate,candidates:run.candidates.map(({id:_id,...candidate})=>candidate),reviewItems:run.reviewItems,tasks:await db.tasks.count()}
+    }
+    const a1=await runUnder('A1'),a2=await runUnder('A2')
+    expect(a2).toEqual(a1);expect(a1.gate).toBe('review-only');expect(a1.tasks).toBe(0)
   })
 })

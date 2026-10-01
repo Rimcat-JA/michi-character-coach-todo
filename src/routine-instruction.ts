@@ -2,6 +2,7 @@ import Dexie from 'dexie'
 import { db } from './db'
 import { contentDigest, canonicalJSON } from './canonical'
 import { changePolicyFor } from './change-set'
+import { operationMode } from './automation-policy'
 import { uid, type Settings } from './domain'
 import { emptyCalendarRulesState, validateCalendarRulesState } from './calendar-rules-validation'
 import { validateOwnerRoutineAssistCandidate, validateRoutineAssistCandidate, type RoutineAssistCandidate, type RoutineAssistInput } from './routine-assist'
@@ -48,6 +49,7 @@ async function confirm(input: RoutineAssistInput, candidate: RoutineAssistCandid
     if (basis !== 'verified_detection') validateOwnerRoutineAssistCandidate(candidate, state)
     const policy = changePolicyFor(settings), issuedAt = new Date().toISOString()
     if (basis !== 'manual' && !policy.aiChangesEnabled) throw new Error('AIによる変更案の受付は停止中です。手動設定を利用してください')
+    if (basis !== 'manual' && operationMode(policy, 'routine.change') === 'deny') throw new Error('AIによるルーティン・系列の変更は停止しています（自動化設定）。手動設定を利用してください')
     return { version: 1 as const, id: uid(), nonce: uid(), ownerId: settings.profileId, datasetId: settings.datasetId, basis, model, stateRevision: state.revision, policyEpoch: policy.epoch, sourcePermissionRevision: policy.sourcePermissionRevision, issuedAt, expiresAt: new Date(Date.now() + 86400000).toISOString(), messageDigest: await Dexie.waitFor(contentDigest(input.message)), referencesDigest: await Dexie.waitFor(contentDigest(references(input, state))), targetDigest: await Dexie.waitFor(contentDigest(state.rules.find(value => value.id === input.targetRuleId) ?? null)), configurationDigest: await Dexie.waitFor(contentDigest(configuration(state))), candidate: structuredClone(candidate) }
   })
   const instruction = freeze({ ...payload, digest: await contentDigest(payload) })
@@ -63,7 +65,7 @@ export async function confirmSourceRoutineInstructionFromUI(input: RoutineAssist
 }
 export function assertRoutineInstruction(instruction: VerifiedRoutineInstruction, settings: Settings, state: CalendarRulesState, checkRevision = true) {
   const policy = changePolicyFor(settings)
-  if (!instruction || issued.get(instruction.id) !== instruction || settings.profileId !== instruction.ownerId || settings.datasetId !== instruction.datasetId || instruction.basis !== 'manual' && (!settings.aiEnabled || !policy.aiChangesEnabled || settings.aiModel !== instruction.model) || policy.epoch !== instruction.policyEpoch || policy.sourcePermissionRevision !== instruction.sourcePermissionRevision || Date.parse(instruction.expiresAt) <= Date.now()) throw new Error('周期の本人確認・AI設定・権限または期限が変わりました。案を作り直してください')
+  if (!instruction || issued.get(instruction.id) !== instruction || settings.profileId !== instruction.ownerId || settings.datasetId !== instruction.datasetId || instruction.basis !== 'manual' && (!settings.aiEnabled || !policy.aiChangesEnabled || operationMode(policy, 'routine.change') === 'deny' || settings.aiModel !== instruction.model) || policy.epoch !== instruction.policyEpoch || policy.sourcePermissionRevision !== instruction.sourcePermissionRevision || Date.parse(instruction.expiresAt) <= Date.now()) throw new Error('周期の本人確認・AI設定・権限または期限が変わりました。案を作り直してください')
   if (checkRevision && state.revision !== instruction.stateRevision) throw new Error('周期の設定版が変わりました。案を作り直してください')
   if (checkRevision) validateRoutineAssistCandidate(instruction.candidate, state)
 }

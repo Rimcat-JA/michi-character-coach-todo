@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import type { TaskInput } from './commands'
 import { today, type Settings } from './domain'
+import { changePolicyFor } from './change-set'
 import { acceptAssistedDrafts, applyAssistedTasks, draftsFromText, prepareAssistedTasks, type PreparedAssistedTasks, type SourcedDraft } from './task-assist'
 
 export default function TaskAssistView({ settings, run }: { settings: Settings; run: (fn: () => Promise<unknown>, success?: string) => Promise<boolean> }) {
@@ -11,7 +12,9 @@ export default function TaskAssistView({ settings, run }: { settings: Settings; 
   const [notice, setNotice] = useState('')
   const [busy, setBusy] = useState(false)
   const [open, setOpen] = useState(false)
-  const aiAvailable = Boolean(settings.aiEnabled && settings.aiModel && window.michiAI)
+  const aiChangesOn = settings.aiEnabled && changePolicyFor(settings).aiChangesEnabled, aiAvailable = Boolean(aiChangesOn && settings.aiModel && window.michiAI)
+  // The save itself re-checks the stops and the epoch; this only keeps a stopped AI proposal from looking savable.
+  const aiProposalStopped = origin === 'ai' && !aiChangesOn
   function changeInput(index: number, change: Partial<TaskInput>) {
     setPrepared(null)
     setDrafts(current => current.map((draft, i) => i === index ? { ...draft, input: { ...draft.input, ...change } } : draft))
@@ -63,7 +66,7 @@ export default function TaskAssistView({ settings, run }: { settings: Settings; 
         </div></fieldset><button className="text-button" disabled={busy} onClick={() => { setDrafts(current => current.filter((_, i) => i !== index)); setPrepared(null) }}>この候補を除く</button>
       </div>)}
       {!!drafts.length && <button className="secondary-button" disabled={busy} onClick={prepare}>変更内容を確認</button>}
-      {prepared && <div className="task-assist-approval"><strong>新規タスク {prepared.inputs.length}件 · 外部への書き込みなし</strong><ul>{prepared.inputs.map((input, index) => <li key={index}>{input.title} · {input.score.manualPoints ?? '未設定'}pt · 予定 {input.scheduledDate ?? 'なし'} · 期限 {input.dueDate ?? 'なし'}</li>)}</ul><button className="primary-button" disabled={busy} onClick={save}>この内容を承認して保存</button></div>}
+      {prepared && <div className="task-assist-approval"><strong>新規タスク {prepared.inputs.length}件 · 外部への書き込みなし</strong><ul>{prepared.inputs.map((input, index) => <li key={index}>{input.title} · {input.score.manualPoints ?? '未設定'}pt · 予定 {input.scheduledDate ?? 'なし'} · 期限 {input.dueDate ?? 'なし'}</li>)}</ul><button className="primary-button" disabled={busy || aiProposalStopped} onClick={save}>この内容を承認して保存</button>{aiProposalStopped && <p role="status">AIによる変更案の受付は停止中です。原文から下書きを使ってください。</p>}</div>}
     </div>}
   </section>
 }

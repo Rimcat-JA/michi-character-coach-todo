@@ -9,11 +9,13 @@ function clock(at, timezone) {
   return { day: `${value('year')}-${value('month')}-${value('day')}`, time: `${value('hour')}:${value('minute')}` }
 }
 const sameTarget = (a, b) => a?.id === b?.id && a?.kind === b?.kind
+// N09: the notification stop switch and notification.send=deny are re-checked at the OS boundary.
+const notificationsStopped = settings => Boolean(settings?.changePolicy?.stops?.notifications) || Array.isArray(settings?.changePolicy?.operations) && settings.changePolicy.operations.find(rule => rule?.operation === 'notification.send')?.mode !== 'auto_within_bounds'
 function validateOSNotification(context, payload, now = new Date().toISOString()) {
   try {
     if (!context || !payload || typeof payload !== 'object' || Array.isArray(payload) || Object.keys(payload).some(key => !['notificationId', 'destinationId', 'attemptId', 'title', 'body', 'provenance'].includes(key)) || payload.destinationId !== 'os' || typeof payload.notificationId !== 'string' || typeof payload.attemptId !== 'string' || !payload.attemptId) return null
     const settings = context.settings, state = settings?.notificationState, policy = state?.policy
-    if (!settings?.notifications || !state || state.version !== 1 || state.ownerId !== settings.profileId || state.datasetId !== settings.datasetId || !policy?.enabled || !Number.isInteger(policy.epoch) || !Array.isArray(state.intents)) return null
+    if (!settings?.notifications || notificationsStopped(settings) || !state || state.version !== 1 || state.ownerId !== settings.profileId || state.datasetId !== settings.datasetId || !policy?.enabled || !Number.isInteger(policy.epoch) || !Array.isArray(state.intents)) return null
     const intent = state.intents.find(item => item.id === payload.notificationId), delivery = intent?.deliveries?.find(item => item.destinationId === 'os')
     if (!intent || intent.category !== 'proactive' || !intent.destinationIds?.includes('os') || delivery?.state !== 'sending' || delivery.attemptId !== payload.attemptId || intent.ownerId !== settings.profileId || intent.datasetId !== settings.datasetId || intent.policyEpoch !== policy.epoch || intent.authorityEpoch !== (settings.changePolicy?.epoch ?? 0) || intent.sourcePermissionRevision !== (settings.changePolicy?.sourcePermissionRevision ?? 0)) return null
     if (typeof now !== 'string' || new Date(now).toISOString() !== now || now < intent.notBefore || now >= intent.expiresAt) return null

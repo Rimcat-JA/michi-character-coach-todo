@@ -4,6 +4,7 @@ import { db, ensureSettings } from './db'
 import { contentDigest } from './canonical'
 import { createTask, newTaskInput } from './commands'
 import { changePolicyFor } from './change-set'
+import { automationRulesFor, type OperationGroup, type OperationMode } from './automation-policy'
 import { emptyScore } from './domain'
 import { createLocalActionController, validateLocalActionInput, validateLocalActionResult } from './local-action-client'
 import { localActionReceiptKey, type LocalActionDefinition, type LocalActionGateway, type LocalActionInspection, type LocalActionPrepared, type LocalActionResult, type LocalActionStatus } from './local-action-types'
@@ -99,5 +100,16 @@ describe('local action renderer authority and actual execution receipts',()=>{
     expect(()=>validateLocalActionInput({...input,schema:{choice:{type:'string',maxLength:20}}})).toThrow()
     expect(()=>validateLocalActionInput({...input,schema:{choice:{type:'path',roots:['C:\\']}}})).toThrow()
     expect(()=>validateLocalActionInput({...input,argv:[{param:'not-declared'}]})).toThrow()
+  })
+})
+async function setOperation(operation: OperationGroup, mode: OperationMode) { const current = (await db.settings.get('main'))!, policy = changePolicyFor(current); await db.settings.put({ ...current, changePolicy: { ...policy, operations: automationRulesFor(policy).map(rule => rule.operation === operation ? { ...rule, mode } : rule) } }) }
+describe('N09 local_action.run gate',()=>{
+  it('local_action.run=deny blocks registration, preparation and execution without invalidating the registered definition',async()=>{
+    const f=await fixture(),input={title:f.definition.title,executable:f.definition.executable,cwd:f.definition.cwd,argv:f.definition.argv,schema:f.definition.schema},prepared=await f.controller.prepare(f.definition.id,{})
+    await setOperation('local_action.run','deny')
+    await expect(f.controller.inspectFromUI(input,click())).rejects.toThrow('変わりました')
+    await expect(f.controller.prepare(f.definition.id,{})).rejects.toThrow('変わりました')
+    await expect(f.controller.executeFromUI(prepared,click())).rejects.toThrow('変わりました')
+    expect(f.gateway.execute).not.toHaveBeenCalled();expect(f.gateway.invalidate).not.toHaveBeenCalled()
   })
 })

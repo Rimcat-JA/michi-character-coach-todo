@@ -4,7 +4,9 @@ export type FileBridgeHost = 'chatgpt' | 'claude' | 'codex' | 'claude_code' | 'o
 export type FileBridgeRegistration = {
   schema_version: '1'; owner_id: string; dataset_id: string; policy_epoch: number; source_permission_revision: number; task_ids: string[]
   client: { id: string; dataset_id: string; intended_host: FileBridgeHost; transport: 'stdio'; status: 'active'; revision: number; grant_epoch: number
-    grant: { keys: ('tasks:read' | 'tasks:prepare' | 'changes:submit' | 'commands:read')[]; project_ids: string[]; fields: FileBridgeField[]; mutation_mode: 'require_approval'; max_operations_per_day: number; max_schedule_shift_days: number; max_point_delta: 0; allow_external_context: false; allow_handoffs: false; expires_at: string } }
+    grant: { keys: ('tasks:read' | 'tasks:prepare' | 'changes:submit' | 'commands:read')[]; project_ids: string[]; fields: FileBridgeField[]; mutation_mode: 'require_approval' | 'auto_within_bounds'; max_operations_per_day: number; max_schedule_shift_days: number; max_point_delta: 0; allow_external_context: false; allow_handoffs: false; expires_at: string
+      /** Present only for an owner-delegated automatic grant (notes/scheduled_date only, stricter than the grant). */
+      automation?: { max_schedule_shift_days: number; max_operations_per_day: number } } }
 }
 export type FileBridgeManifest = {
   schema_version: '1'; snapshot_id: string; owner_id: string; dataset_id: string; client_id: string; policy_epoch: number; source_permission_revision: number
@@ -31,12 +33,13 @@ export type FileBridgeInboxEntry =
   | { state: 'rejected'; filename: string; error: string }
 export type FileBridgeConfigure = {
   ownerId: string; datasetId: string; policyEpoch: number; sourcePermissionRevision: number; intendedHost: FileBridgeHost; taskIds: string[]; fields: FileBridgeField[]; lifetimeHours: number
+  automation: { maxScheduleShiftDays: number; maxOperationsPerDay: number } | null
 }
 export type FileBridgeApplicationBinding = {
   reference: string; fileDigest: string; applicationDigest: string; ownerId: string; datasetId: string; policyEpoch: number; sourcePermissionRevision: number
 }
 export type FileBridgeLease = FileBridgeApplicationBinding & {
-  version: 1; leaseId: string; clientId: string; registrationRevision: number; grantEpoch: number; expiresAt: string
+  version: 1; leaseId: string; clientId: string; registrationRevision: number; grantEpoch: number; expiresAt: string; automatic: boolean
 }
 /** Persisted atomically with tasks in db.commands, not a caller supplied success claim. */
 export type FileBridgeApplicationReceipt = {
@@ -53,6 +56,8 @@ export interface FileBridgeGateway {
   scanInbox(): Promise<{ status: FileBridgeStatus; entries: FileBridgeInboxEntry[] }>
   /** Main consumes a one-use native click, reserves the durable claim, then issues this lease. */
   authorizeApplication(request: FileBridgeApplicationBinding): Promise<FileBridgeLease>
+  /** No click: main verifies its own signed auto grant, bounds, quota and the N09 table before leasing. */
+  authorizeAutomaticApplication?(request: FileBridgeApplicationBinding): Promise<FileBridgeLease>
   /** Main queries the designated renderer's actual DB receipt before signing the result. */
   recordApplied(request: { leaseId: string; reference: string; receipt: FileBridgeApplicationReceipt }): Promise<FileBridgeResult>
   cancelApplication(request: { leaseId: string; reference: string }): Promise<void>

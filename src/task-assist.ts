@@ -2,11 +2,12 @@ import { createTasksAtomic, newTaskInput, type TaskInput } from './commands'
 import { addDays, emptyScore, uid, validateDate, validateTaskInput } from './domain'
 import { db } from './db'
 import { contentDigest } from './canonical'
+import { changePolicyFor } from './change-set'
 import Dexie from 'dexie'
 
 export type AssistedDraft = { input: TaskInput; notices: string[] }
 export type SourcedDraft = AssistedDraft & { source: string }
-export type PreparedAssistedTasks = { id: string; profileId: string; datasetId: string; expiresAt: string; inputs: TaskInput[]; sources: string[]; origin: 'manual' | 'ai'; digest: string }
+export type PreparedAssistedTasks = { id: string; profileId: string; datasetId: string; expiresAt: string; inputs: TaskInput[]; sources: string[]; origin: 'manual' | 'ai'; policyEpoch: number | null; digest: string }
 
 function uniqueNumber(raw: string, pattern: RegExp, maximum: number): number | null {
   const values = [...raw.matchAll(pattern)].map(match => Number(match[1]))
@@ -89,7 +90,10 @@ export async function prepareAssistedTasks(drafts: SourcedDraft[], origin: 'manu
   }
   const settings = await db.settings.get('main')
   if (!settings) throw new Error('端末の設定が見つかりません')
-  const payload = { id: uid(), profileId: settings.profileId, datasetId: settings.datasetId, expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(), inputs: structuredClone(drafts.map(draft => draft.input)), sources: drafts.map(draft => draft.source), origin }
+  // AI proposals follow the AI-processing and AI-change stops; raw-text drafts saved by the owner do not.
+  const policy = changePolicyFor(settings)
+  if (origin === 'ai' && (!settings.aiEnabled || !policy.aiChangesEnabled)) throw new Error('AIによる変更案の受付は停止中です。原文から下書きを使ってください')
+  const payload = { id: uid(), profileId: settings.profileId, datasetId: settings.datasetId, expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(), inputs: structuredClone(drafts.map(draft => draft.input)), sources: drafts.map(draft => draft.source), origin, policyEpoch: origin === 'ai' ? policy.epoch : null }
   return { ...payload, digest: await contentDigest(payload) }
 }
 
@@ -101,6 +105,8 @@ export async function applyAssistedTasks(prepared: PreparedAssistedTasks, confir
   return db.transaction('rw', [db.tasks, db.assessments, db.commands, db.audits, db.containers, db.settings, db.labelGroups, db.labelDefinitions], async () => {
     const settings = await db.settings.get('main')
     if (settings?.profileId !== prepared.profileId || settings?.datasetId !== prepared.datasetId) throw new Error('確認したデータセットと一致しません')
+    // Stops and resumes both bump the epoch, so a proposal prepared before a stop never survives it.
+    if (prepared.origin === 'ai') { const policy = changePolicyFor(settings); if (!settings.aiEnabled || !policy.aiChangesEnabled || policy.epoch !== prepared.policyEpoch) throw new Error('AIの停止または権限の変更により、この案は使えません。作り直してください') }
     const ids = await createTasksAtomic(prepared.inputs, `assist:${prepared.id}`)
     const auditId = `assist-approval:${prepared.id}`
     if (!await db.audits.get(auditId)) await db.audits.add({ id: auditId, taskId: null, operation: 'assist.approved', at: new Date().toISOString(), detail: `本人承認 ${confirmedDigest}; origin=${prepared.origin === 'ai' ? 'ai_accepted' : 'human'}; tasks=${ids.join(',')}` })

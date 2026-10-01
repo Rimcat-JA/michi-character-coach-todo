@@ -23,6 +23,8 @@ export type NotificationGuard = {
   ownerId: string; datasetId: string; authorityEpoch: number; sourcePermissionRevision: number; aiEnabled: boolean
   target: NotificationTarget & { active: boolean }; rule: { id: string; revision: string; active: boolean; sentCount: number }
   sources: (NotificationSourceRef & { active: boolean; notify: boolean; disclose: boolean })[]; availableDestinationIds: string[]
+  /** N09 notification stop switch or notification.send=deny; the reason is shown, nothing is sent. */
+  stopped?: string | null
 }
 export type NotificationDecision = { allowed: true } | { allowed: false; reason: string }
 const pendingStates: NotificationDeliveryStatus[] = ['prepared', 'queued', 'sending']
@@ -70,6 +72,7 @@ function policyDecision(state: CoachNotificationState, request: NotificationRequ
   const policy = state.policy, clock = notificationLocalClock(at, policy.timezone)
   if (state.ownerId !== guard.ownerId || state.datasetId !== guard.datasetId) return denied('本人・データセットが変わりました')
   if (!policy.enabled) return denied('共通通知を停止しています')
+  if (guard.stopped) return denied(guard.stopped)
   if (policy.mutedTargets.includes(request.target.id)) return denied('この対象の通知を停止しています')
   if (request.category === 'proactive' && policy.restDays.includes(clock.day)) return denied('今日は通知を休みます')
   if (policy.quietStart !== policy.quietEnd && (policy.quietStart < policy.quietEnd ? clock.time >= policy.quietStart && clock.time < policy.quietEnd : clock.time >= policy.quietStart || clock.time < policy.quietEnd)) return denied('静かな時間です')

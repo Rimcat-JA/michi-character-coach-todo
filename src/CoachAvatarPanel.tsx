@@ -3,10 +3,11 @@ import { CoachAvatarView } from './CoachAvatarView'
 import { getBrowserVoiceMediaController } from './voice-media'
 import type { AvatarMode } from './avatar-media'
 
-export default function CoachAvatarPanel({ name, thinking }: { name: string; thinking: boolean }) {
-  const [mode, setMode] = useState<AvatarMode>('idle'), [hidden, setHidden] = useState(false)
+/** The hidden flag is the persisted H01 'avatar' feature; the panel only displays it. */
+export default function CoachAvatarPanel({ name, thinking, hidden, onHiddenChange }: { name: string; thinking: boolean; hidden: boolean; onHiddenChange: (hidden: boolean) => void }) {
+  const [mode, setMode] = useState<AvatarMode>('idle')
   useEffect(() => getBrowserVoiceMediaController().subscribe(state => {
     setMode(state.speech === 'speaking' ? 'speaking' : state.input === 'recording' ? 'listening' : 'idle')
   }), [])
-  return <CoachAvatarView name={name} mode={mode === 'idle' && thinking ? 'thinking' : mode} hidden={hidden} onHiddenChange={setHidden} />
+  return <CoachAvatarView name={name} mode={mode === 'idle' && thinking ? 'thinking' : mode} hidden={hidden} onHiddenChange={onHiddenChange} />
 }

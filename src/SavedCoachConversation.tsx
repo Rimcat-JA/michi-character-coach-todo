@@ -10,9 +10,12 @@ import { VoiceMediaView } from './VoiceMediaView'
 import { purgeExpiredCoachContext } from './context-retention'
 import { egressNotice } from './egress-policy'
 import { retentionDefaults } from './retention-defaults'
+import { featureEnabled, setFeatureVisible } from './features'
+import { parseCoachAuthorityCommand, type CoachAuthorityCommand } from './automation-policy'
+import { runCoachAuthorityCommand } from './automation-control'
 
-type Props = { settings: Settings; tasks: Task[]; goals: Goal[]; checkIns: GoalCheckIn[]; aiReady: boolean; template: (text: string) => string; onBusy: (value: boolean) => void }
-export default function SavedCoachConversation({ settings, tasks, goals, aiReady, template, onBusy }: Props) {
+type Props = { settings: Settings; tasks: Task[]; goals: Goal[]; checkIns: GoalCheckIn[]; aiReady: boolean; template: (text: string) => string; onBusy: (value: boolean) => void; onAuthorityCommand?: (command: CoachAuthorityCommand) => void }
+export default function SavedCoachConversation({ settings, tasks, goals, aiReady, template, onBusy, onAuthorityCommand }: Props) {
   const [clock, setClock] = useState(() => Date.now())
   const conversations = useLiveQuery(() => db.coachConversations.where('ownerId').equals(settings.profileId).toArray(), [settings.profileId])
   const own = (conversations ?? []).filter(item => !item.deletedAt && (!item.retentionUntil || Date.parse(item.retentionUntil) > clock)).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
@@ -22,7 +25,9 @@ export default function SavedCoachConversation({ settings, tasks, goals, aiReady
   const message = active ? buffer?.id === active.id ? buffer.text : active.draft : ''
   const initial = useRef<Promise<string> | null>(null), writes = useRef<Promise<unknown>>(Promise.resolve())
   const [taskId, setTaskId] = useState(''), [goalId, setGoalId] = useState(''), [busy, setBusy] = useState(false), [notice, setNotice] = useState('')
-  const [sourceIds, setSourceIds] = useState<string[]>([]), [memoryIds, setMemoryIds] = useState<string[]>([]), [retention, setRetention] = useState(''), [retentionUnlimited, setRetentionUnlimited] = useState(false), [spokenId, setSpokenId] = useState(''), [voiceHidden, setVoiceHidden] = useState(false)
+  const [sourceIds, setSourceIds] = useState<string[]>([]), [memoryIds, setMemoryIds] = useState<string[]>([]), [retention, setRetention] = useState(''), [retentionUnlimited, setRetentionUnlimited] = useState(false), [spokenId, setSpokenId] = useState('')
+  // Persisted H01 flag: hiding voice never stops playback; that is the separate stop button.
+  const voiceHidden = !featureEnabled(settings.hiddenFeatures, 'voice'), setVoiceHidden = (hidden: boolean) => { void setFeatureVisible('voice', !hidden).catch(error => setNotice(`表示の切替を保存できませんでした。${error instanceof Error ? error.message : String(error)}`)) }
   const sources = useLiveQuery(() => db.contextSources.where('ownerId').equals(settings.profileId).toArray(), [settings.profileId]) ?? []
   const memories = useLiveQuery(() => availableMemoryContext(settings.profileId), [settings.profileId, settings.changePolicy?.epoch, clock])
   const options = [...(memories?.explicit ?? []).map(item => ({ ...item, label: '本人が明示したメモ' })), ...(memories?.inferred ?? []).map(item => ({ ...item, label: '推測・未確認' }))]
@@ -54,6 +59,18 @@ export default function SavedCoachConversation({ settings, tasks, goals, aiReady
       await writes.current
       let current = await readCoachConversation(id)
       if (current.conversation.draft !== text) { await saveCoachDraft(id, current.conversation.draftRevision, text); current = await readCoachConversation(id) }
+      // Stop/undo commands are deterministic and reduce-only: handled locally, never sent to a model.
+      const command = parseCoachAuthorityCommand(text)
+      if (command) {
+        // Run the stop first: an authority stop clears in-memory turns, so the local turn starts afterwards.
+        const reply = await runCoachAuthorityCommand(command)
+        turn = await beginCoachTurn(id, current.conversation.revision, { text, mode: 'local', taskId: null, goalId: null, sourceIds: [], memoryIds: [] })
+        setBuffer({ id, text: '' })
+        await appendCoachReply(turn, reply, 'template')
+        onAuthorityCommand?.(command)
+        setNotice('停止・取り消しの依頼はAIを使わずに処理しました。権限を増やす操作は設定画面で行います。')
+        return
+      }
       const remote = Boolean(aiReady && window.michiAI && navigator.onLine)
       if (remote && !preview?.value) throw new Error('選択情報の送信プレビューを確認してから送信してください')
       turn = await beginCoachTurn(id, current.conversation.revision, { text, mode: remote ? 'ai' : 'local', taskId: remote ? taskId || null : null, goalId: remote ? goalId || null : null, sourceIds: remote ? sourceIds : [], memoryIds: remote ? memoryIds : [], ...(remote ? { expectedContextDigest: preview!.value!.digest } : {}) })

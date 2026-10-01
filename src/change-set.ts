@@ -5,6 +5,7 @@ import { calculateScore, uid, validateDate, validateTaskInput, type ScoreInput, 
 import { assertTripTaskScoreChangeAllowed } from './trip-bundles'
 import { cancelCoachNotificationTarget } from './coach-notification-save'
 import { assertTaskInstruction, clearTaskInstructionAuthority, type VerifiedTaskInstruction } from './task-user-instruction'
+import { autoChangeCounts, automationRulesFor, changeAuditFact, OPERATION_INFO, operationsForFields, ownerTimezone, validateAllowedHours, validateAutomationRules, validateStopFlags, withinAllowedHours, type AllowedHours, type AutomationRule, type AutomationStopFlags, type OperationGroup } from './automation-policy'
 
 export const taskChangeFields = ['title', 'notes', 'scheduledDate', 'dueDate', 'manualPoints'] as const
 export type TaskChangeField = typeof taskChangeFields[number]
@@ -21,6 +22,10 @@ export type ChangePolicy = {
   locks: Partial<Record<TaskChangeField, 'unlocked' | 'protect_from_autonomous' | 'locked_until_human_approval'>>
   /** New fields never inherit the old notes/schedule automatic permission. */
   fieldRules?: Partial<Record<'title'|'dueDate'|'manualPoints', 'deny'|'require_approval'>>
+  /** N09 operation table; older data has none and is derived from taskUpdate/fieldRules with identical decisions. */
+  operations?: AutomationRule[]
+  allowedHours?: Partial<Record<OperationGroup, AllowedHours>>
+  stops?: AutomationStopFlags
 }
 export type TaskChangeRequest = { taskId: string; expectedRevision: number; patch: TaskChangePatch }
 export type TaskChangeValues = Pick<Task,'title'|'notes'|'scheduledDate'|'dueDate'> & { manualPoints: number|null }
@@ -33,6 +38,8 @@ export type PreparedChangeSet = {
 export type UIChangeApproval = Readonly<{ id: string; changeSetId: string; digest: string; approvedBy: string; expiresAt: string }>
 export type ChangeReceipt = { changeSetId: string; digest: string; taskIds: string[]; revisions: { taskId: string; revision: number }[]; appliedAt: string }
 export type ChangePolicyDecision = { status: 'denied' | 'awaiting_approval' | 'auto'; reason: string; protectedFields: TaskChangeField[] }
+/** Facts outside the ChangeSet that bound automatic changes; omitted values mean no count/time restriction. */
+export type ChangeDecisionContext = { at?: string; timezone?: string; autoCountToday?: Partial<Record<OperationGroup, number>> }
 
 export class ChangeSetError extends Error {
   readonly code: string
@@ -44,8 +51,9 @@ const approvals = new WeakMap<UIChangeApproval, { proposalId: string; digest: st
 const now = () => new Date().toISOString()
 const principal = (value: ChangePrincipal): ChangePrincipal => ({ id: value.id, kind: value.kind, model: value.model ?? null })
 const sourceOrder = (a:SourceRevision,b:SourceRevision) => a.id<b.id?-1:a.id>b.id?1:0
+const undoLinks = new Map<string, string>()
 /** Dataset restore/logout only reduces authority; no serialized grant is trusted. */
-export function clearChangeSetAuthority() { proposals.clear(); clearTaskInstructionAuthority() }
+export function clearChangeSetAuthority() { proposals.clear(); undoLinks.clear(); clearTaskInstructionAuthority() }
 function record(value: unknown): value is Record<string, unknown> { return Boolean(value && typeof value === 'object' && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype) }
 function exactKeys(value: Record<string, unknown>, keys: readonly string[]) { return Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key)) }
 function integer(value: unknown, min: number, max: number) { return Number.isInteger(value) && Number(value) >= min && Number(value) <= max }
@@ -53,10 +61,15 @@ function id(value: unknown) { return typeof value === 'string' && value.length >
 
 export const defaultChangePolicy = (): ChangePolicy => ({ epoch: 0, sourcePermissionRevision: 0, aiChangesEnabled: true, taskUpdate: 'require_approval', bounds: { maxTasks: 20, maxScheduledDayShift: 3, maxNotesCharacters: 1000 }, locks: {}, fieldRules: { title:'require_approval', dueDate:'require_approval', manualPoints:'require_approval' } })
 export function validateChangePolicy(value: unknown): asserts value is ChangePolicy {
-  if (!record(value) || !['epoch','sourcePermissionRevision','aiChangesEnabled','taskUpdate','bounds','locks'].every(key=>Object.hasOwn(value,key)) || Object.keys(value).some(key=>!['epoch','sourcePermissionRevision','aiChangesEnabled','taskUpdate','bounds','locks','fieldRules'].includes(key)) || !integer(value.epoch,0,Number.MAX_SAFE_INTEGER) || !integer(value.sourcePermissionRevision,0,Number.MAX_SAFE_INTEGER) || typeof value.aiChangesEnabled !== 'boolean' || !['deny','require_approval','auto_within_bounds'].includes(value.taskUpdate as string)) fail('POLICY_INVALID','変更の権限設定が不正です')
+  if (!record(value) || !['epoch','sourcePermissionRevision','aiChangesEnabled','taskUpdate','bounds','locks'].every(key=>Object.hasOwn(value,key)) || Object.keys(value).some(key=>!['epoch','sourcePermissionRevision','aiChangesEnabled','taskUpdate','bounds','locks','fieldRules','operations','allowedHours','stops'].includes(key)) || !integer(value.epoch,0,Number.MAX_SAFE_INTEGER) || !integer(value.sourcePermissionRevision,0,Number.MAX_SAFE_INTEGER) || typeof value.aiChangesEnabled !== 'boolean' || !['deny','require_approval','auto_within_bounds'].includes(value.taskUpdate as string)) fail('POLICY_INVALID','変更の権限設定が不正です')
   if (!record(value.bounds) || !exactKeys(value.bounds,['maxTasks','maxScheduledDayShift','maxNotesCharacters']) || !integer(value.bounds.maxTasks,1,100) || !integer(value.bounds.maxScheduledDayShift,0,3650) || !integer(value.bounds.maxNotesCharacters,0,50000)) fail('POLICY_INVALID','変更の上限設定が不正です')
   if (!record(value.locks) || Object.entries(value.locks).some(([field, lock]) => !taskChangeFields.includes(field as TaskChangeField) || !['unlocked','protect_from_autonomous','locked_until_human_approval'].includes(lock as string))) fail('POLICY_INVALID','保護する項目の設定が不正です')
   if (value.fieldRules !== undefined && (!record(value.fieldRules) || Object.entries(value.fieldRules).some(([field, rule])=>!['title','dueDate','manualPoints'].includes(field)||!['deny','require_approval'].includes(rule as string)))) fail('POLICY_INVALID','追加項目の変更設定が不正です')
+  try {
+    if (value.operations !== undefined) validateAutomationRules(value.operations)
+    if (value.allowedHours !== undefined) validateAllowedHours(value.allowedHours)
+    if (value.stops !== undefined) validateStopFlags(value.stops)
+  } catch (error) { fail('POLICY_INVALID', error instanceof Error ? error.message : '操作別の設定が不正です') }
 }
 export function changePolicyFor(settings: Settings): ChangePolicy {
   const value = (settings as Settings & { changePolicy?: ChangePolicy }).changePolicy ?? defaultChangePolicy()
@@ -70,6 +83,8 @@ export async function setChangePolicyFromUI(context: ChangeContext, event: Event
   return db.transaction('rw', db.settings, async () => {
     const settings = await currentSettings(context)
     const previous = changePolicyFor(settings)
+    // The N09 table, time windows and stop switches change only through S20 (dry run + native click); this legacy setter must not drop or widen them.
+    if (['operations','allowedHours','stops'].some(key=>Object.hasOwn(next,key))||previous.operations||previous.allowedHours||previous.stops) fail('PREVIEW_REQUIRED','操作別の自動化設定は「自動化と承認」画面で試算を確認して保存してください')
     const policy = { ...structuredClone(next), epoch: previous.epoch + 1 }
     validateChangePolicy(policy)
     await db.settings.put({ ...settings, changePolicy: policy } as Settings & { changePolicy: ChangePolicy })
@@ -86,6 +101,8 @@ async function currentSettings(context: ChangeContext): Promise<Settings> {
   if (!settings || settings.profileId !== context.ownerId || settings.datasetId !== context.datasetId) fail('UNAUTHORIZED','この領域の変更は許可されていません')
   return settings
 }
+/** Owner-only native click/submit; agents, coach principals and synthetic events cannot pass. */
+export function assertTrustedOwnerEvent(context: ChangeContext, event: Event) { trustedHumanEvent(context, event) }
 function trustedHumanEvent(context: ChangeContext, event: Event) {
   validateContext(context)
   if (context.principal.kind !== 'human' || context.principal.id !== context.ownerId || !(event instanceof Event) || !event.isTrusted || !['click','submit'].includes(event.type)) fail('HUMAN_APPROVAL_REQUIRED','アプリの本人確認ボタンから承認してください')
@@ -125,7 +142,7 @@ function authorizeProposal(prepared: PreparedChangeSet, context: ChangeContext, 
   if (prepared.changes.some(change => change.fields.some(field => !context.allowedFields.includes(field)))) fail('UNAUTHORIZED','この項目の変更は許可されていません')
   if (policy.epoch !== prepared.policyEpoch || settings.aiEnabled !== prepared.aiEnabledAtPrepare) fail('POLICY_CHANGED','変更案の作成後にAIまたは権限設定が変わりました。差分を作り直してください')
   if (policy.sourcePermissionRevision !== prepared.sourcePermissionRevision || canonicalJSON(context.sourceRevisions.slice().sort(sourceOrder)) !== canonicalJSON(prepared.sourceRevisions)) fail('SOURCE_PERMISSION_CHANGED','出典の版または利用許可が変わりました。差分を作り直してください')
-  if (prepared.principal.kind !== 'human' && (!settings.aiEnabled || !policy.aiChangesEnabled || policy.taskUpdate === 'deny')) fail('CHANGES_STOPPED','AIによる変更は停止しています')
+  if (prepared.principal.kind !== 'human' && (!settings.aiEnabled || !policy.aiChangesEnabled || deniedOperation(policy,prepared.changes.flatMap(change=>change.fields)))) fail('CHANGES_STOPPED','AIによる変更は停止しています')
   if (Date.parse(prepared.expiresAt) <= Date.now()) fail('EXPIRED','変更案の確認期限が切れました。差分を作り直してください')
   return policy
 }
@@ -147,23 +164,44 @@ function changedCharacters(before: string, after: string) {
   while (suffix < before.length-prefix && suffix < after.length-prefix && before[before.length-1-suffix] === after[after.length-1-suffix]) suffix++
   return Math.max(before.length-prefix-suffix,after.length-prefix-suffix)
 }
-export function decideChangePolicy(prepared: PreparedChangeSet, policy: ChangePolicy): ChangePolicyDecision {
+function deniedOperation(policy: ChangePolicy, fields: TaskChangeField[]): OperationGroup | null {
+  const rules=automationRulesFor(policy)
+  return operationsForFields(fields).find(operation=>rules.find(rule=>rule.operation===operation)?.mode==='deny') ?? null
+}
+/** N09 order: stop → per-operation deny → instruction/protection → per-operation approval → bounds (amount/time/count). */
+export function decideChangePolicy(prepared: PreparedChangeSet, policy: ChangePolicy, context: ChangeDecisionContext = {}): ChangePolicyDecision {
   validateChangePolicy(policy)
-  const agent = prepared.principal.kind !== 'human'
+  const agent = prepared.principal.kind !== 'human', rules = automationRulesFor(policy), fields = prepared.changes.flatMap(change => change.fields), operations = operationsForFields(fields)
   const protectedFields = [...new Set(prepared.changes.flatMap(change => change.fields.filter(field => field==='manualPoints'||field==='dueDate'||policy.locks[field] === 'locked_until_human_approval' || agent && policy.locks[field] === 'protect_from_autonomous')))]
-  if (agent && (!policy.aiChangesEnabled || policy.taskUpdate === 'deny')) return {status:'denied',reason:'AIによる変更は停止しています',protectedFields}
-  if (agent && prepared.changes.some(change=>change.fields.some(field=>policy.fieldRules?.[field as 'title'|'dueDate'|'manualPoints']==='deny'))) return {status:'denied',reason:'この項目の代理変更は停止しています',protectedFields}
+  const rule = (operation: OperationGroup) => rules.find(item => item.operation === operation)!
+  if (agent && !policy.aiChangesEnabled) return {status:'denied',reason:'AIによる変更は停止しています',protectedFields}
+  const denied = agent ? operations.find(operation => rule(operation).mode === 'deny') : undefined
+  if (denied) return {status:'denied',reason:denied==='task.text'||denied==='task.schedule'?`AIによる変更は停止しています（${OPERATION_INFO[denied].label}）`:`この項目の代理変更は停止しています（${OPERATION_INFO[denied].label}）`,protectedFields}
+  if (agent && fields.includes('title') && policy.fieldRules?.title === 'deny') return {status:'denied',reason:'この項目の代理変更は停止しています（タイトル）',protectedFields}
   if (requiresInstruction(prepared.changes)) return {status:'awaiting_approval',reason:'本人が指定したタイトル・期限・ポイントの変更は毎回内容を確認します',protectedFields}
-  if (!agent || policy.taskUpdate !== 'auto_within_bounds' || protectedFields.length) return {status:'awaiting_approval',reason:protectedFields.length?'保護された項目の本人確認が必要です':'この変更の本人確認が必要です',protectedFields}
+  if (!agent || operations.some(operation => rule(operation).mode !== 'auto_within_bounds') || protectedFields.length) return {status:'awaiting_approval',reason:protectedFields.length?'保護された項目の本人確認が必要です':'この変更の本人確認が必要です',protectedFields}
   if (prepared.changes.length > policy.bounds.maxTasks) return {status:'awaiting_approval',reason:'自動変更の件数上限を超えています',protectedFields}
   for (const change of prepared.changes) {
     if (change.fields.includes('notes') && changedCharacters(change.before.notes,change.after.notes) > policy.bounds.maxNotesCharacters) return {status:'awaiting_approval',reason:'メモの自動変更量を超えています',protectedFields}
     if (change.fields.includes('scheduledDate')) {
-      const a=change.before.scheduledDate,b=change.after.scheduledDate
-      if (!a || !b || Math.abs(Date.parse(`${a}T00:00:00Z`)-Date.parse(`${b}T00:00:00Z`))/86400000 > policy.bounds.maxScheduledDayShift) return {status:'awaiting_approval',reason:'予定日の自動移動範囲を超えています',protectedFields}
+      const a=change.before.scheduledDate,b=change.after.scheduledDate,limit=rule('task.schedule').max_schedule_days_delta??policy.bounds.maxScheduledDayShift
+      if (!a || !b || Math.abs(Date.parse(`${a}T00:00:00Z`)-Date.parse(`${b}T00:00:00Z`))/86400000 > limit) return {status:'awaiting_approval',reason:'予定日の自動移動範囲を超えています',protectedFields}
     }
   }
+  const at = context.at ?? new Date().toISOString(), timezone = context.timezone ?? ownerTimezone()
+  for (const operation of operations) {
+    const hours = policy.allowedHours?.[operation]
+    if (!withinAllowedHours(at,timezone,hours)) return {status:'awaiting_approval',reason:`自動変更を許可した時間帯（${hours!.start}〜${hours!.end}）の外です`,protectedFields}
+    const adding = prepared.changes.filter(change => operationsForFields(change.fields).includes(operation)).length
+    if (context.autoCountToday && (context.autoCountToday[operation] ?? 0) + adding > rule(operation).max_daily_count) return {status:'awaiting_approval',reason:`今日の自動変更の上限（${OPERATION_INFO[operation].label} ${rule(operation).max_daily_count}件）に達しています`,protectedFields}
+  }
   return {status:'auto',reason:'本人が設定した自動変更の範囲内です',protectedFields}
+}
+/** Today's automatic agent changes from audits, inside the caller's transaction, counted across entrances. */
+export async function autoChangeCountsToday(at = new Date().toISOString(), timezone = ownerTimezone()): Promise<Partial<Record<OperationGroup, number>>> {
+  const recent = await db.audits.where('at').above(new Date(Date.parse(at)-50*60*60*1000).toISOString()).toArray()
+  // A clock moved back must not reopen the bound: count the day of the latest audit when it is ahead of now.
+  return autoChangeCounts(recent,recent.reduce((latest,audit)=>audit.at>latest?audit.at:latest,at),timezone)
 }
 
 export async function prepareTaskChanges(requests: TaskChangeRequest[], context: ChangeContext, reason = '選択したタスクの変更', instruction:VerifiedTaskInstruction|null=null): Promise<PreparedChangeSet> {
@@ -179,7 +217,7 @@ export async function prepareTaskChanges(requests: TaskChangeRequest[], context:
   }
   const payload = await db.transaction('r',db.tasks,db.settings,db.containers,db.tripBundles,async()=>{
     const settings = await currentSettings(context), policy=changePolicyFor(settings)
-    if (context.principal.kind !== 'human' && (!settings.aiEnabled || !policy.aiChangesEnabled || policy.taskUpdate==='deny')) fail('CHANGES_STOPPED','AIによる変更は停止しています')
+    if (context.principal.kind !== 'human' && (!settings.aiEnabled || !policy.aiChangesEnabled || deniedOperation(policy,requests.flatMap(request=>Object.keys(request.patch) as TaskChangeField[])))) fail('CHANGES_STOPPED','AIによる変更は停止しています')
     const changes: TaskChange[] = []
     for (const request of requests) {
       const task=await db.tasks.get(request.taskId)
@@ -200,7 +238,7 @@ export async function prepareTaskChanges(requests: TaskChangeRequest[], context:
       catch(error){fail('USER_INSTRUCTION_REQUIRED',error instanceof Error?error.message:'本人の指示を確認してください')}
       if(changes.some((change,index)=>canonicalJSON(change.scoreBefore)!==canonicalJSON(instruction.changes[index].scoreBefore))) fail('CONFLICT','本人指示を確認した後にポイントの状態が変わりました')
     }
-    if(context.principal.kind!=='human'&&changes.some(change=>change.fields.some(field=>policy.fieldRules?.[field as 'title'|'dueDate'|'manualPoints']==='deny')))fail('CHANGES_STOPPED','この項目の代理変更は停止しています')
+    if(context.principal.kind!=='human'&&(changes.some(change=>change.fields.includes('title'))&&policy.fieldRules?.title==='deny'||deniedOperation(policy,changes.flatMap(change=>change.fields))))fail('CHANGES_STOPPED','この項目の代理変更は停止しています')
     const createdAt=now()
     return {version:1 as const,id:uid(),principal:principal(context.principal),ownerId:context.ownerId,datasetId:context.datasetId,policyEpoch:policy.epoch,sourcePermissionRevision:policy.sourcePermissionRevision,aiEnabledAtPrepare:settings.aiEnabled,sourceRevisions:structuredClone(context.sourceRevisions.slice().sort(sourceOrder)),createdAt,expiresAt:instruction?.expiresAt??new Date(Date.now()+24*60*60*1000).toISOString(),changes,reason,instruction}
   })
@@ -243,7 +281,8 @@ export async function applyChangeSet(value: PreparedChangeSet, approval: UIChang
     if (proposals.get(prepared.id)!==prepared) fail('UNVERIFIED_CHANGE_SET','この変更案は取り消されました')
     const settings=await currentSettings(context),policy=authorizeProposal(prepared,context,settings)
     verifyInstruction(prepared,context,settings)
-    const decision=decideChangePolicy(prepared,policy)
+    const at=now(),timezone=ownerTimezone()
+    const decision=decideChangePolicy(prepared,policy,{at,timezone,autoCountToday:await autoChangeCountsToday(at,timezone)})
     if (decision.status==='denied') fail('CHANGES_STOPPED',decision.reason)
     const grant=approval ? approvals.get(approval) : undefined
     if (approval && (!grant || grant.proposalId!==prepared.id || grant.digest!==prepared.digest || grant.userId!==context.ownerId || grant.policyEpoch!==policy.epoch || grant.sourcePermissionRevision!==policy.sourcePermissionRevision)) fail('INVALID_APPROVAL','この変更に対する本人承認が確認できません')
@@ -263,7 +302,7 @@ export async function applyChangeSet(value: PreparedChangeSet, approval: UIChang
     if (grant?.consumed) fail('APPROVAL_CONSUMED','この本人承認は既に使用されています')
     const tasks=await Promise.all(prepared.changes.map(change=>db.tasks.get(change.taskId)))
     if (tasks.some((task,index)=>!task || task.deletedAt || task.revision!==prepared.changes[index].baseRevision || canonicalJSON(values(task))!==canonicalJSON(prepared.changes[index].before) || canonicalJSON(task.score)!==canonicalJSON(prepared.changes[index].scoreBefore)||task.assessmentId!==prepared.changes[index].assessmentBefore||task.effectivePoints!==prepared.changes[index].effectivePointsBefore)) fail('CONFLICT','タスクが更新されています。新しい版で差分を確認してください')
-    const at=now(),revisions:ChangeReceipt['revisions']=[]
+    const revisions:ChangeReceipt['revisions']=[],undoOf=undoLinks.get(prepared.id)
     for (const [index,change] of prepared.changes.entries()) {
       const task=tasks[index]!
       await ownedTaskContainer(task,context.ownerId)
@@ -280,7 +319,7 @@ export async function applyChangeSet(value: PreparedChangeSet, approval: UIChang
       await db.tasks.put({...task,...after,score:structuredClone(change.scoreAfter),assessmentId,effectivePoints:result.effective,firstScheduledDate:task.firstScheduledDate??task.scheduledDate??change.after.scheduledDate,revision:task.revision+1,updatedAt:at})
       await cancelCoachNotificationTarget(task.id,at)
       revisions.push({taskId:task.id,revision:task.revision+1})
-      await db.audits.add({id:uid(),taskId:task.id,operation:'changeset.update',at,detail:JSON.stringify({changeSetId:prepared.id,digest:prepared.digest,principal:prepared.principal,origin:prepared.principal.kind==='human'?'human':prepared.instruction?'user_instruction_via_agent':'agent_proposal',approvedBy:grant?.userId??null,policyEpoch:policy.epoch,sourcePermissionRevision:policy.sourcePermissionRevision,sourceRevisions:prepared.sourceRevisions,instruction:prepared.instruction,before:change.before,after:change.after,scoreBefore:change.scoreBefore,scoreAfter:change.scoreAfter,assessmentBefore:task.assessmentId,assessmentAfter:assessmentId,fieldOrigins:change.fieldOrigins,reason:prepared.reason,undo:{expectedRevision:task.revision+1,patch:Object.fromEntries(change.fields.map(field=>[field,change.before[field]])),...(scoreChanged?{score:change.scoreBefore,requiresNewInstruction:true}:{})}})})
+      await db.audits.add({id:uid(),taskId:task.id,operation:'changeset.update',at,detail:JSON.stringify({changeSetId:prepared.id,digest:prepared.digest,principal:prepared.principal,decision:grant?'approved':'auto',operations:operationsForFields(change.fields),...(undoOf?{undoOf}:{}),origin:prepared.principal.kind==='human'?'human':prepared.instruction?'user_instruction_via_agent':'agent_proposal',approvedBy:grant?.userId??null,policyEpoch:policy.epoch,sourcePermissionRevision:policy.sourcePermissionRevision,sourceRevisions:prepared.sourceRevisions,instruction:prepared.instruction,before:change.before,after:change.after,scoreBefore:change.scoreBefore,scoreAfter:change.scoreAfter,assessmentBefore:task.assessmentId,assessmentAfter:assessmentId,fieldOrigins:change.fieldOrigins,reason:prepared.reason,undo:{expectedRevision:task.revision+1,patch:Object.fromEntries(change.fields.map(field=>[field,change.before[field]])),...(scoreChanged?{score:change.scoreBefore,requiresNewInstruction:true}:{})}})})
     }
     const result:ChangeReceipt={changeSetId:prepared.id,digest:prepared.digest,taskIds:prepared.changes.map(change=>change.taskId),revisions,appliedAt:at}
     const resultId=JSON.stringify(result)
@@ -290,4 +329,37 @@ export async function applyChangeSet(value: PreparedChangeSet, approval: UIChang
   })
   if (approval) { const grant=approvals.get(approval); if(grant) { if(enclosing){let root=enclosing;while(root.parent)root=root.parent;root.on('complete',()=>{grant.consumed=true})}else grant.consumed=true } }
   return receipt
+}
+
+export type UndoRediff = { field: TaskChangeField; recorded: unknown; current: unknown; restore: unknown }
+export type UndoPreparation = { status: 'prepared'; auditId: string; prepared: PreparedChangeSet } | { status: 'conflict'; auditId: string; taskId: string; rediff: UndoRediff[] } | { status: 'already_undone'; auditId: string }
+/** Owner-approved inverse ChangeSet built from the stored undo patch at the current revision; completions and the ledger are never touched. */
+export async function prepareUndoFromAudit(auditId: string, context: ChangeContext, instruction: VerifiedTaskInstruction|null = null): Promise<UndoPreparation> {
+  context=freeze(structuredClone(context)); validateContext(context)
+  if (context.principal.kind!=='human') fail('HUMAN_APPROVAL_REQUIRED','取り消しは本人の確認画面から行います')
+  const found=await db.transaction('r',db.audits,db.tasks,db.settings,async()=>{
+    await currentSettings(context)
+    const audit=await db.audits.get(auditId),fact=audit?changeAuditFact(audit):null
+    if (!fact||!fact.taskId||!fact.undo||!record(fact.undo.patch)||!fact.fields.length) fail('UNDO_UNAVAILABLE','取り消せる変更記録がありません')
+    if (fact.principal.kind==='human') fail('UNDO_UNAVAILABLE','本人の変更は通常のタスク編集で戻してください')
+    if ((await db.audits.where('taskId').equals(fact.taskId).toArray()).some(item=>changeAuditFact(item)?.undoOf===auditId)) return {status:'already_undone' as const}
+    const task=await db.tasks.get(fact.taskId)
+    if (!task||task.deletedAt) fail('UNDO_UNAVAILABLE','対象のタスクがありません')
+    const current=values(task)
+    // A later edit is never overwritten: the owner sees a re-diff instead.
+    if (task.revision!==fact.undo.expectedRevision||fact.fields.some(field=>canonicalJSON(current[field])!==canonicalJSON(fact.after[field]??null))) return {status:'conflict' as const,taskId:task.id,rediff:fact.fields.map(field=>({field,recorded:fact.after[field]??null,current:current[field],restore:fact.undo!.patch[field]??null}))}
+    return {status:'ready' as const,task,fact}
+  })
+  if (found.status==='already_undone') return {status:'already_undone',auditId}
+  if (found.status==='conflict') return {status:'conflict',auditId,taskId:found.taskId,rediff:found.rediff}
+  const {task,fact}=found,undo=fact.undo!
+  if (undo.requiresNewInstruction) {
+    const before=undo.score as ScoreInput|undefined
+    if (!before||before.mode!=='manual'||!Number.isInteger(before.manualPoints)) fail('UNDO_UNAVAILABLE','元の点数方式へは自動で戻せません。タスク編集で本人が設定してください。完了記録と実績台帳は変わりません。')
+    if (!instruction) fail('USER_INSTRUCTION_REQUIRED','点数の取り消しには本人の新しい指示が必要です。完了記録と実績台帳は変わりません。')
+  }
+  if (!instruction&&fact.fields.some(field=>field==='title'||field==='dueDate'||field==='manualPoints')) fail('USER_INSTRUCTION_REQUIRED','タイトル・本当の締め切りの取り消しには本人の新しい指示が必要です。タスク編集で本人が直接戻すこともできます。')
+  const prepared=await prepareTaskChanges([{taskId:task.id,expectedRevision:task.revision,patch:structuredClone(undo.patch) as TaskChangePatch}],{...context,allowedFields:[...fact.fields]},`代理変更の取り消し（元の変更 ${fact.changeSetId.slice(0,8)}）`,instruction)
+  undoLinks.set(prepared.id,auditId)
+  return {status:'prepared',auditId,prepared}
 }

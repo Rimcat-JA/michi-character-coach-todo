@@ -5,6 +5,7 @@ import { calendarFixture } from './calendar-test-fixtures'
 import { parseRoutineAssistAnswer, type RoutineAssistInput } from './routine-assist'
 import { assertRoutineInstruction, clearRoutineInstructionAuthority, confirmRoutineInstructionFromUI } from './routine-instruction'
 import { changePolicyFor } from './change-set'
+import { automationRulesFor, type OperationGroup, type OperationMode } from './automation-policy'
 
 beforeEach(async () => { clearRoutineInstructionAuthority(); await db.delete(); await db.open(); await ensureSettings(); const settings = (await db.settings.get('main'))!; await db.settings.put({ ...settings, aiEnabled: true, aiModel: 'synthetic/model' }); const state = calendarFixture(); state.ownerId = settings.profileId; state.datasetId = settings.datasetId; state.bindings[0].personId = settings.profileId; await db.calendarRules.put(state) })
 afterEach(() => { clearRoutineInstructionAuthority(); vi.useRealTimers() })
@@ -46,5 +47,14 @@ describe('周期の本人確認は揮発性の現在指示に限定する', () =
     for (const mutate of [(value: Awaited<ReturnType<typeof candidate>>) => { value.definition.steps[0].score = { ...value.definition.steps[0].score!, mode: 'manual', manualPoints: 36 } }, (value: Awaited<ReturnType<typeof candidate>>) => { value.definition.trigger = { kind: 'weekly', weekdays: [3], time: '09:00' } }, (value: Awaited<ReturnType<typeof candidate>>) => { value.definition.title = '追加の営業'; value.definition.steps[0].title = '追加の営業' }]) {
       const value = await candidate(); mutate(value); await expect(confirmRoutineInstructionFromUI(value.input, value, 'synthetic/model', humanClick())).rejects.toThrow()
     }
+  })
+})
+async function setOperation(operation: OperationGroup, mode: OperationMode) { const current = (await db.settings.get('main'))!, policy = changePolicyFor(current); await db.settings.put({ ...current, changePolicy: { ...policy, operations: automationRulesFor(policy).map(rule => rule.operation === operation ? { ...rule, mode } : rule) } }) }
+describe('N09 routine.change gate', () => {
+  it('routine.change=deny refuses AI-based routine instructions while the manual basis keeps working', async () => {
+    const value = await candidate()
+    await setOperation('routine.change', 'deny')
+    await expect(confirmRoutineInstructionFromUI(value.input, value, 'synthetic/model', humanClick())).rejects.toThrow('ルーティン・系列の変更は停止')
+    await expect(confirmRoutineInstructionFromUI(value.input, value, null, humanClick())).resolves.toMatchObject({ basis: 'manual', model: null })
   })
 })

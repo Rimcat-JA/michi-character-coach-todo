@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState } from 'react'
 import { changePolicyFor, decideChangePolicy, type TaskChangeField } from './change-set'
-import { createFileBridgeController, type FileBridgeApplicationOutcome, type PreparedFileBridgeApplication } from './file-bridge-commands'
+import { createFileBridgeController, fileBridgeAutomationAllowed, type FileBridgeApplicationOutcome, type PreparedFileBridgeApplication } from './file-bridge-commands'
 import { egressNotice } from './egress-policy'
 import { updateAIConnection } from './ai-connection'
+import AIProcessingResume from './AIProcessingResume'
 import type { FileBridgeField, FileBridgeGateway, FileBridgeHost, FileBridgeInboxEntry, FileBridgeStatus, FileBridgeWindow } from './file-bridge-types'
 import type { Settings, Task } from './domain'
 
@@ -16,6 +17,8 @@ export default function LocalFileBridgeView({settings,tasks,gateway,onApplied}: 
   const [taskIds,setTaskIds]=useState<string[]>([]),[fields,setFields]=useState<FileBridgeField[]>(['title']),[host,setHost]=useState<FileBridgeHost>('codex'),[hours,setHours]=useState(1)
   const [busy,setBusy]=useState(false),[notice,setNotice]=useState(''),[checks,setChecks]=useState<{digest:string;fields:TaskChangeField[]}>({digest:'',fields:[]})
   const [mcpConfig,setMcpConfig]=useState<{scopeKey:string;root:string;json:string}|null>(null)
+  const [autoMode,setAutoMode]=useState(false),[autoDays,setAutoDays]=useState(2),[autoCount,setAutoCount]=useState(5)
+  const autoAllowed=fileBridgeAutomationAllowed(policy,fields,autoDays)
   const visible=view.scopeKey===scopeKey,prepared=visible?view.prepared:null,status=visible?view.status:null,entries=visible?view.entries:[],outcome=visible?view.outcome:null
   const decision=prepared?.changeSet?decideChangePolicy(prepared.changeSet,policy):null,checked=prepared&&checks.digest===prepared.digest?checks.fields:[]
   useEffect(()=>{
@@ -27,7 +30,17 @@ export default function LocalFileBridgeView({settings,tasks,gateway,onApplied}: 
   },[controller,scopeKey])
   async function run(action:()=>Promise<void>) {if(busy)return;setBusy(true);setNotice('');try{await action()}catch(error){setNotice(error instanceof Error?error.message:String(error))}finally{setBusy(false)}}
   function replaceStatus(status:FileBridgeStatus) {setView({scopeKey,status,entries:[],prepared:null,outcome:null})}
-  async function scan() {if(!controller)return;const scanned=await controller.scanInbox();setView({scopeKey,...scanned,prepared:null,outcome:null})}
+  async function scan() {
+    if(!controller)return
+    let scanned=await controller.scanInbox(),applied=0,waiting=0
+    // Owner-delegated auto grant only: the shared N09 engine and main's signed bounds decide; anything else waits for approval.
+    if(scanned.status.registration?.client.grant.mutation_mode==='auto_within_bounds'){
+      for(const entry of scanned.entries)if(entry.state==='awaiting_approval'){try{const proposal=await controller.prepare(entry.reference);const result=await controller.applyAutomatically(proposal);applied++;onApplied?.(result.receipt)}catch{waiting++}}
+      if(applied)scanned=await controller.scanInbox()
+    }
+    setView({scopeKey,...scanned,prepared:null,outcome:null})
+    if(applied||waiting)setNotice(`範囲内の${applied}件を自動適用しました。${waiting}件は本人の確認待ちです。自動適用した変更は「変更の履歴」から取り消せます。`)
+  }
   async function approve(event:Event) {
     if(!controller||!prepared)return
     const result=await controller.applyFromUI(prepared,event,checked)
@@ -41,7 +54,7 @@ export default function LocalFileBridgeView({settings,tasks,gateway,onApplied}: 
       <p className="muted">外部クライアントがこのフォルダーを読み書きする設定は、利用するクライアント側で行います。外部サービスへの実接続は、この画面での登録だけでは完了しません。</p>
       {!settings.aiEnabled||!policy.aiChangesEnabled?<p role="status">AIによる変更は停止しています。タスクの手動編集は利用できます。</p>:null}
       {settings.aiEnabled?<button type="button" className="secondary-button" disabled={busy} onClick={event=>{const native=event.nativeEvent;void run(async()=>{if(!(native instanceof Event)||!native.isTrusted||native.type!=='click')throw new Error('本人の停止ボタンから操作してください。');await updateAIConnection(false);setNotice('AI処理を停止し、外部コーチの接続許可を取り消しました。')})}}>AIと外部コーチを停止</button>:null}
-      {!settings.aiEnabled?<div><p>このフォルダー接続はOpenRouterのAPIキーなしで利用できます。共有する内容と変更案は、この画面で本人が選んで確認します。OpenRouterへの送信は、キーを設定して個別のAI操作を選んだ場合に行います。</p><button type="button" className="secondary-button" disabled={busy} onClick={event=>{const native=event.nativeEvent;void run(async()=>{if(!(native instanceof Event)||!native.isTrusted||native.type!=='click')throw new Error('本人の有効化ボタンから操作してください。');await updateAIConnection(true);setNotice('AI処理を有効にしました。共有する項目とタスクを選んで接続してください。')})}}>外部コーチ用にAI処理を有効にする</button></div>:null}
+      {!settings.aiEnabled?<div><p>このフォルダー接続はOpenRouterのAPIキーなしで利用できます。共有する内容と変更案は、この画面で本人が選んで確認します。OpenRouterへの送信は、キーを設定して個別のAI操作を選んだ場合に行います。</p><p className="muted">再開は「設定 › 自動化」と同じく、再開の内容を確認してから本人のクリックで行います。</p><AIProcessingResume settings={settings} label="外部コーチ用にAI処理の再開内容を確認"/></div>:null}
       <details open={!status?.connected}><summary>共有する項目とタスク</summary>
         <p>選択した内容をフォルダーへ書き出します。このフォルダーを渡す相手は内容を読めます。資料から検出したタスクの引用（資料の根拠・旧形式メモの引用行）は書き出しません。</p>
         <label className="field"><span>利用するクライアント</span><select value={host} disabled={busy} onChange={event=>setHost(event.target.value as FileBridgeHost)}><option value="codex">Codex</option><option value="claude_code">Claude Code</option><option value="chatgpt">ChatGPT</option><option value="claude">Claude</option><option value="other">その他</option></select></label>
@@ -49,11 +62,14 @@ export default function LocalFileBridgeView({settings,tasks,gateway,onApplied}: 
         <fieldset disabled={busy}><legend>共有する項目</legend>{(['title','notes','scheduled_date'] as FileBridgeField[]).map(field=><label key={field} className="field"><span><input type="checkbox" checked={fields.includes(field)} onChange={event=>setFields(event.target.checked?[...fields,field]:fields.filter(item=>item!==field))}/> {labels[field]}</span></label>)}</fieldset>
         <fieldset disabled={busy}><legend>共有するタスク（最大100件）</legend>{tasks.filter(task=>!task.deletedAt&&task.status==='open').map(task=><label key={task.id} className="field"><span><input type="checkbox" checked={taskIds.includes(task.id)} onChange={event=>setTaskIds(event.target.checked?[...taskIds,task.id]:taskIds.filter(id=>id!==task.id))}/> {task.title}</span></label>)}</fieldset>
         <p>変更案は毎回本人が承認します。新規作成では点数と締め切りを未設定にします。</p>
-        <button type="button" data-file-bridge-configure="true" className="primary-button" disabled={busy||!fields.length||taskIds.length>100||!settings.aiEnabled||!policy.aiChangesEnabled} onClick={event=>{const native=event.nativeEvent;void run(async()=>replaceStatus(await controller.configure({intendedHost:host,taskIds,fields,lifetimeHours:hours},native)))}}>選択した範囲だけを許可して接続</button>
+        <fieldset disabled={busy}><legend>範囲内の自動適用（任意）</legend><label className="field"><span><input type="checkbox" checked={autoMode&&autoAllowed} disabled={!autoAllowed} onChange={event=>setAutoMode(event.target.checked)}/> 範囲内のメモ・予定日の変更は承認なしで適用する</span></label>
+          <div className="form-grid"><label className="field">予定日を動かせる日数<input type="number" min={0} max={7} step={1} value={autoDays} onChange={event=>setAutoDays(Number(event.target.value))}/></label><label className="field">1日の自動件数<input type="number" min={1} max={20} step={1} value={autoCount} onChange={event=>setAutoCount(Number(event.target.value))}/></label></div>
+          <small>{autoAllowed?'共有項目がメモ・予定日だけで、自動化設定（S20）でも範囲内自動を許可している場合に使えます。範囲外・タイトル・新規作成は毎回本人が承認します。':'自動化設定（S20）でメモ・予定日を「範囲内で自動」にし、共有項目をメモ・予定日だけにすると選べます。'}</small></fieldset>
+        <button type="button" data-file-bridge-configure="true" className="primary-button" disabled={busy||!fields.length||taskIds.length>100||!settings.aiEnabled||!policy.aiChangesEnabled} onClick={event=>{const native=event.nativeEvent;void run(async()=>replaceStatus(await controller.configure({intendedHost:host,taskIds,fields,lifetimeHours:hours,automation:autoMode&&autoAllowed?{maxScheduleShiftDays:autoDays,maxOperationsPerDay:autoCount}:null},native)))}}>選択した範囲だけを許可して接続</button>
       </details>
       {status?.connected&&status.registration?<div>
         <h4>登録した接続</h4><p>{status.registration.client.intended_host} / {status.root}</p>
-        <p>タスク{status.registration.task_ids.length}件、共有項目：{status.registration.client.grant.fields.map(field=>labels[field]).join('・')}。1日{status.registration.client.grant.max_operations_per_day}件まで、予定日の移動は{status.registration.client.grant.max_schedule_shift_days}日まで。</p>
+        <p>タスク{status.registration.task_ids.length}件、共有項目：{status.registration.client.grant.fields.map(field=>labels[field]).join('・')}。1日{status.registration.client.grant.max_operations_per_day}件まで、予定日の移動は{status.registration.client.grant.max_schedule_shift_days}日まで。{status.registration.client.grant.automation?`範囲内自動：予定日±${status.registration.client.grant.automation.max_schedule_shift_days}日・1日${status.registration.client.grant.automation.max_operations_per_day}件まで。それ以外は本人承認。`:'すべて本人承認。'}</p>
         <p className="muted">有効期限：{new Date(status.registration.client.grant.expires_at).toLocaleString('ja-JP')}。接続版 {status.registration.client.revision} / 許可版 {status.registration.client.grant_epoch}</p>
         <div className="change-set-actions"><button type="button" data-file-bridge-export={status.registration.client.id} className="secondary-button" disabled={busy||!settings.aiEnabled} onClick={event=>{const native=event.nativeEvent;void run(async()=>{replaceStatus(await controller.exportSnapshot(native));const withheld=controller.lastEgress();if(withheld&&(withheld.withheldQuotes||withheld.notesWithheld))setNotice(egressNotice({withheldQuotes:withheld.withheldQuotes,notesWithheld:withheld.notesWithheld>0},'書出し')!)})}}>選択タスクの現在の内容を書き出す</button><button type="button" data-file-bridge-disconnect={status.registration.client.id} className="secondary-button" disabled={busy} onClick={event=>{const native=event.nativeEvent;void run(async()=>replaceStatus(await controller.disconnect(native)))}}>この接続の許可を取り消す</button></div>
         {status.snapshot?<p>確認用データ：{new Date(status.snapshot.generated_at).toLocaleString('ja-JP')}、{Object.keys(status.snapshot.entity_revisions).length}件。<small className="muted">識別子 {status.snapshot.snapshot_id} / 内容hash {status.snapshot.view_sha256.slice(0,12)}</small></p>:<p>現在のタスクを書き出してから、外部クライアントで案を作成してください。</p>}

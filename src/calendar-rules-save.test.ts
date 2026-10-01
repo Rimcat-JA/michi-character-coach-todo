@@ -112,3 +112,23 @@ describe('本人確認からの共通カレンダー保存', () => {
     const cancelled = structuredClone(saved.state), cancelledInstance = cancelled[0].instances.find(instance => instance.spec.kind === 'task')!; cancelledInstance.status = 'cancelled'; expect(() => validateCalendarRulesRecords(cancelled, saved.tasks, saved.events, settings)).toThrow('取消')
   })
 })
+
+describe('N09 routine stop and emergency stop for calendar generation', () => {
+  it('a pending generation proposal is rejected after the routine stop or emergency stop; nothing is created until a native resume', async () => {
+    const { reduceAuthority, emergencyStop, previewResume, resumeAuthorityFromUI } = await import('./automation-control')
+    const state = await fixture(); await save(state)
+    const pending = await prepareCalendarGeneration('2026-10-01', '2026-10-15'); expect(pending.plan.creates).toHaveLength(4)
+    await reduceAuthority('routines', 'button')
+    // The stop both clears in-memory proposals and refuses generation while stopped.
+    await expect(applyCalendarProposalFromUI(pending, humanClick())).rejects.toThrow(/停止中|登録済みの確認案ではありません/)
+    await expect(prepareCalendarGeneration('2026-10-01', '2026-10-15')).rejects.toThrow('停止中')
+    expect(await db.tasks.count()).toBe(0)
+    const settings = (await db.settings.get('main'))!, owner = { principal: { id: settings.profileId, kind: 'human' as const }, ownerId: settings.profileId, datasetId: settings.datasetId, allowedFields: [], sourceRevisions: [] }
+    await resumeAuthorityFromUI(owner, humanClick(), 'routines', (await previewResume('routines')).token)
+    const again = await prepareCalendarGeneration('2026-10-01', '2026-10-15')
+    await emergencyStop('button')
+    await expect(applyCalendarProposalFromUI(again, humanClick())).rejects.toThrow()
+    expect(await db.tasks.count()).toBe(0)
+    expect(changePolicyFor((await db.settings.get('main'))!).stops).toEqual({ notifications: true, routines: true })
+  })
+})

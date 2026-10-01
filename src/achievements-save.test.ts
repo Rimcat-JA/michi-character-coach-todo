@@ -11,6 +11,7 @@ import { achievementTestGateway } from './achievements-test-fixtures'
 import { restoreAchievementExports, validateAchievementRecords, verifyAchievementDigests } from './achievements-validation'
 import type { GitHubAchievementsGateway, GitHubGatewayStatus, GitHubPublishRequest, GitHubPublishResult } from './github-publish-types'
 import { changePolicyFor } from './change-set'
+import { automationRulesFor, type OperationGroup, type OperationMode } from './automation-policy'
 import { captureSnapshot, restoreBackup } from './backup'
 
 function nativeClick() { const event = new Event('click'); Object.defineProperty(event, 'isTrusted', { value: true }); return event }
@@ -197,5 +198,15 @@ describe('実績の本人承認・保存・送信状態', () => {
     const noteId = await addTaskNote(value.taskId, '秘密の自己ノート', 'self'), id = await createAchievementEvidenceFromUI({ completionId: value.completion.id, kind: 'user_statement', noteId, publicText: '公開説明', publicReviewed: true }, nativeClick()), row = (await achievementDB.achievementEvidence.get(id))!
     expect(row.origin.sha256).toBe(await achievementTextHash('秘密の自己ノート'))
     expect(row.publicSha256).not.toBe(row.origin.sha256)
+  })
+})
+async function setOperation(operation: OperationGroup, mode: OperationMode) { const current = (await db.settings.get('main'))!, policy = changePolicyFor(current); await db.settings.put({ ...current, changePolicy: { ...policy, operations: automationRulesFor(policy).map(rule => rule.operation === operation ? { ...rule, mode } : rule) } }) }
+describe('N09 achievement.publish gate', () => {
+  it('achievement.publish=deny prevents preparing or approving a publish while drafts and evidence stay', async () => {
+    const value = await fixture(), proposal = await value.proposal()
+    await setOperation('achievement.publish', 'deny')
+    await expect(value.proposal()).rejects.toThrow('GitHub実績の公開は停止')
+    await expect(approveAchievementFromUI(proposal, nativeClick(), value.gateway.api)).rejects.toThrow()
+    expect(value.gateway.publish).not.toHaveBeenCalled(); expect(await achievementDB.achievementEvidence.count()).toBe(1); expect(await db.ledger.count()).toBe(1)
   })
 })

@@ -1,6 +1,7 @@
 import Dexie from 'dexie'
 import { canonicalJSON, contentDigest } from './canonical'
 import { changePolicyFor } from './change-set'
+import { assertOperationAllowed } from './automation-policy'
 import { newTaskInput } from './commands'
 import { emptyScore, uid, type Settings } from './domain'
 import { normalizeSourceText, readSource, recordSourceSent, sourceSpans, sourceDb as db } from './source-library'
@@ -161,7 +162,7 @@ export async function applyDetectionRecurrenceFromUI(run:DetectionRun,candidateI
   return applyRoutineAssistConfigurationFromUI(prepared,confirmedDigest,event)
 }
 export async function prepareDetectionCreate(run:DetectionRun,candidateId:string):Promise<PreparedDetectionCreate>{
-  registeredRun(run);await assertCurrent(run,run.detectorModel)
+  registeredRun(run);assertOperationAllowed(changePolicyFor(await assertCurrent(run,run.detectorModel)),'detection.register')
   const candidate=run.candidates.find(item=>item.id===candidateId)
   if(!candidate||candidate.status!=='ready-for-review'||!candidate.verification||!detectionSemanticsPassed(candidate.change,candidate.verification)||candidate.change.action!=='create')throw new Error('この候補は新規タスクとして登録できません。確認事項または既存タスクへの差分です。')
   if(candidate.change.due.kind==='datetime')throw new Error('時刻付き期限は、原文を確認してタスクを手動編集してください')
@@ -188,7 +189,7 @@ export async function applyDetectionCreateFromUI(run:DetectionRun,prepared:Prepa
   if(digest!==await contentDigest(payload))throw new Error('確認した検出候補の内容が変わりました')
   const all=[db.tasks,db.assessments,db.commands,db.audits,db.containers,db.settings,db.labelGroups,db.labelDefinitions,db.contextSources,db.contextSnapshots,db.sourceArtifacts,db.taskSourceEvidence]
   return db.transaction('rw',all,async()=>{
-    await assertCurrent(run,run.detectorModel)
+    assertOperationAllowed(changePolicyFor(await assertCurrent(run,run.detectorModel)),'detection.register')
     if(!await db.sourceArtifacts.get(`detection:${run.id}`))throw new Error('候補が破棄されました。もう一度検出してください')
     const existing=await db.commands.get(`assist:${prepared.assisted.id}`)
     if(!existing&&(await db.tasks.toArray()).some(task=>!task.deletedAt&&task.title.normalize('NFC').trim()===prepared.assisted.inputs[0].title.normalize('NFC').trim()))throw new Error('同じ作業が既に登録されています。既存タスクを確認してください')

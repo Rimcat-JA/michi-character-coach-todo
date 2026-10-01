@@ -6,6 +6,8 @@ import { snoozeTask } from './rollover'
 import { createReminder, dispatchDueReminders, pendingOSReminder, setReminderPolicy, stopReminder } from './reminders'
 import { coachNotificationStateFor, muteCoachNotificationTarget, prepareCoachNotificationDelivery, purgeCoachNotificationSource, queueSnoozeNotification, recordCoachNotificationDelivery, restCoachNotificationsToday, setCoachNotificationPolicy } from './coach-notification-save'
 import { validateCoachNotificationState } from './coach-notifications'
+import { automationRulesFor, type OperationGroup, type OperationMode } from './automation-policy'
+import { changePolicyFor } from './change-set'
 const clock = (hour: number, minute = 0) => new Date(2026, 9, 1, hour, minute)
 const stamp = (hour: number, minute = 0) => clock(hour, minute).toISOString()
 async function task(title = '通知するタスク') { return createTask({ ...newTaskInput(), title, score: { ...newTaskInput().score, mode: 'manual', manualPoints: 20 } }) }
@@ -114,5 +116,18 @@ describe('共通通知の永続化と既存通知経路', () => {
     expect(intent.text).toEqual({ factual: '削除・権限変更した資料の通知', savedAI: null })
     expect(intent.deliveries.find(item => item.destinationId === 'os')?.state).toBe('canceled')
     expect(intent.deliveries.find(item => item.destinationId === 'in-app')?.state).toBe('accepted_by_provider')
+  })
+})
+async function setOperation(operation: OperationGroup, mode: OperationMode) { const current = (await db.settings.get('main'))!, policy = changePolicyFor(current); await db.settings.put({ ...current, changePolicy: { ...policy, operations: automationRulesFor(policy).map(rule => rule.operation === operation ? { ...rule, mode } : rule) } }) }
+describe('N09 notification.send gate', () => {
+  it('notification.send=deny mutes reminders and snooze notifications without deleting rules or tasks', async () => {
+    const id = await task(), snoozed = await task('スヌーズ')
+    await createReminder('once', id, stamp(11), ['in-app', 'os'], clock(10)); await snoozeTask(snoozed, 1, stamp(10))
+    await setOperation('notification.send', 'deny')
+    expect(await dispatchDueReminders(clock(11))).toEqual([])
+    expect(await queueSnoozeNotification(snoozed, stamp(11))).toBeNull()
+    expect((await db.settings.get('main'))!.reminderState!.rules).toHaveLength(1); expect(await db.tasks.count()).toBe(2)
+    await setOperation('notification.send', 'auto_within_bounds')
+    expect(await dispatchDueReminders(clock(11))).toHaveLength(1)
   })
 })

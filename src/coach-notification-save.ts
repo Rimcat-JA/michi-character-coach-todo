@@ -1,5 +1,6 @@
 import { db } from './db'
-import { changePolicyFor } from './change-set'
+import { changePolicyFor, type ChangePolicy } from './change-set'
+import { operationMode } from './automation-policy'
 import { uid, type ReminderRule, type Settings } from './domain'
 import { querySmartList } from './smart-lists'
 import { beginCoachNotificationDelivery, cancelPendingCoachNotifications, changeCoachNotificationPolicy, emptyCoachNotificationState, notificationLocalClock, reserveCoachNotification, settleCoachNotificationDelivery, validateCoachNotificationState, type CoachNotificationIntent, type CoachNotificationPolicy, type CoachNotificationState, type NotificationGuard, type NotificationRequest } from './coach-notifications'
@@ -10,10 +11,13 @@ export function coachNotificationStateFor(settings: Settings): CoachNotification
   if (settings.reminderState) { value.policy.quietStart = settings.reminderState.quietStart; value.policy.quietEnd = settings.reminderState.quietEnd; value.policy.dailyCap = settings.reminderState.dailyCap }
   return value
 }
+export function notificationStopReason(policy: ChangePolicy): string | null {
+  return policy.stops?.notifications ? '通知を停止しています（自動化の停止スイッチ）' : operationMode(policy, 'notification.send') === 'deny' ? '通知の送信は停止しています（自動化設定）' : null
+}
 export function coachNotificationGuardFor(settings: Settings, target: NotificationGuard['target'], rule: NotificationGuard['rule'], sources: NotificationGuard['sources'] = []): NotificationGuard {
   const policy = changePolicyFor(settings)
   // Only registered local channels have delivery adapters in this build.
-  return { ownerId: settings.profileId, datasetId: settings.datasetId, authorityEpoch: policy.epoch, sourcePermissionRevision: policy.sourcePermissionRevision, aiEnabled: settings.aiEnabled, target, rule, sources, availableDestinationIds: ['in-app', ...(settings.notifications ? ['os'] : [])] }
+  return { ownerId: settings.profileId, datasetId: settings.datasetId, authorityEpoch: policy.epoch, sourcePermissionRevision: policy.sourcePermissionRevision, aiEnabled: settings.aiEnabled, target, rule, sources, availableDestinationIds: ['in-app', ...(settings.notifications ? ['os'] : [])], stopped: notificationStopReason(policy) }
 }
 export async function setCoachNotificationPolicy(patch: Partial<Omit<CoachNotificationPolicy, 'epoch'>>, at = new Date().toISOString()): Promise<void> {
   await db.transaction('rw', db.settings, async () => {
@@ -82,7 +86,7 @@ export async function queueCoachNotification(request: NotificationRequest, guard
     const settings = await db.settings.get('main'); if (!settings) throw new Error('本人の設定がありません')
     const policy = changePolicyFor(settings)
     if (guard.ownerId !== settings.profileId || guard.datasetId !== settings.datasetId || guard.authorityEpoch !== policy.epoch || guard.sourcePermissionRevision !== policy.sourcePermissionRevision) throw new Error('通知の本人・許可が変わりました')
-    const result = reserveCoachNotification(coachNotificationStateFor(settings), request, guard, at)
+    const result = reserveCoachNotification(coachNotificationStateFor(settings), request, { ...guard, stopped: notificationStopReason(policy) }, at)
     if (result.intent) await db.settings.put({ ...settings, notificationState: result.state })
     return result.intent
   })
