@@ -242,12 +242,19 @@ export function matchesRoutine(r: Routine, date: string) {
   }
   return false
 }
+/** N05: once a legacy routine's occurrences were moved to a common-resolver rule (RRULE or completion-relative), only that rule's
+ * confirmed generation may create its dates; the legacy generator and the N10 catch-up never re-create them under the old key. */
+export async function legacyRoutineHandedOver(routineId: string): Promise<boolean> {
+  if (await db.commands.get(`legacy-routine:${routineId}`)) return true
+  return Boolean(await db.tasks.where('routineId').equals(routineId).filter(task => task.generationKey.startsWith('calendar:')).first())
+}
 export async function expandRoutines(from = addDays(today(), -30), days = 120) {
   // N09 routine stop switch: manual tasks keep working, no occurrences are generated.
   if ((await db.settings.get('main'))?.changePolicy?.stops?.routines) return 0
   const routines = await db.routines.filter(r => r.active).toArray()
   let count = 0
   for (const r of routines) {
+    if (await legacyRoutineHandedOver(r.id)) continue
     if (r.cadence === 'after_completion') {
       const occurrences = await db.tasks.where('routineId').equals(r.id).toArray()
       if (occurrences.length === 0) {

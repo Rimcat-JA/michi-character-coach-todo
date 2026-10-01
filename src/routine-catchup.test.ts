@@ -9,6 +9,9 @@ import type { ChangeContext } from './change-set'
 import { dispatchDueReminders } from './reminders'
 import { captureSnapshot } from './backup'
 import { validateSnapshot } from './backup-validation'
+import { calendarFixture, monthlyRule } from './calendar-test-fixtures'
+import { resolveCalendarOccurrences, type CalendarRule } from './calendar-resolver'
+import { applyLegacyRoutineConversionFromUI, legacyRoutineTrigger, prepareLegacyRoutineConversion } from './legacy-routine-conversion'
 
 // Synthetic clock jumps with vi.setSystemTime on fake-indexeddb; no device was left switched off.
 const T0 = new Date(2026, 9, 1, 9, 0)
@@ -210,4 +213,60 @@ describe('AT-N10-09 長期未起動後の繰り返し', () => {
     expect(await db.tasks.count()).toBe(2 * CATCHUP_RUN_CAP)
     for (const id of ids) { const all = await keys(id); expect(new Set(all).size).toBe(all.length) }
   }, 300000)
+})
+
+describe('AT-N10-09 × N05 共通ルーティン（RRULE・完了起点）との組み合わせ', () => {
+  const selection = { contextId: 'company', bindingId: 'self', calendarId: 'business', time: '09:00' }
+  async function ownCalendar(rules: CalendarRule[] = []) {
+    const settings = (await db.settings.get('main'))!, state = calendarFixture()
+    state.ownerId = settings.profileId; state.datasetId = settings.datasetId; state.bindings[0].personId = settings.profileId; state.activities = []; state.bindings[0].activityIds = []; state.calendars[0].weekdays = [0, 1, 2, 3, 4, 5, 6]; state.rules = rules
+    await db.calendarRules.put(state)
+    return state
+  }
+  it('RRULE・完了起点の共通規則は長期未起動後も一括作成せず、本人確認つきの生成だけに任せる', async () => {
+    const state = await ownCalendar([
+      monthlyRule({ id: 'daily-rrule', title: '毎日RRULE', trigger: { kind: 'rrule', dtstart: '2026-01-01T09:00', rrule: 'FREQ=DAILY', rdates: [], exdates: [], nonexistentTime: 'skip', ambiguousTime: 'earlier' } }),
+      monthlyRule({ id: 'water', title: '植物の水やり', trigger: { kind: 'completion_relative', firstDate: '2026-01-01', time: '09:00', afterDays: 1, unfinishedPolicy: 'keep_all' } }),
+    ])
+    // The common resolver does have many past occurrences pending for these rules ...
+    expect(resolveCalendarOccurrences(state, '2026-01-01', today(T0), [], { today: today(T0) }).occurrences.length).toBeGreaterThan(400)
+    // ... but the launch/foreground catch-up never materializes them.
+    for (const at of [T0, later(60)]) { vi.setSystemTime(at); expect(await catchUpRoutines(at)).toMatchObject({ created: 0, unexpanded: 0 }) }
+    expect(await db.tasks.count()).toBe(0)
+  })
+  it('旧「完了後」系列は完了1回につき次の1回だけ。未完了のまま長期未起動でも過去の回を積み上げない（generate_after_completion と同じ）', async () => {
+    const id = await createRoutine(routineInput('フィルター掃除', today(T0), { cadence: 'after_completion', interval: 7 }))
+    expect(legacyRoutineTrigger((await db.routines.get(id))!, '09:00')).toMatchObject({ kind: 'completion_relative', unfinishedPolicy: 'generate_after_completion' })
+    expect((await catchUpRoutines(T0)).created).toBe(1)
+    vi.setSystemTime(later(300))
+    expect((await catchUpRoutines(later(300))).created).toBe(0)
+    const [first] = await db.tasks.where('routineId').equals(id).toArray()
+    await completeTask(first.id, first.revision)
+    vi.setSystemTime(later(700))
+    expect((await catchUpRoutines(later(700))).created).toBe(1)
+    expect(await keys(id)).toEqual([`${id}:${today(T0)}`, `${id}:${addDays(today(later(300)), 7)}`].sort())
+    // Repeated launches deduplicate by generationKey.
+    expect((await catchUpRoutines(later(700))).created).toBe(0)
+    // N09 stop also holds the completion-relative next occurrence.
+    const second = (await db.tasks.where('generationKey').equals(`${id}:${addDays(today(later(300)), 7)}`).first())!
+    await completeTask(second.id, second.revision)
+    await reduceAuthority('routines', 'button')
+    expect((await catchUpRoutines(later(700))).created).toBe(0)
+    expect(await keys(id)).toHaveLength(2)
+  })
+  it('共通ルーティンへ移行済みの旧系列は、有効に戻っても catch-up・旧生成で旧キーの回を作り直さない', async () => {
+    await ownCalendar()
+    const id = await createRoutine(routineInput('毎日の点検', addDays(today(T0), -3)))
+    await expandRoutines(addDays(today(T0), -3), 5)
+    const proposal = await prepareLegacyRoutineConversion(id, selection)
+    await applyLegacyRoutineConversionFromUI(proposal, proposal.digest, humanClick())
+    const moved = (await db.tasks.where('routineId').equals(id).toArray()).map(task => task.generationKey).sort()
+    expect(moved.every(key => key.startsWith(`calendar:rule:${proposal.rule.id}:`))).toBe(true)
+    // e.g. an older edit path or restored row flips the legacy row back on.
+    const routine = (await db.routines.get(id))!; await db.routines.put({ ...routine, active: true })
+    vi.setSystemTime(later(60))
+    expect(await catchUpRoutines(later(60))).toMatchObject({ created: 0, unexpanded: 0 })
+    expect(await expandRoutines()).toBe(0)
+    expect((await db.tasks.where('routineId').equals(id).toArray()).map(task => task.generationKey).sort()).toEqual(moved)
+  })
 })

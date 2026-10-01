@@ -1,5 +1,5 @@
 import { db } from './db'
-import { addTask, expandRoutines, matchesRoutine, newTaskInput } from './commands'
+import { addTask, expandRoutines, legacyRoutineHandedOver, matchesRoutine, newTaskInput } from './commands'
 import { addDays, today, uid, validateDate, type Routine, type RoutineCatchupState, type RoutineCatchupSummary } from './domain'
 
 /** 5.4: one series materializes at most 1,000 occurrences per run; the oldest beyond that stay explicitly unexpanded. */
@@ -50,7 +50,8 @@ export async function catchUpRoutines(now = new Date()): Promise<RoutineCatchupS
   const gapPlans: { routine: Routine; date: string }[] = [], windowPlans: { routine: Routine; date: string }[] = []
   let unexpanded = 0, futureRows = 0
   for (const routine of await db.routines.toArray()) {
-    if (!routine.active || routine.cadence === 'after_completion') continue
+    // Completion-relative series advance one completion at a time (expandRoutines below), never by bulk past dates.
+    if (!routine.active || routine.cadence === 'after_completion' || await legacyRoutineHandedOver(routine.id)) continue
     const existing = new Set((await db.tasks.where('routineId').equals(routine.id).toArray()).flatMap(task => task.generationKey?.startsWith(`${routine.id}:`) ? [task.generationKey.slice(routine.id.length + 1)] : []))
     const stored = initial.checkpoints[routine.id], back = !!stored && stored > windowEnd
     let gapStart: string
