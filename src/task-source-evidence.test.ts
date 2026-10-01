@@ -50,7 +50,7 @@ describe('K11 タスク内の資料引用は資料の削除・期限・保存許
     expect(await db.tasks.get(taskId)).toEqual(before.task)
     expect(await db.completions.toArray()).toEqual(before.completions); expect(await db.ledger.toArray()).toEqual(before.ledger); expect(await db.assessments.toArray()).toEqual(before.assessments)
     expect(await db.taskSourceEvidence.count()).toBe(0)
-    expect(await taskEvidenceDisplay((await db.tasks.get(taskId))!)).toMatchObject({ quotes: [], erasedSourceIds: [sourceId], legacy: 'none' })
+    expect(await taskEvidenceDisplay((await db.tasks.get(taskId))!)).toMatchObject({ quotes: [], erasedSourceIds: [sourceId], deletedSourceIds: [sourceId], legacy: 'none' })
     expect(await everyTable()).not.toContain(quoteFragment)
   })
   it.each([
@@ -62,6 +62,7 @@ describe('K11 タスク内の資料引用は資料の削除・期限・保存許
     else await setSourcePermissions(sourceId, source.revision, { ...source.permissions, [path]: false }, source.allowedModels, source.retentionUntil)
     expect(await db.taskSourceEvidence.count()).toBe(0)
     expect(await db.tasks.get(taskId)).toMatchObject({ title: '非公開見積を送る', dueDate: '2026-10-02', status: 'open' })
+    expect(await taskEvidenceDisplay((await db.tasks.get(taskId))!)).toMatchObject({ quotes: [], erasedSourceIds: [sourceId], deletedSourceIds: path === 'expire' ? [sourceId] : [] })
     // index=false keeps the owner's retained original; only derived copies must be gone.
     if (path === 'index') expect(JSON.stringify([await db.tasks.toArray(), await db.commands.toArray(), await db.audits.toArray(), await db.sourceArtifacts.toArray()])).not.toContain(quoteFragment)
     else expect(await everyTable()).not.toContain(quoteFragment)

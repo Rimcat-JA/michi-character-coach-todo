@@ -5,7 +5,7 @@ import type { ContextSource } from './source-library'
 export type TaskSourceEvidence = { id: string; ownerId: string; datasetId: string; taskId: string; sourceId: string; snapshotRevision: number; permissionRevision: number; spanId: string; quote: string; quoteSha256: string; supports: string[]; runId: string; candidateId: string; createdAt: string }
 export type LegacyDetectionNotes = { detector: string; verifier: string; basis: string; state: string; citations: { sourceId: string; revision: number; spanId: string; quote: string }[]; dueRaw: string | null }
 export type LegacyNotesState = 'none' | 'exact' | 'edited'
-export type TaskEvidenceDisplay = { quotes: (TaskSourceEvidence & { sourceTitle: string })[]; erasedSourceIds: string[]; legacy: LegacyNotesState }
+export type TaskEvidenceDisplay = { quotes: (TaskSourceEvidence & { sourceTitle: string })[]; erasedSourceIds: string[]; deletedSourceIds: string[]; legacy: LegacyNotesState }
 export type LegacyMigrationResult = { migrated: number; movedQuotes: number; erasedQuotes: number; review: number }
 
 // Exact shape written by detection-run.ts before evidence rows existed (one span per citation line).
@@ -121,7 +121,8 @@ export async function taskEvidenceDisplay(task: Task): Promise<TaskEvidenceDispl
   const ids = [...new Set([...rows.map(row => row.sourceId), ...(approval ? [approval.sourceId] : [])])], sources = new Map((await db.contextSources.bulkGet(ids)).filter((source): source is ContextSource => Boolean(source)).map(source => [source.id, source]))
   const usable = (id: string) => Boolean(settings && sourceEvidenceUsable(sources.get(id), settings.profileId, now))
   const quotes = rows.filter(row => settings && row.ownerId === settings.profileId && usable(row.sourceId)).sort((left, right) => left.id.localeCompare(right.id)).map(row => ({ ...row, sourceTitle: sources.get(row.sourceId)!.title }))
-  return { quotes, erasedSourceIds: ids.filter(id => !usable(id) && !quotes.some(row => row.sourceId === id)), legacy: legacyNotesState(task.notes) }
+  const erasedSourceIds = ids.filter(id => !usable(id) && !quotes.some(row => row.sourceId === id))
+  return { quotes, erasedSourceIds, deletedSourceIds: erasedSourceIds.filter(id => !sources.get(id) || Boolean(sources.get(id)!.deletedAt)), legacy: legacyNotesState(task.notes) }
 }
 
 const timestamp = (value: unknown) => typeof value === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value) && new Date(value).toISOString() === value

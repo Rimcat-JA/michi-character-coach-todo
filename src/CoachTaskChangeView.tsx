@@ -3,6 +3,7 @@ import ChangeSetPreview from './ChangeSetPreview'
 import { cancelChangeSet, changePolicyFor, prepareTaskChanges, taskChangeFields, type ChangeContext, type ChangeReceipt, type PreparedChangeSet, type TaskChangeField, type TaskChangePatch, type TaskFieldOrigin } from './change-set'
 import { parseCoachTaskChange, prepareCoachTaskChange, prepareCoachTaskRequest, type CoachTaskSnapshot } from './coach-task-change'
 import { confirmTaskInstructionFromUI } from './task-user-instruction'
+import { egressNotice } from './egress-policy'
 import { today, type Settings, type Task } from './domain'
 
 type Draft = { snapshot:CoachTaskSnapshot; title:string; notes:string; scheduledDate:string|null; dueDate:string|null; points:string; fields:TaskChangeField[]; origin:'manual'|'ai'; model:string|null; fieldOrigins:Partial<Record<TaskChangeField,TaskFieldOrigin>> }
@@ -41,14 +42,14 @@ export default function CoachTaskChangeView({selectedTask,settings,onEdit,onAppl
     const base=fromTask(selectedTask),referenceDate=today(),model=settings.aiModel!,token=++generation.current
     setBusy(true);setNotice('')
     try{
-      const {request}=await prepareCoachTaskRequest(selectedTask,instruction,model,referenceDate,Intl.DateTimeFormat().resolvedOptions().timeZone)
+      const {request,egress}=await prepareCoachTaskRequest(selectedTask,instruction,model,referenceDate,Intl.DateTimeFormat().resolvedOptions().timeZone)
       if(token!==generation.current)throw new Error('送信前に対象・版・AI設定が変わりました。新しい内容で相談してください。')
       const answer=await bridge!(request)
       if(token!==generation.current)throw new Error('候補待ちの間に対象・版・AI設定が変わりました。新しい内容で相談してください。')
       const proposal=parseCoachTaskChange(answer,base.snapshot,instruction,referenceDate)
       const fields=Object.keys(proposal.patch) as TaskChangeField[]
       setDraft({...base,...proposal.patch,points:proposal.patch.manualPoints===undefined?base.points:String(proposal.patch.manualPoints),fields,origin:'ai',model,fieldOrigins:Object.fromEntries(fields.map(field=>[field,'agent_proposal']))})
-      setNotice('変更候補を作りました。まだ適用していません。本人の指定値を確認してください。')
+      setNotice(`変更候補を作りました。まだ適用していません。本人の指定値を確認してください。${egressNotice(egress)??''}`)
     }catch(error){setNotice(`${error instanceof Error?error.message:String(error)} 相談文と入力欄は残っています。`)}
     finally{setBusy(false)}
   }

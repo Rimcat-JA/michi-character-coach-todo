@@ -9,7 +9,7 @@ import { clearDetectionAuthority } from './detection-run'
 import { prepareCoachTaskRequest } from './coach-task-change'
 import { createFileBridgeController } from './file-bridge-commands'
 import type { FileBridgeGateway, FileBridgeRegistration, FileBridgeStatus } from './file-bridge-types'
-import { ownerNotesForEgress, scoreAssistText } from './egress-policy'
+import { egressNotice, ownerNotesForEgress, scoreAssistText } from './egress-policy'
 import { adoptDetectedTask, enableSyntheticAI, humanClick, importWorkSlack, otherModel, quoteModel, secretQuote } from './source-quote-fixtures'
 
 beforeEach(async () => { await db.delete(); await db.open(); await ensureSettings(); await enableSyntheticAI(); clearDetectionAuthority(); clearCoachTurnAuthority(); clearChangeSetAuthority() })
@@ -54,6 +54,7 @@ describe('K08 資料由来の引用は資料ごとの許可がない送信経路
     for (const route of ['chat', 'change', 'score', 'bridge']) expect(payloads[route], route).not.toContain('顧客ZETA')
     expect(preview).toMatchObject({ withheldQuotes: 1, notesWithheld: false })
     expect(preview.sources.map(ref => ref.kind)).toEqual(['task'])
+    expect(egressNotice(preview)).toBe('資料由来の引用1件は送信対象外です。'); expect(egressNotice({ withheldQuotes: 0, notesWithheld: false })).toBeNull()
     const audits = (await db.audits.toArray()).filter(audit => audit.operation.startsWith('egress.'))
     expect(audits.map(audit => audit.operation).sort()).toEqual(['egress.coach-chat', 'egress.coach-task-change', 'egress.file-bridge'])
     expect(JSON.stringify(audits)).not.toContain('顧客ZETA'); expect(JSON.parse(audits.find(audit => audit.operation === 'egress.coach-chat')!.detail)).toMatchObject({ destination: 'openrouter', model: quoteModel, tasks: [{ taskId, withheldSourceIds: [sourceId], withheldQuotes: 1 }] })

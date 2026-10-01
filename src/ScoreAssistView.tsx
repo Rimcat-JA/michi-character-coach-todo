@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { useLiveQuery } from 'dexie-react-hooks'
 import { calculateScore, type ScoreInput, type Settings } from './domain'
 import { db } from './db'
 import { egressNotice, recordEgressAudit, type OwnerNotesEgress } from './egress-policy'
@@ -15,6 +16,9 @@ export default function ScoreAssistView({ score, onAccepted, onProvenance, setti
   const [busy, setBusy] = useState(false)
   const [notice, setNotice] = useState('')
   const available = Boolean(settings.aiEnabled && settings.aiModel && window.michiAI?.assessScore)
+  // Evidence rows are never part of selectedText; they are counted so the notice states what stays home.
+  const evidenceCount = useLiveQuery(() => taskId ? db.taskSourceEvidence.where('taskId').equals(taskId).count() : 0, [taskId]) ?? 0
+  const withheld: OwnerNotesEgress = { notes: egress?.notes ?? '', withheldQuotes: (egress?.withheldQuotes ?? 0) + evidenceCount, notesWithheld: egress?.notesWithheld ?? false }
   const stale = Boolean(proposal && (proposal.sourceText !== selectedText || proposal.scoreSnapshot !== JSON.stringify(score)))
   let preview = null
   let validationError = ''
@@ -34,7 +38,7 @@ export default function ScoreAssistView({ score, onAccepted, onProvenance, setti
     const snapshot = JSON.stringify(score)
     setBusy(true); setNotice(''); setProposal(null)
     try {
-      await db.transaction('rw', db.audits, () => recordEgressAudit({ kind: 'ai-model', route: 'score-assist', model }, [{ taskId, egress: egress ?? { notes: '', withheldQuotes: 0, notesWithheld: false } }]))
+      await db.transaction('rw', db.audits, () => recordEgressAudit({ kind: 'ai-model', route: 'score-assist', model }, [{ taskId, egress: withheld }]))
       const answer = await window.michiAI!.assessScore({ model, text: sourceText })
       const candidate = parseScoreCandidate(sourceText, answer)
       setProposal({ candidate, edited: { ...candidate.values }, selected: scoreAttributeKeys.filter(field => score[field] === null && candidate.values[field] !== null), scoreSnapshot: snapshot, sourceText, model })
@@ -62,7 +66,7 @@ export default function ScoreAssistView({ score, onAccepted, onProvenance, setti
   return <section className="card score-assist">
     <h3>AIで負荷属性を見積もる</h3>
     <p className="muted">このタスクの選択本文だけをOpenRouterへ送ります。候補の点数は端末内の式 v1で計算し、採用した属性と根拠を保存時に記録します。資料から検出したタスクの引用（資料の根拠）は送りません。</p>
-    {egress && egressNotice(egress) && <p role="note">{egressNotice(egress)}</p>}
+    {egressNotice(withheld) && <p role="note">{egressNotice(withheld)}</p>}
     <details><summary>見積もりに使う選択本文</summary><p style={{ whiteSpace: 'pre-wrap' }}>{selectedText || '本文がありません'}</p></details>
     <p>現在の必要ポイント：{currentLabel}</p>
     {!available && <p className="muted">AIは停止中、またはこの環境では利用できません。属性は通常の編集欄から入力できます。</p>}
