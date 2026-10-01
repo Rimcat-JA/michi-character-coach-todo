@@ -5,6 +5,7 @@ import { clearCoachTurnAuthority } from './chat-history'
 import { clearCalendarRulesAuthority } from './calendar-rules-save'
 import { clearRoutineAssistanceAuthority } from './routine-assist-save'
 import { clearCompletionReconfirmationAuthority } from './completion-reconfirmation'
+import { clearCalendarCSVImportAuthority } from './calendar-csv-import-save'
 import { invalidateExternalConnection } from './external-connection'
 
 export async function updateAIConnection(enabled: boolean, model?: string) {
@@ -23,5 +24,6 @@ export async function updateAIConnection(enabled: boolean, model?: string) {
   clearCalendarRulesAuthority()
   clearRoutineAssistanceAuthority()
   clearCompletionReconfirmationAuthority()
+  clearCalendarCSVImportAuthority()
   await invalidateExternalConnection()
 }

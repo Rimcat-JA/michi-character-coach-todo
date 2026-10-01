@@ -1,0 +1,31 @@
+.calendar-csv-import { min-width: 0; margin-top: 20px; }
+.calendar-csv-import :is(p, label, dt, dd, li, span, small, code, summary, h3, h4) { min-width: 0; overflow-wrap: anywhere; }
+.calendar-csv-import details { margin: 12px 0 18px; border: 1px solid #e9e5f3; border-radius: 9px; padding: 12px; }
+.calendar-csv-import details p { margin: 10px 0; }
+.calendar-csv-import pre { white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; font-size: 12px; line-height: 1.6; margin: 9px 0 0; }
+.calendar-csv-import .csv-form, .calendar-csv-import .csv-values { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.calendar-csv-import .csv-form > *, .calendar-csv-import .csv-values > * { min-width: 0; }
+.calendar-csv-import .csv-full { grid-column: 1 / -1; }
+.calendar-csv-import :is(input:not([type=checkbox]), select) { width: 100%; max-width: 100%; min-width: 0; box-sizing: border-box; }
+.calendar-csv-import .csv-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 14px; }
+.calendar-csv-import .csv-actions button, .calendar-csv-import .field button { max-width: 100%; white-space: normal; min-height: 44px; padding: 9px 16px; overflow-wrap: anywhere; }
+.calendar-csv-import .csv-preview { border-top: 1px solid #e8e4f2; margin-top: 18px; padding-top: 18px; }
+.calendar-csv-import .csv-preview h3 { margin: 0 0 12px; }
+.calendar-csv-import .csv-values { margin: 14px 0; }
+.calendar-csv-import .csv-values > div { min-width: 0; border: 1px solid #ebe7f4; border-radius: 9px; padding: 12px; }
+.calendar-csv-import dt { font-size: 12px; color: #666477; margin-bottom: 7px; }
+.calendar-csv-import dd { margin: 0; }
+.calendar-csv-import small, .calendar-csv-import :is(.csv-rows, .csv-changes) li > span { display: block; margin-top: 5px; font-size: 12px; line-height: 1.6; }
+.calendar-csv-import :is(.csv-rows, .csv-changes) { list-style: none; margin: 0; padding: 0; display: grid; gap: 9px; }
+.calendar-csv-import :is(.csv-rows, .csv-changes) li { min-width: 0; background: #f8f7fc; padding: 12px; border-radius: 9px; }
+.calendar-csv-import .csv-fingerprint { display: block; margin-top: 6px; font-size: 11px; }
+.calendar-csv-import .csv-warning { background: #fff8e8; border-radius: 9px; padding: 12px; }
+.calendar-csv-import .csv-check { display: flex; align-items: flex-start; gap: 10px; margin: 16px 0; font-size: 13px; line-height: 1.7; }
+.calendar-csv-import .csv-check input { width: 18px; height: 18px; min-height: 18px; flex: 0 0 18px; padding: 0; margin: 3px 0 0; }
+.calendar-csv-import .csv-notice { margin: 14px 0 0; }
+.calendar-csv-import .csv-notice:empty { margin: 0; }
+.calendar-csv-import .csv-retire .field { display: block; max-width: 520px; }
+@media (max-width: 600px) {
+  .calendar-csv-import .csv-form, .calendar-csv-import .csv-values { grid-template-columns: minmax(0, 1fr); }
+  .calendar-csv-import .csv-full { grid-column: auto; }
+}

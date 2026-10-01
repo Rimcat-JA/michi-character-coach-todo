@@ -7,7 +7,13 @@ export type BusinessCalendar = { id: string; contextId: string; name: string; we
 export type CalendarActivity = { id: string; contextId: string; bindingId: string; calendarId: string; title: string; eventKind: 'class' | 'meeting' | 'other'; weekdays: number[]; startTime: string; endTime: string; endDayOffset: number; validFrom: string; validTo: string; revision: number }
 export type ICSComponentVersion = { uid: string; recurrenceId: string | null; sequence: number; dtstamp: string; lastModified: string | null; digest: string }
 export type ICSImportMetadata = { feedId: string; readOnly: true; retentionUntil: string | null; snapshots: { revision: number; sha256: string; originalText: string | null; importedAt: string; fromDate: string; toDate: string }[]; components: ICSComponentVersion[] }
-export type ScheduleSource = { id: string; contextId: string; title: string; authorityScope: 'calendar' | 'activity' | 'roster'; coverageFrom: string; coverageTo: string; status: 'current' | 'stale'; revision: number; importedAt: string; bodyHash: string; ics?: ICSImportMetadata }
+/** Roster rows keep the local wall times read from the file, so evidence checks do not depend on later time-zone rule updates. */
+export type CSVRecordValue = { kind: 'calendar'; date: string; status: 'open' | 'closed' | 'withdrawn' } | { kind: 'roster'; status: 'scheduled' | 'cancelled'; startAt: string; endAt: string; startLocal: string; endLocal: string }
+export type CSVRowEvidence = { recordId: string; recordRevision: number; value: CSVRecordValue; digest: string; factId: string | null; rowIndex: number; lineStart: number; lineEnd: number; byteStart: number; byteEnd: number; quote: string | null; quoteSha256: string }
+export type CSVRecordHead = { recordId: string; recordRevision: number; digest: string; factId: string | null; status: 'current' | 'expired' | 'withdrawn'; snapshotRevision: number; rowIndex: number }
+export type CSVImportSnapshot = { revision: number; fingerprint: string; bodyHash: string; importedAt: string; fromDate: string; toDate: string; retentionUntil: string | null; rows: CSVRowEvidence[] }
+export type CSVImportMetadata = { format: 'calendar' | 'roster'; feedId: string; readOnly: true; retentionUntil: string | null; retiredAt: string | null; target: { bindingId: string; bindingRevision: number; calendarId: string; activityId: string | null; timezone: string; personRef: string | null; personRefHash: string | null }; heads: CSVRecordHead[]; snapshots: CSVImportSnapshot[] }
+export type ScheduleSource = { id: string; contextId: string; title: string; authorityScope: 'calendar' | 'activity' | 'roster'; coverageFrom: string; coverageTo: string; status: 'current' | 'stale'; revision: number; importedAt: string; bodyHash: string; ics?: ICSImportMetadata; csv?: CSVImportMetadata }
 type FactBase = { id: string; sourceId: string; contextId: string; revision: number; validity: 'active' | 'withdrawn'; supersedes: string[] }
 export type ScheduleFact = FactBase & (
   { kind: 'open'; calendarId: string; date: string } |
@@ -68,7 +74,21 @@ function dates(from: string, to: string, maximum = 366): string[] {
   return Array.from({ length: count + 1 }, (_, day) => addDays(from, day))
 }
 function activeFacts(state: CalendarRulesState, contextId: string) {
-  return state.facts.filter(fact => fact.contextId === contextId && fact.validity === 'active' && state.sources.some(source => source.id === fact.sourceId && source.contextId === contextId && source.status === 'current'))
+  const at = new Date().toISOString()
+  return state.facts.filter(fact => fact.contextId === contextId && fact.validity === 'active' && state.sources.some(source => source.id === fact.sourceId && source.contextId === contextId && source.status === 'current' && (!source.csv || !source.csv.retiredAt && source.csv.heads.some(head => head.factId === fact.id && head.recordRevision === fact.revision && head.status === 'current' && csvHeadHasRetainedEvidence(source.csv!, head, at)))))
+}
+/** Feed-independent CSV shift key, scoped by activity so equal shift IDs of different rosters never meet (kept under the 200-character ID limit). */
+export const csvRosterTriggerKey = (activityId: string, recordId: string) => `roster-csv:${activityId}:${recordId.slice('sha256:'.length, 'sha256:'.length + 40)}`
+/** The earliest deadline the person chose applies to every stored copy; a later import can shorten but never extend it. */
+export function csvSnapshotRetentionUntil(csv: Pick<CSVImportMetadata, 'retentionUntil'>, snapshot: Pick<CSVImportSnapshot, 'retentionUntil'>): string | null {
+  return [snapshot.retentionUntil, csv.retentionUntil].filter((value): value is string => value !== null).sort()[0] ?? null
+}
+/** A retained quote establishes a current record; a fingerprint alone cannot restore it. */
+export function csvHeadHasRetainedEvidence(csv: CSVImportMetadata, head: CSVRecordHead, at = new Date().toISOString()): boolean {
+  if (head.status === 'expired') return false
+  const snapshot = csv.snapshots.find(row => row.revision === head.snapshotRevision)
+  const evidence = snapshot?.rows.find(row => row.rowIndex === head.rowIndex), until = snapshot ? csvSnapshotRetentionUntil(csv, snapshot) : null
+  return Boolean(snapshot && (until === null || until > at) && evidence && evidence.quote !== null && evidence.recordId === head.recordId && evidence.recordRevision === head.recordRevision && evidence.digest === head.digest && evidence.factId === head.factId)
 }
 function unsuperseded<T extends ScheduleFact>(facts: T[]): T[] {
   return facts.filter(fact => !facts.some(other => other.id !== fact.id && other.supersedes.includes(fact.id)))
@@ -81,6 +101,28 @@ function businessStatus(calendar: BusinessCalendar, date: string, facts: Schedul
 function applicable(state: CalendarRulesState, contextId: string, bindingId: string, date: string) {
   const context = state.contexts.find(item => item.id === contextId), binding = state.bindings.find(item => item.id === bindingId && item.contextId === contextId)
   return context && binding && binding.confirmed && binding.personId === state.ownerId && inRange(date, context.validFrom, context.validTo) && inRange(date, binding.validFrom, binding.validTo) ? { context, binding } : null
+}
+function csvSourceNeedsReview(state: CalendarRulesState, source: ScheduleSource, from: string, to: string, at: string) {
+  const csv = source.csv
+  // A source the person retired contributes no facts and no longer holds its series for review.
+  if (!csv || csv.retiredAt) return false
+  const overlaps = (left: string, right: string) => left <= to && right >= from
+  const binding = state.bindings.find(row => row.id === csv.target.bindingId && row.contextId === source.contextId)
+  const context = state.contexts.find(row => row.id === source.contextId)
+  // Only the fields the CSV target depends on count as drift; unrelated binding edits do not hold the series.
+  const drifted = !binding?.confirmed || binding.personId !== state.ownerId || context?.timezone !== csv.target.timezone || csv.format === 'roster' && (binding.personRef !== csv.target.personRef || !binding.activityIds.includes(csv.target.activityId!))
+  if ((source.status === 'stale' || drifted) && overlaps(source.coverageFrom, source.coverageTo)) return true
+  return csv.heads.some(head => {
+    if (csvHeadHasRetainedEvidence(csv, head, at)) return false
+    const fact = state.facts.find(row => row.id === head.factId)
+    if (fact && 'date' in fact) return inRange(fact.date, from, to)
+    if (fact?.kind === 'roster_assignment') return overlaps(calendarDateAt(fact.startAt, csv.target.timezone), calendarDateAt(fact.endAt, csv.target.timezone))
+    const snapshot = csv.snapshots.find(row => row.revision === head.snapshotRevision)
+    const evidence = snapshot?.rows.find(row => row.rowIndex === head.rowIndex)
+    if (evidence?.value.kind === 'calendar') return inRange(evidence.value.date, from, to)
+    if (evidence?.value.kind === 'roster') return overlaps(calendarDateAt(evidence.value.startAt, csv.target.timezone), calendarDateAt(evidence.value.endAt, csv.target.timezone))
+    return Boolean(snapshot && overlaps(snapshot.fromDate, snapshot.toDate))
+  })
 }
 
 export function resolveCalendarOccurrences(state: CalendarRulesState, from: string, to: string, retainedKeys: string[] = []): ResolverResult {
@@ -99,7 +141,8 @@ export function resolveCalendarOccurrences(state: CalendarRulesState, from: stri
     const ownBinding = state.bindings.find(item => item.id === activity.bindingId && item.contextId === context.id)
     if (!ownBinding?.confirmed || ownBinding.personId !== state.ownerId || !ownBinding.activityIds.includes(activity.id)) { blocked.add(`activity:${activity.id}`); conflict(`activity:${activity.id}`, activity.contextId, '活動と本人の適用条件を確認してください'); continue }
     const facts = activeFacts(state, activity.contextId)
-    if (state.sources.some(source => source.contextId === activity.contextId && source.status === 'stale' && !source.ics)) { blocked.add(`activity:${activity.id}`); conflict(`activity:${activity.id}`, activity.contextId, '資料の取得状態が古いため、休業・取消と判断しません'); continue }
+    if (state.sources.some(source => source.contextId === activity.contextId && source.status === 'stale' && !source.ics && !source.csv)) { blocked.add(`activity:${activity.id}`); conflict(`activity:${activity.id}`, activity.contextId, '資料の取得状態が古いため、休業・取消と判断しません'); continue }
+    if (state.sources.some(source => source.contextId === activity.contextId && source.csv && (source.csv.format === 'calendar' && source.csv.target.calendarId === activity.calendarId || source.csv.format === 'roster' && source.csv.target.activityId === activity.id) && csvSourceNeedsReview(state, source, expandedFrom, expandedTo, evaluatedAt))) { blocked.add(`activity:${activity.id}`); conflict(`activity:${activity.id}`, activity.contextId, 'CSV資料の行の保持期限・本人適用・版を確認してください。欠落は予定の取消と判断しません'); continue }
     const externalForActivity = state.facts.filter((fact): fact is Extract<ScheduleFact, { kind: 'external_event' }> => fact.kind === 'external_event' && fact.activityId === activity.id)
     if (externalForActivity.some(fact => state.sources.some(source => source.id === fact.sourceId && (source.status === 'stale' || source.ics?.retentionUntil !== null && source.ics?.retentionUntil !== undefined && source.ics.retentionUntil <= evaluatedAt)))) { blocked.add(`activity:${activity.id}`); conflict(`activity:${activity.id}`, activity.contextId, 'ICSの保持期限・取得状態を確認してください。予定の取消とは判断しません'); continue }
     function emit(triggerKey: string, date: string, selectedFacts: ScheduleFact[], explicitTimes?: { startAt: string; endAt: string }) {
@@ -143,12 +186,20 @@ export function resolveCalendarOccurrences(state: CalendarRulesState, from: stri
       if (activity.weekdays.includes(fact.patternWeekday) && binding?.weekdays.includes(fact.patternWeekday)) emit(`substitute:${fact.id}`, fact.date, [fact])
     }
     const binding = state.bindings.find(item => item.id === activity.bindingId)
-    const rosterFacts = facts.filter((fact): fact is Extract<ScheduleFact, { kind: 'roster_assignment' }> => fact.kind === 'roster_assignment' && fact.activityId === activity.id && fact.published && Boolean(binding?.confirmed && binding.personId === state.ownerId && binding.personRef !== null && fact.personRef === binding.personRef))
-    for (const identity of new Set(rosterFacts.map(fact => `${fact.sourceId}:${fact.externalId}`))) {
-      const candidates = unsuperseded(rosterFacts.filter(fact => `${fact.sourceId}:${fact.externalId}` === identity)), fact = candidates[0]
+    const rosterFacts = facts.filter((fact): fact is Extract<ScheduleFact, { kind: 'roster_assignment' }> => {
+      if (fact.kind !== 'roster_assignment' || fact.activityId !== activity.id || !fact.published || !binding?.confirmed || binding.personId !== state.ownerId || binding.personRef === null) return false
+      const csv = state.sources.find(source => source.id === fact.sourceId)?.csv
+      return csv ? csv.format === 'roster' && csv.target.bindingId === binding.id && csv.target.personRef === binding.personRef && fact.personRef === csv.target.personRefHash : fact.personRef === binding.personRef
+    })
+    // CSV shifts are identified by the stable external record, not by the feed, so a replacement feed
+    // updates the same occurrence and two feeds reporting one shift differently become a conflict.
+    const rosterIdentity = (fact: Extract<ScheduleFact, { kind: 'roster_assignment' }>) => state.sources.find(source => source.id === fact.sourceId)?.csv ? `csv:${fact.externalId}` : `${fact.sourceId}:${fact.externalId}`
+    for (const identity of new Set(rosterFacts.map(rosterIdentity))) {
+      const candidates = unsuperseded(rosterFacts.filter(fact => rosterIdentity(fact) === identity)), fact = candidates[0]
       if (!fact) continue
-      if (new Set(candidates.map(candidate => `${candidate.status}:${candidate.startAt}:${candidate.endAt}`)).size > 1) { blocked.add(`activity:${activity.id}`); conflict(`roster:${identity}`, context.id, '同じ本人シフトの日時・取消状態が矛盾しています', candidates); continue }
-      const date = calendarDateAt(fact.startAt, context.timezone), triggerKey = `roster:${identity}`
+      const triggerKey = identity.startsWith('csv:') ? csvRosterTriggerKey(activity.id, identity.slice(4)) : `roster:${identity}`
+      if (new Set(candidates.map(candidate => `${candidate.status}:${candidate.startAt}:${candidate.endAt}`)).size > 1) { blocked.add(`activity:${activity.id}`); conflict(triggerKey, context.id, '同じ本人シフトの日時・取消状態が矛盾しています', candidates); continue }
+      const date = calendarDateAt(fact.startAt, context.timezone)
       if (!inRange(date, expandedFrom, expandedTo) && !retainedKeys.some(key => key.includes(`:${triggerKey}`))) continue
       if (fact.status === 'cancelled') cancel(triggerKey, '本人の公開勤務割当が取消された', candidates)
       else emit(triggerKey, date, candidates, fact)
@@ -169,14 +220,6 @@ export function resolveCalendarOccurrences(state: CalendarRulesState, from: stri
     }
   }
 
-  function chosenEdition(base: CalendarRule, key: string, triggerKey: string, date: string) {
-    let selected = -1
-    for (const [index, edition] of (base.editions ?? []).entries()) {
-      const scope = edition.scope, anchorDate = triggerKey.startsWith('anchor:') ? triggerKey.slice(7) : date
-      if (scope.kind === 'all_uncompleted' || scope.kind === 'this_instance' && scope.generationKey === key || scope.kind === 'this_and_future' && (triggerKey.startsWith('month:') ? triggerKey.slice(6) >= scope.fromDate.slice(0, 7) : anchorDate >= scope.fromDate)) selected = index
-    }
-    return selected
-  }
   for (const { base, editionIndex, rule } of versions) {
     if (!rule.enabled) continue
     const context = state.contexts.find(item => item.id === rule.contextId), calendar = state.calendars.find(item => item.id === rule.calendarId && item.contextId === rule.contextId)
@@ -184,8 +227,14 @@ export function resolveCalendarOccurrences(state: CalendarRulesState, from: stri
     const binding = state.bindings.find(item => item.id === rule.bindingId && item.contextId === context.id)
     if (!binding?.confirmed || binding.personId !== state.ownerId) { blocked.add(`rule:${rule.id}`); conflict(`rule:${rule.id}`, context.id, 'ルールの本人適用を確認してください'); continue }
     const facts = activeFacts(state, context.id)
-    if (rule.trigger.kind !== 'weekly' && state.sources.some(source => source.contextId === context.id && source.status === 'stale')) { blocked.add(`rule:${rule.id}`); conflict(`rule:${rule.id}`, rule.contextId, '資料取得が古いため、新しい回・取消を確定しません'); continue }
-    const triggers: { key: string; at: string; sourceRefs: FactRef[]; activityId: string | null }[] = []
+    if (rule.trigger.kind !== 'weekly' && state.sources.some(source => source.contextId === context.id && source.status === 'stale' && !source.csv)) { blocked.add(`rule:${rule.id}`); conflict(`rule:${rule.id}`, rule.contextId, '資料取得が古いため、新しい回・取消を確定しません'); continue }
+    // Monthly rules are reviewed over exactly the months they evaluate, not the neighbouring months of the ±1-day window.
+    const stepOffsets = rule.steps.map(step => step.scheduledOffsetDays), monthlyFrom = addDays(from, -Math.max(0, ...stepOffsets)), monthlyTo = addDays(to, -Math.min(0, ...stepOffsets))
+    const calendarFrom = rule.trigger.kind === 'monthly_business' ? `${monthlyFrom.slice(0, 7)}-01` : expandedFrom
+    const calendarTo = rule.trigger.kind === 'monthly_business' ? new Date(Date.UTC(Number(monthlyTo.slice(0, 4)), Number(monthlyTo.slice(5, 7)), 0)).toISOString().slice(0, 10) : expandedTo
+    if (state.sources.some(source => source.contextId === context.id && source.csv && (source.csv.format === 'calendar' && source.csv.target.calendarId === rule.calendarId || source.csv.format === 'roster' && rule.trigger.kind === 'activity_relative' && source.csv.target.activityId === rule.trigger.activityId) && csvSourceNeedsReview(state, source, calendarFrom, calendarTo, evaluatedAt))) { blocked.add(`rule:${rule.id}`); conflict(`rule:${rule.id}`, rule.contextId, 'CSV資料の行の保持期限・本人適用・版を確認してください。新しい回と取消を確定しません'); continue }
+    // editionDate is the date each version gate uses, so the step and its trigger pick the same rule version.
+    const triggers: { key: string; at: string; editionDate: string; sourceRefs: FactRef[]; activityId: string | null }[] = []
     if (rule.trigger.kind === 'activity_relative') {
       const trigger = rule.trigger
       if (blocked.has(`activity:${trigger.activityId}`)) { blocked.add(`rule:${rule.id}`); continue }
@@ -195,7 +244,7 @@ export function resolveCalendarOccurrences(state: CalendarRulesState, from: stri
         const shifted = shiftCalendarDays(edge, trigger.offsetDays, context.timezone)
         if (!shifted.at) { blocked.add(`rule:${rule.id}`); conflict(`rule:${rule.id}:${event.triggerKey}`, context.id, shifted.reason!); continue }
         const at = new Date(Date.parse(shifted.at) + trigger.offsetMinutes * 60000).toISOString()
-        triggers.push({ key: event.triggerKey, at, sourceRefs: event.sourceRefs, activityId: trigger.activityId })
+        triggers.push({ key: event.triggerKey, at, editionDate: calendarDateAt(event.startAt!, context.timezone), sourceRefs: event.sourceRefs, activityId: trigger.activityId })
       }
       for (const cancelled of activityCancels.filter(item => item.activityId === trigger.activityId)) for (const step of rule.steps) cancellations.push({ generationKey: `calendar:rule:${rule.id}:${cancelled.triggerKey}:${step.key}`, reason: cancelled.reason, sourceRefs: cancelled.sourceRefs })
     } else if (rule.trigger.kind === 'weekly') {
@@ -203,15 +252,16 @@ export function resolveCalendarOccurrences(state: CalendarRulesState, from: stri
         if (!rule.steps.some(step => chosenEdition(base, `calendar:rule:${rule.id}:anchor:${date}:${step.key}`, `anchor:${date}`, date) === editionIndex)) continue
         const wall = resolveLocalCalendarTime(date, rule.trigger.time, context.timezone)
         if (!wall.at) { blocked.add(`rule:${rule.id}`); conflict(`rule:${rule.id}:${date}`, context.id, wall.reason!); continue }
-        triggers.push({ key: `anchor:${date}`, at: wall.at, sourceRefs: [], activityId: null })
+        triggers.push({ key: `anchor:${date}`, at: wall.at, editionDate: date, sourceRefs: [], activityId: null })
       }
     } else {
-      const stepOffsets = rule.steps.map(step => step.scheduledOffsetDays)
-      const monthlyWindow = dates(addDays(from, -Math.max(0, ...stepOffsets)), addDays(to, -Math.min(0, ...stepOffsets)), 1098)
+      const monthlyWindow = dates(monthlyFrom, monthlyTo, 1098)
       const months = new Set(monthlyWindow.map(date => date.slice(0, 7)))
       for (const month of months) {
         const first = `${month}-01`, last = new Date(Date.UTC(Number(month.slice(0, 4)), Number(month.slice(5, 7)), 0)).toISOString().slice(0, 10)
         if (!rule.steps.some(step => chosenEdition(base, `calendar:rule:${rule.id}:month:${month}:${step.key}`, `month:${month}`, first) === editionIndex)) continue
+        // A month the rule does not cover at all produces nothing; it is not a missing calendar.
+        if (last < rule.validFrom || first > rule.validTo) continue
         if (first < calendar.validFrom || last > calendar.validTo) { blocked.add(`rule:${rule.id}`); conflict(`rule:${rule.id}:${month}`, context.id, '月全体の本人選択カレンダーが未取得・未設定です'); continue }
         const statuses = dates(first, last).map(date => ({ date, ...businessStatus(calendar, date, facts) }))
         const contradictions = statuses.filter(status => status.conflict)
@@ -221,7 +271,7 @@ export function resolveCalendarOccurrences(state: CalendarRulesState, from: stri
         if (!inRange(chosen.date, expandedFrom, expandedTo) && !rule.steps.some(step => retainedKeys.includes(`calendar:rule:${rule.id}:month:${month}:${step.key}`))) continue
         const wall = resolveLocalCalendarTime(chosen.date, rule.trigger.time, context.timezone)
         if (!wall.at) { blocked.add(`rule:${rule.id}`); conflict(`rule:${rule.id}:${month}`, context.id, wall.reason!); continue }
-        triggers.push({ key: `month:${month}`, at: wall.at, sourceRefs: refs(statuses.flatMap(status => status.facts)), activityId: null })
+        triggers.push({ key: `month:${month}`, at: wall.at, editionDate: first, sourceRefs: refs(statuses.flatMap(status => status.facts)), activityId: null })
       }
     }
     for (const trigger of triggers) {
@@ -229,7 +279,7 @@ export function resolveCalendarOccurrences(state: CalendarRulesState, from: stri
       if (!participation || !inRange(date, rule.validFrom, rule.validTo)) continue
       for (const step of rule.steps) {
         const planned = addDays(date, step.scheduledOffsetDays)
-        if (chosenEdition(base, `calendar:rule:${rule.id}:${trigger.key}:${step.key}`, trigger.key, date) !== editionIndex) continue
+        if (chosenEdition(base, `calendar:rule:${rule.id}:${trigger.key}:${step.key}`, trigger.key, trigger.editionDate) !== editionIndex) continue
         if (!inRange(planned, from, to) && !retainedKeys.includes(`calendar:rule:${rule.id}:${trigger.key}:${step.key}`)) continue
         if (step.score) { validateScore(step.score); if (step.score.mode === 'allocated') throw new Error('定型ステップに未承認の配分ポイントを指定できません') }
         const shifted = step.kind === 'event' ? shiftCalendarDays(trigger.at, step.scheduledOffsetDays, context.timezone) : null
@@ -250,6 +300,34 @@ export function resolveCalendarOccurrences(state: CalendarRulesState, from: stri
   return { occurrences: result, cancellations, conflicts, blockedSeries: [...blocked].sort(), coveredSeries: covered.sort() }
 }
 
+function chosenEdition(base: CalendarRule, key: string, triggerKey: string, date: string) {
+  let selected = -1
+  for (const [index, edition] of (base.editions ?? []).entries()) {
+    const scope = edition.scope, anchorDate = triggerKey.startsWith('anchor:') ? triggerKey.slice(7) : date
+    if (scope.kind === 'all_uncompleted' || scope.kind === 'this_instance' && scope.generationKey === key || scope.kind === 'this_and_future' && (triggerKey.startsWith('month:') ? triggerKey.slice(6) >= scope.fromDate.slice(0, 7) : anchorDate >= scope.fromDate)) selected = index
+  }
+  return selected
+}
+/** True only when every rule version that can still govern this key no longer produces the step from the same activity. */
+function ruleStepDroppedByPerson(state: CalendarRulesState, spec: ResolvedCalendarSpec): boolean {
+  if (!spec.ruleId) return false
+  const base = state.rules.find(rule => rule.id === spec.ruleId)
+  if (!base) return false
+  const editions = base.editions ?? []
+  // The latest recorded version of this CSV shift decides which "this and future" edition governs the key;
+  // older versions' dates no longer describe where the shift is.
+  const versions = state.facts.filter((fact): fact is Extract<ScheduleFact, { kind: 'roster_assignment' }> => fact.kind === 'roster_assignment' && fact.activityId === spec.activityId && Boolean(state.sources.find(source => source.id === fact.sourceId)?.csv) && csvRosterTriggerKey(fact.activityId, fact.externalId) === spec.triggerKey)
+  const latest = Math.max(0, ...versions.map(fact => fact.revision))
+  const shiftDates = [...new Set(versions.filter(fact => fact.revision === latest).map(fact => calendarDateAt(fact.startAt, spec.timezone)))]
+  let indexes: number[]
+  if (shiftDates.length) indexes = shiftDates.map(date => chosenEdition(base, spec.generationKey, spec.triggerKey, date))
+  else {
+    let start = -1
+    editions.forEach((edition, index) => { if (edition.scope.kind === 'all_uncompleted' || edition.scope.kind === 'this_instance' && edition.scope.generationKey === spec.generationKey) start = index })
+    indexes = [start, ...editions.flatMap((edition, index) => index > start && edition.scope.kind === 'this_and_future' ? [index] : [])]
+  }
+  return [...new Set(indexes)].map(index => index < 0 ? base : { ...base, ...editions[index].definition }).every(rule => !rule.enabled || !rule.steps.some(step => step.key === spec.stepKey) || rule.trigger.kind !== 'activity_relative' || rule.trigger.activityId !== spec.activityId)
+}
 export function buildCalendarChangePlan(state: CalendarRulesState, current: CurrentCalendarEntity[], from: string, to: string, scope: CalendarChangeScope = { kind: 'all_uncompleted' }): Omit<CalendarChangePlan, 'digest'> {
   if (scope.kind === 'this_and_future') validateDate(scope.fromDate, '以後の変更日')
   const creates: ResolvedCalendarSpec[] = [], updates: CalendarChangePlan['updates'] = [], cancels: CalendarChangePlan['cancels'] = []
@@ -265,6 +343,9 @@ export function buildCalendarChangePlan(state: CalendarRulesState, current: Curr
     if (before?.completed) { skippedCompleted++; continue }
     if (!before) { creates.push(spec); continue }
     if (before.status === 'active' && canonicalJSON(before.spec) === canonicalJSON(spec)) { unchanged++; continue }
+    // A new provenance alone (e.g. the same shift now reported by a replacement CSV feed) does not ask the
+    // person to re-confirm an item they edited or started; nothing they see changes.
+    if (before.status === 'active' && (before.edited || before.started) && canonicalJSON({ ...before.spec, sourceRefs: [] }) === canonicalJSON({ ...spec, sourceRefs: [] })) { unchanged++; continue }
     if (before.spec.kind !== spec.kind) { conflicts.push({ key: spec.generationKey, contextId: spec.contextId, reason: '既存の発生回をタスクと予定の間で変換するには個別の確認が必要です', sourceRefs: spec.sourceRefs }); continue }
     if (before.edited || before.started) { conflicts.push({ key: spec.generationKey, contextId: spec.contextId, reason: '本人編集または着手済みの回です。変更を個別に確認してください', sourceRefs: spec.sourceRefs }); continue }
     updates.push({ before, after: spec })
@@ -272,6 +353,11 @@ export function buildCalendarChangePlan(state: CalendarRulesState, current: Curr
   for (const before of current) {
     if (before.completed || before.status === 'cancelled' || !included(before.spec) || !resolved.coveredSeries.includes(series(before.spec)) || resolved.blockedSeries.includes(series(before.spec)) || resolved.occurrences.some(spec => spec.generationKey === before.generationKey)) continue
     const explicit = resolved.cancellations.find(item => item.generationKey === before.generationKey)
+    // External CSV rows are partial observations. A missing row, expired quote,
+    // or changed participation never establishes a cancellation by itself. Only
+    // the person's own rule change (stop, step removal, other trigger) falls through.
+    const csvRoster = before.spec.triggerKey.startsWith('roster-csv:') || before.spec.sourceRefs.some(reference => state.sources.some(source => source.id === reference.sourceId && source.csv?.format === 'roster'))
+    if (csvRoster && !explicit && !ruleStepDroppedByPerson(state, before.spec)) continue
     if (before.edited || before.started) { conflicts.push({ key: before.generationKey, contextId: before.spec.contextId, reason: '本人編集または着手済みの回を取消す前に確認してください', sourceRefs: explicit?.sourceRefs ?? [] }); continue }
     cancels.push({ before, reason: explicit?.reason ?? '本人設定の系列・適用範囲の変更', sourceRefs: explicit?.sourceRefs ?? [] })
   }
