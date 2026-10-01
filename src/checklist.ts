@@ -2,6 +2,7 @@ import { db } from './db'
 import { calculateScore, emptyScore, uid, type Assessment, type ChecklistItem, type Task } from './domain'
 import { ConflictError, newTaskInput } from './commands'
 import { synchronizeAllocationCompletion } from './allocation-completion'
+import { recordHumanCommand } from './command-bus'
 
 const now = () => new Date().toISOString()
 
@@ -28,7 +29,7 @@ export async function toggleChecklistItem(id: string, done: boolean): Promise<vo
 
 export async function convertChecklistItem(id: string, expectedParentRevision: number, points: number): Promise<string> {
   if (!Number.isInteger(points) || points < 0 || points > 100000) throw new Error('配分ポイントは0〜100000の整数で指定してください')
-  return db.transaction('rw', [db.tasks, db.assessments, db.completions, db.checklistItems, db.audits, db.tripBundles], async () => {
+  return db.transaction('rw', [db.tasks, db.assessments, db.completions, db.checklistItems, db.audits, db.tripBundles, db.settings], async () => {
     const item = await db.checklistItems.get(id)
     if (!item) throw new Error('チェック項目がありません')
     if (item.convertedTaskId) return item.convertedTaskId
@@ -51,10 +52,10 @@ export async function convertChecklistItem(id: string, expectedParentRevision: n
     await db.assessments.bulkAdd(assessments)
     await synchronizeAllocationCompletion(parent, parentAssessmentId, parentResult.effective!)
     await db.checklistItems.put({ ...item, convertedTaskId: childId, updatedAt: at })
-    await db.audits.bulkAdd([
-      { id: uid(), taskId: parent.id, operation: 'allocate_points', at, detail: `${points}ptを子タスクへ配分` },
-      { id: uid(), taskId: childId, operation: 'create_from_checklist', at, detail: `親タスク ${parent.id} の項目から作成` }
-    ])
+    // The parent's points move and its revision changes, so S21 can explain a later CONFLICT (K12-G3).
+    await recordHumanCommand({ operation: 'allocate_points', taskId: parent.id, commandKey: `checklist:${item.id}`, before: { manualPoints: parent.score.manualPoints, effectivePoints: parent.effectivePoints }, after: { manualPoints: parentScore.manualPoints, effectivePoints: parentResult.effective }, revisionBefore: parent.revision, revisionAfter: parent.revision + 1, summary: `${points}ptを子タスクへ配分`, at, extra: { childTaskId: childId, points, parentAssessmentBefore: parent.assessmentId, parentAssessmentAfter: parentAssessmentId } })
+    // allocation-completion verifies this exact sentence; it stays free text.
+    await db.audits.add({ id: uid(), taskId: childId, operation: 'create_from_checklist', at, detail: `親タスク ${parent.id} の項目から作成` })
     return childId
   })
 }

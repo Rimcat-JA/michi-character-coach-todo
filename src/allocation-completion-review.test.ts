@@ -144,7 +144,9 @@ describe('配分と再完了の独立回帰', () => {
       vi.spyOn(db.commands, 'add').mockRejectedValueOnce(new Error('保存末尾の失敗'))
       await expect(applyBreakdownProposal(suggestBreakdown(await task(id), 'large'))).rejects.toThrow('保存末尾')
     } else {
-      vi.spyOn(db.audits, 'bulkAdd').mockRejectedValueOnce(new Error('保存末尾の失敗'))
+      // The child's create_from_checklist row is the last write of the conversion.
+      const add = db.audits.add.bind(db.audits)
+      vi.spyOn(db.audits, 'add').mockImplementation(((row: Parameters<typeof add>[0]) => row.operation === 'create_from_checklist' ? Promise.reject(new Error('保存末尾の失敗')) : add(row)) as typeof db.audits.add)
       await expect(convertChecklistItem(itemId!, (await task(id)).revision, 10)).rejects.toThrow('保存末尾')
     }
     expect(await snapshot()).toEqual(before)

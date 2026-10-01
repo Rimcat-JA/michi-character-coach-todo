@@ -44,8 +44,8 @@ describe('structured human command audits', () => {
     // Receipts are unchanged: each command key still has its own receipt.
     for (const key of ['edit-1', 'bulk-1', 'flag-1', 'done-1', 'fix-1', 'undo-1', 'done-2', 'trash-1', 'restore-1']) expect(await db.commands.get(key)).toBeTruthy()
     const trace = changeTrace(await db.audits.toArray()).entries.filter(entry => entry.taskId === id)
-    expect(trace.map(entry => entry.operation).sort()).toEqual(['bulk_update', 'complete', 'complete', 'correct_points', 'set_flag', 'undo', 'update'])
-    expect(trace.every(entry => entry.entrance === 'ui_human' && entry.operator.kind === 'human' && entry.decision === 'self' && !entry.legacy)).toBe(true)
+    expect(trace.map(entry => entry.operation).sort()).toEqual(['bulk_update', 'complete', 'complete', 'correct_points', 'create', 'set_flag', 'undo', 'update'])
+    expect(trace.every(entry => entry.entrance === 'ui_human' && entry.operator.kind === 'human' && entry.decision === 'self' && entry.legacy === (entry.operation === 'create'))).toBe(true)
   })
   it('the wizard breakdown keeps its behaviour and writes a structured audit with the allocation', async () => {
     const id = await createTask({ ...newTaskInput(), title: '大きな作業', score: manual(30) }), task = (await db.tasks.get(id))!
@@ -72,5 +72,22 @@ describe('structured human command audits', () => {
     const row = (await db.audits.where('taskId').equals(id).toArray()).find(audit => audit.operation === 'update')!
     expect(typeof row.detail).toBe('string'); expect(row.detail.length).toBeLessThan(4000)
     expect(JSON.parse(row.detail).after.notes).toMatch(/…（5000文字）$/)
+  })
+  it('an edit past the 2000-character excerpt with the same length is still listed as a notes change', async () => {
+    const base = 'あ'.repeat(3000), id = await createTask({ ...newTaskInput(), title: '長いメモ', notes: base }), task = (await db.tasks.get(id))!
+    const edited = `${base.slice(0, 2500)}い${base.slice(2501)}`
+    await updateTask(id, 1, { ...task, notes: edited }, 'long-1')
+    expect((await db.tasks.get(id))!.notes).toBe(edited)
+    expect((await detail(id, 'update'))[0]).toMatchObject({ fields: ['notes'], revisionBefore: 1, revisionAfter: 2 })
+  })
+  it('a clock-only deadline edit and a bulk clear of a clock deadline are traced with dueAt and dueTimezone', async () => {
+    const id = await createTask({ ...newTaskInput(), title: '時刻付き締め切り', dueDate: '2026-10-09', dueAt: '2026-10-09T00:00:00.000Z', dueTimezone: 'Asia/Tokyo' }), task = (await db.tasks.get(id))!
+    await updateTask(id, 1, { ...task, dueAt: '2026-10-09T04:00:00.000Z' }, 'clock-1')
+    expect((await db.tasks.get(id))!).toMatchObject({ dueDate: '2026-10-09', dueAt: '2026-10-09T04:00:00.000Z' })
+    expect((await detail(id, 'update'))[0]).toMatchObject({ fields: ['dueAt'], before: { dueAt: '2026-10-09T00:00:00.000Z' }, after: { dueAt: '2026-10-09T04:00:00.000Z' } })
+    expect(changeTrace(await db.audits.toArray()).entries[0].fields).toContain('dueAt')
+    await bulkUpdateTasksAtomic([{ id, revision: 2 }], { dueDate: null }, 'clear-1')
+    expect((await db.tasks.get(id))!).toMatchObject({ dueDate: null, dueAt: null, dueTimezone: null })
+    expect((await detail(id, 'bulk_update'))[0]).toMatchObject({ fields: ['dueAt', 'dueDate', 'dueTimezone'], before: { dueDate: '2026-10-09', dueAt: '2026-10-09T04:00:00.000Z', dueTimezone: 'Asia/Tokyo' }, after: { dueDate: null, dueAt: null, dueTimezone: null } })
   })
 })

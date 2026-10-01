@@ -118,6 +118,29 @@ describe('external series change through the common routine engine', () => {
     try { await reduceAuthority('aiChanges', 'button'); expect(commandOutcome(await off.harness.controller.applyFromUI(off.review, click()).catch(error => error))).toMatchObject({ state: 'denied', code: 'CHANGES_STOPPED' }) } finally { await off.harness.close() }
     expect((await db.calendarRules.get('main'))!.revision).toBe(before)
   })
+  it('with text and schedule denied but routine.change allowed, file and MCP reach the owner check while task.update on the same connection is CHANGES_STOPPED', async () => {
+    const results: Record<string, unknown> = {}
+    for (const entrance of ['file', 'mcp'] as const) {
+      if (entrance === 'mcp') { await resetApp('synthetic/model'); const state = calendarFixture(), settings = (await db.settings.get('main'))!; state.ownerId = settings.profileId; state.datasetId = settings.datasetId; state.bindings[0].personId = settings.profileId; state.activities = []; state.bindings[0].activityIds = []; await db.calendarRules.put(state) }
+      const { ruleId, tasks } = await ownerRoutine(), open = tasks.find(task => task.status === 'open')!
+      const settings = (await db.settings.get('main'))!, policy = changePolicyFor(settings), owner = { principal: { id: settings.profileId, kind: 'human' as const }, ownerId: settings.profileId, datasetId: settings.datasetId, allowedFields: [] as TaskChangeField[], sourceRevisions: [] }
+      const modes = { preset: 'custom' as const, rules: presetRules('A1').map(rule => rule.operation === 'task.text' || rule.operation === 'task.schedule' ? { ...rule, mode: 'deny' as const } : rule.operation === 'routine.change' ? { ...rule, mode: 'require_approval' as const } : rule), allowedHours: {}, titleRule: 'require_approval' as const, bounds: policy.bounds, locks: policy.locks }
+      await setAutomationPolicyFromUI(owner, click(), modes, (await previewAutomationPolicy(modes)).token)
+      const harness = await bridgeHarness({ taskIds: [open.id], fields: ['title', 'notes'], ruleIds: [ruleId] })
+      try {
+        const rule = (await db.calendarRules.get('main'))!.rules.find(item => item.id === ruleId)!, routineId = crypto.randomUUID(), updateId = crypto.randomUUID()
+        if (entrance === 'file') { await harness.writeCommand({ command_id: routineId, type: 'routine.change', target_id: ruleId, expected_revision: rule.revision, payload: { scope: { kind: 'all_uncompleted' }, definition: { trigger: third } } }); await harness.writeCommand({ command_id: updateId, type: 'task.update', target_id: open.id, expected_revision: open.revision, payload: { notes: '外部の案' } }) }
+        else { expect((await harness.mcpCall('michi_propose_routine_change', { commandId: routineId, snapshotId: harness.snapshotId(), ruleId, expectedRuleRevision: rule.revision, scope: { kind: 'all_uncompleted' }, trigger: third })).isError).toBeFalsy(); expect((await harness.mcpCall('michi_propose_update', { commandId: updateId, snapshotId: harness.snapshotId(), targetId: open.id, expectedRevision: open.revision, payload: { notes: '外部の案' } })).isError).toBeFalsy() }
+        const scanned = await harness.controller.scanInbox(), reference = (id: string) => (scanned.entries.find(item => item.filename.startsWith(id) && item.state === 'awaiting_approval') as Extract<typeof scanned.entries[number], { state: 'awaiting_approval' }>).reference
+        const update = commandOutcome(await harness.controller.prepare(reference(updateId)).catch(error => error))
+        const prepared = await harness.controller.prepare(reference(routineId)), review = await harness.controller.confirmRoutineFromUI(prepared, click())
+        results[entrance] = { update: { state: update.state, code: update.code }, stage: [routineBody(prepared.command).stage, routineBody(review.command).stage], applied: (await harness.controller.applyFromUI(review, click())).result?.state, signed: (({ state, code }) => ({ state, code }))((await harness.mcpCall('michi_command_result', { commandId: updateId })).structuredContent!) }
+        expect((await db.tasks.get(open.id))!.notes).toBe(open.notes)
+      } finally { await harness.close() }
+    }
+    expect(results.file).toMatchObject({ update: { state: 'denied', code: 'CHANGES_STOPPED' }, stage: ['owner_values', 'review'], applied: 'applied', signed: { state: 'denied', code: 'CHANGES_STOPPED' } })
+    expect(results.mcp).toEqual(results.file)
+  })
   it('routine.change=deny stops an external series request before any owner check', async () => {
     const { ruleId } = await ownerRoutine(); await setRoutineMode('deny')
     const harness = await bridgeHarness({ taskIds: [], fields: ['title'], ruleIds: [ruleId] })

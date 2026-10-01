@@ -8,7 +8,7 @@ import { db } from './db'
 import AIProcessingResume from './AIProcessingResume'
 import ChangeSetPreview from './ChangeSetPreview'
 import TaskSplitPreview from './TaskSplitPreview'
-import { agentChangesStopped, humanContextFor, changeContextFor } from './command-bus'
+import { humanContextFor, changeContextFor } from './command-bus'
 import { splitBody, type SplitChildDraft } from './task-split-change'
 import { externallyEditableTrigger, routineBody } from './routine-external-change'
 import { calendarRuleEditorDefinition } from './calendar-rule-editor'
@@ -31,7 +31,6 @@ export default function LocalFileBridgeView({settings,tasks,gateway,onApplied}: 
   const connection=gateway??(window as FileBridgeWindow).michiFileBridge
   const controller=useMemo(()=>connection?createFileBridgeController(connection):null,[connection])
   const policy=changePolicyFor(settings),scopeKey=`${settings.profileId}:${settings.datasetId}:${policy.epoch}:${policy.sourcePermissionRevision}:${settings.aiEnabled}`
-  const stoppedNow=agentChangesStopped(settings)
   const [view,setView]=useState<{scopeKey:string;status:FileBridgeStatus|null;entries:FileBridgeInboxEntry[];prepared:PreparedFileBridgeApplication|null;outcome:FileBridgeApplicationOutcome|null}>({scopeKey,status:null,entries:[],prepared:null,outcome:null})
   const [taskIds,setTaskIds]=useState<string[]>([]),[fields,setFields]=useState<FileBridgeField[]>(['title']),[host,setHost]=useState<FileBridgeHost>('codex'),[hours,setHours]=useState(1)
   const [allowSplit,setAllowSplit]=useState(false),[ruleIds,setRuleIds]=useState<string[]>([])
@@ -45,10 +44,10 @@ export default function LocalFileBridgeView({settings,tasks,gateway,onApplied}: 
   useEffect(()=>{
     if(!controller)return
     let active=true
-    // Queued commands get a signed reason before authority is dropped, so agents see the app's code.
-    void controller.closePending(stoppedNow?'CHANGES_STOPPED':'POLICY_CHANGED').catch(()=>undefined).then(()=>{controller.clearAuthority();return controller.refresh()}).then(status=>{if(active)setView({scopeKey,status,entries:[],prepared:null,outcome:null})}).catch(error=>{if(active)setNotice(error instanceof Error?error.message:String(error))})
+    // Queued commands get a signed reason before authority is dropped; the controller names CHANGES_STOPPED only when every granted operation is now denied.
+    void controller.closePending().catch(()=>undefined).then(()=>{controller.clearAuthority();return controller.refresh()}).then(status=>{if(active)setView({scopeKey,status,entries:[],prepared:null,outcome:null})}).catch(error=>{if(active)setNotice(error instanceof Error?error.message:String(error))})
     return()=>{active=false}
-  },[controller,scopeKey,stoppedNow])
+  },[controller,scopeKey])
   useEffect(()=>()=>{controller?.clearAuthority()},[controller])
   async function run(action:()=>Promise<void>) {if(busy)return;setBusy(true);setNotice('');try{await action()}catch(error){setNotice(error instanceof Error?`${error.message}${'code' in error&&typeof error.code==='string'?`（${error.code}）`:''}`:String(error))}finally{setBusy(false)}}
   function replaceStatus(status:FileBridgeStatus) {setView({scopeKey,status,entries:[],prepared:null,outcome:null})}

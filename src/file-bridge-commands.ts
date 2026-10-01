@@ -6,7 +6,7 @@ import { uid, type Settings } from './domain'
 import { ChangeSetError, autoChangeCountsToday, changePolicyFor, decideChangePolicy, type ChangePolicy, type PreparedChangeSet, type TaskChangeField } from './change-set'
 import { operationMode, ruleFor } from './automation-policy'
 import { applyAssistedTasks, prepareAssistedTasks, type PreparedAssistedTasks } from './task-assist'
-import { applyCommand, approveCommandFromUI, cancelCommand, commandDecision, commandFields, commandOutcome, confirmCommandValuesFromUI, externalAgentActor, isPendingCommand, noteReceivedCommands, prepareCommand, refineCommandOutcome, registerCommandType, settleCommand, terminalCommandState, validateTaskPayload, type CommandEnvelope, type CommandField, type CommandGrant, type CommandOutcome, type CommandPreparation, type PreparedCommand } from './command-bus'
+import { agentChangesStopped, commandOutcomeFacts, recordCommandOutcomeAudit, applyCommand, issueExternalApplyCapability, approveCommandFromUI, cancelCommand, commandDecision, commandFields, commandOutcome, confirmCommandValuesFromUI, externalAgentActor, isPendingCommand, noteReceivedCommands, prepareCommand, refineCommandOutcome, registerCommandType, settleCommand, terminalCommandState, validateTaskPayload, type CommandEnvelope, type CommandField, type CommandGrant, type CommandOutcome, type CommandPreparation, type PreparedCommand } from './command-bus'
 import { confirmSplitCommandFromUI, type SplitChildDraft } from './task-split-change'
 import { confirmRoutineCommandFromUI, triggerForCommand } from './routine-external-change'
 import { loadCalendarRulesState } from './calendar-rules-save'
@@ -33,7 +33,7 @@ function assertSettings(registration:FileBridgeRegistration,value:Settings) {
   const policy=changePolicyFor(value)
   if(value.profileId!==registration.owner_id||value.datasetId!==registration.dataset_id)rejectFileBridge('OWNER_CHANGED')
   // The shared reason is named so S06, file and MCP report the same code.
-  if(!value.aiEnabled||!policy.aiChangesEnabled||operationMode(policy,'task.text')==='deny'&&operationMode(policy,'task.schedule')==='deny')rejectFileBridge('AUTHORITY_CHANGED','AIによる変更は停止しています。接続を確認してください。','CHANGES_STOPPED')
+  if(agentChangesStopped(value,fileBridgeCommandGrant(registration)))rejectFileBridge('AUTHORITY_CHANGED','AIによる変更は停止しています。接続を確認してください。','CHANGES_STOPPED')
   if(policy.epoch!==registration.policy_epoch||policy.sourcePermissionRevision!==registration.source_permission_revision)rejectFileBridge('AUTHORITY_CHANGED','本人・AI設定または利用許可が変わりました。接続を確認してください。','POLICY_CHANGED')
   if(Date.parse(registration.client.grant.expires_at)<=Date.now())rejectFileBridge('EXPIRED')
 }
@@ -68,7 +68,7 @@ registerCommandType({
     if(actor.grant&&Object.keys(envelope.payload).some(field=>!actor.grant!.fields.includes(field as CommandField)))throw new ChangeSetError('UNAUTHORIZED','この接続で許可していない項目です')
     const payload=envelope.payload as {title:string;notes?:string;scheduled_date?:string|null}
     const input={...newTaskInput(),title:payload.title,notes:payload.notes??'',scheduledDate:payload.scheduled_date??null}
-    const assisted=await prepareAssistedTasks([{input,notices:[],source:`外部エージェント ${actor.principal.id} / コマンド ${envelope.command_id}`}],'ai')
+    const entrance=actor.entrance==='mcp'?'mcp' as const:'file' as const,assisted=await prepareAssistedTasks([{input,notices:[],source:`外部エージェント ${actor.principal.id} / コマンド ${envelope.command_id}`}],'ai',{kind:'external-agent',id:actor.principal.id,entrance,commandId:envelope.command_id})
     return {body:{assisted},expiresAt:assisted.expiresAt,reason:'外部エージェントからの新規作成（点数・締め切りは未設定）'}
   },
   decide(prepared,current){const policy=changePolicyFor(current);return prepared.actor.principal.kind!=='human'&&(!current.aiEnabled||!policy.aiChangesEnabled||operationMode(policy,'task.text')==='deny')?{status:'denied',reason:'AIによる変更は停止しています',protectedFields:[]}:{status:'awaiting_approval',reason:'新しい作業は本人が内容を確認して登録します',protectedFields:[]}},
@@ -106,7 +106,9 @@ const applicationTables=()=>[db.tasks,db.assessments,db.commands,db.audits,db.co
 export function createFileBridgeController(gateway:FileBridgeGateway) {
   const entries=new Map<string,PendingEntry>(),preparedRegistry=new Map<string,PreparedFileBridgeApplication>(),leases=new Map<string,FileBridgeLease>()
   let currentStatus:FileBridgeStatus|null=null,lastEgress:{withheldQuotes:number;notesWithheld:number}|null=null
-  function clear(){for(const value of preparedRegistry.values())if(isPendingCommand(value.command))void cancelCommand(value.command);entries.clear();preparedRegistry.clear();leases.clear();noteReceivedCommands('external',[])}
+  /** Dropped reviews cancel their unapproved bus commands so S21 never lists them; applied commands are already settled. */
+  async function dropPrepared(){const dropped=[...preparedRegistry.values()];preparedRegistry.clear();for(const value of dropped)if(isPendingCommand(value.command))await cancelCommand(value.command)}
+  function clear(){void dropPrepared();entries.clear();leases.clear();noteReceivedCommands('external',[])}
   async function adoptStatus(raw:FileBridgeStatus):Promise<FileBridgeStatus> {
     assertFileBridgeStatus(raw)
     const status=freeze(structuredClone(raw)),current=await settings(),registration=status.registration
@@ -146,9 +148,17 @@ export function createFileBridgeController(gateway:FileBridgeGateway) {
     if(!state||!outcome.code||!gateway.recordRejected||!entries.has(reference))return
     try{const result=await gateway.recordRejected({reference,state,code:outcome.code});assertFileBridgeResult(result);entries.delete(reference)}catch{/* The inbox entry stays; the next scan reports it again. */}
   }
+  /** S21 record of a scanned command that ends unapplied; identity comes from the signed registration, never the file. */
+  async function noteOutcome(reference:string,prepared:PreparedFileBridgeApplication|null,outcome:Pick<CommandOutcome,'state'|'code'|'message'>) {
+    if(prepared)return recordCommandOutcomeAudit(commandOutcomeFacts(prepared.command),outcome)
+    const entry=entries.get(reference),reg=currentStatus?.registration
+    if(!entry||!reg||entry.prepared.principal.id!==reg.client.id)return
+    const command=entry.prepared.command
+    await recordCommandOutcomeAudit({commandId:command.command_id,entrance:entranceOf(command),principal:{id:reg.client.id,kind:'external-agent',model:null},type:command.type,targetId:command.target_id,basis:'external_request',fields:Object.keys(command.payload)},outcome)
+  }
   async function terminal(reference:string,prepared:PreparedFileBridgeApplication|null,error:unknown):Promise<CommandOutcome> {
     const outcome=await refineCommandOutcome(commandOutcome(error,{commandId:prepared?.entry.prepared.command.command_id??entries.get(reference)?.prepared.command.command_id??null,entrance:prepared?.entrance??null}),prepared?.command.actor??null)
-    if(terminalCommandState(outcome.state)){await reportOutcome(reference,outcome);if(prepared){preparedRegistry.delete(prepared.id);if(isPendingCommand(prepared.command))await cancelCommand(prepared.command)}}
+    if(terminalCommandState(outcome.state)){await noteOutcome(reference,prepared,outcome);await reportOutcome(reference,outcome);if(prepared){preparedRegistry.delete(prepared.id);if(isPendingCommand(prepared.command))await cancelCommand(prepared.command)}}
     return outcome
   }
   async function wrap(reference:string,entry:PendingEntry,registration:FileBridgeRegistration,preparation:CommandPreparation):Promise<PreparedFileBridgeApplication> {
@@ -196,7 +206,7 @@ export function createFileBridgeController(gateway:FileBridgeGateway) {
         if(count>=reg.client.grant.max_operations_per_day)rejectFileBridge('DAILY_BOUND')
         if(automatic&&!prepared.changeSet)rejectFileBridge('INVALID_APPLICATION')
         // applyChangeSet re-decides inside this transaction; with no approval it succeeds only when the N09 decision is auto.
-        const applied=await applyCommand(prepared.command,approval,`filebridge:${command.command_id}`)
+        const applied=await applyCommand(prepared.command,approval,`filebridge:${command.command_id}`,issueExternalApplyCapability(prepared.command))
         // The file receipt names the command target (or the created task); split children and rule details stay in the app audit.
         const taskIds=[command.type==='task.create'?applied.taskIds[0]:command.target_id!]
         const appliedAt=new Date().toISOString(),result:FileBridgeApplicationReceipt={version:1,commandId:command.command_id,fileDigest:prepared.entry.prepared.digest,applicationDigest:prepared.digest,ownerId:reg.owner_id,datasetId:reg.dataset_id,clientId:reg.client.id,policyEpoch:reg.policy_epoch,sourcePermissionRevision:reg.source_permission_revision,registrationRevision:reg.client.revision,grantEpoch:reg.client.grant_epoch,taskIds,appliedAt}
@@ -208,7 +218,7 @@ export function createFileBridgeController(gateway:FileBridgeGateway) {
       const outcome=await refineCommandOutcome(commandOutcome(error,{commandId:prepared.entry.prepared.command.command_id,entrance:prepared.entrance}),prepared.command.actor)
       const state=fileStates[outcome.state]
       await gateway.cancelApplication({leaseId:lease.leaseId,reference:prepared.reference,...(state&&outcome.code?{outcome:{state,code:outcome.code}}:{})}).catch(()=>{})
-      if(terminalCommandState(outcome.state)){entries.delete(prepared.reference);preparedRegistry.delete(prepared.id);if(isPendingCommand(prepared.command))await cancelCommand(prepared.command)}
+      if(terminalCommandState(outcome.state)){await noteOutcome(prepared.reference,prepared,outcome);entries.delete(prepared.reference);preparedRegistry.delete(prepared.id);if(isPendingCommand(prepared.command))await cancelCommand(prepared.command)}
       throw error
     }
     settleCommand(prepared.command)
@@ -252,7 +262,8 @@ export function createFileBridgeController(gateway:FileBridgeGateway) {
     async scanInbox() {
       const scanned=await gateway.scanInbox(),status=await adoptStatus(scanned.status)
       if(!Array.isArray(scanned.entries)||scanned.entries.length>100)rejectFileBridge('ENTRY_INVALID')
-      entries.clear();preparedRegistry.clear()
+      // A rescan drops earlier reviews; their bus commands must not stay listed in S21.
+      entries.clear();await dropPrepared()
       for(const raw of scanned.entries){assertFileBridgeInboxEntry(raw);if(raw.state==='awaiting_approval'){
         const entry=freeze(structuredClone(raw)),reg=status.registration,manifest=status.snapshot,value=entry.prepared
         if(!reg||!manifest||value.ownerId!==reg.owner_id||value.datasetId!==reg.dataset_id||value.principal.id!==reg.client.id||value.policyEpoch!==reg.policy_epoch||value.sourcePermissionRevision!==reg.source_permission_revision||value.snapshotId!==manifest.snapshot_id||value.digest!==await contentDigest(commandDigestPayload(entry,reg))||entries.has(entry.reference))rejectFileBridge('COMMAND_BINDING')
@@ -295,10 +306,13 @@ export function createFileBridgeController(gateway:FileBridgeGateway) {
       trustedClick(event);await verifyPrepared(prepared);await assertCurrent(prepared)
       return wrap(prepared.reference,prepared.entry,prepared.registration,await confirmRoutineCommandFromUI(prepared.command,event))
     },
-    /** Closes queued entries after AI OFF or an authority change, so agents see the same code as the app. */
-    async closePending(code:'CHANGES_STOPPED'|'POLICY_CHANGED') {
+    /** Closes queued entries after AI OFF or an authority change, so agents see the same code as the app.
+     *  CHANGES_STOPPED only when AI changes are off or every operation this grant carries is denied (N09 ∩ grant); otherwise POLICY_CHANGED. */
+    async closePending(requested:'CHANGES_STOPPED'|'POLICY_CHANGED'='CHANGES_STOPPED') {
+      const reg=currentStatus?.registration,current=await db.settings.get('main')
+      const code=requested==='CHANGES_STOPPED'&&current&&agentChangesStopped(current,reg?fileBridgeCommandGrant(reg):null)?'CHANGES_STOPPED' as const:'POLICY_CHANGED' as const
       const state=code==='CHANGES_STOPPED'?'denied' as const:'expired' as const
-      for(const reference of [...entries.keys()])await reportOutcome(reference,{commandId:null,entrance:null,state,code,message:code,receipt:null})
+      for(const reference of [...entries.keys()]){const outcome={commandId:null,entrance:null,state,code,message:code==='CHANGES_STOPPED'?'AIによる変更の停止で待機中のコマンドを閉じました':'設定・権限の変更で待機中のコマンドを閉じました',receipt:null};const prepared=[...preparedRegistry.values()].find(value=>value.reference===reference)??null;await noteOutcome(reference,prepared,outcome);await reportOutcome(reference,outcome)}
     },
     async applyFromUI(prepared:PreparedFileBridgeApplication,event:Event,checkedProtectedFields:TaskChangeField[]=[]):Promise<FileBridgeApplicationOutcome> {
       trustedClick(event);await verifyPrepared(prepared);await assertCurrent(prepared)

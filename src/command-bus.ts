@@ -1,7 +1,8 @@
+import Dexie from 'dexie'
 import { db } from './db'
 import { canonicalJSON } from './canonical'
 import { today, uid, validateDate, type Settings } from './domain'
-import { applyChangeSet, approveChangeSetFromUI, cancelChangeSet, changePolicyFor, ChangeSetError, decideChangePolicy, prepareTaskChanges, taskChangeFields, type ChangeContext, type ChangePolicyDecision, type ChangePrincipal, type PreparedChangeSet, type SourceRevision, type TaskChangeField, type TaskChangePatch, type TaskChangeRequest, type TaskFieldOrigin, type UIChangeApproval } from './change-set'
+import { applyChangeSet, approveChangeSetFromUI, cancelChangeSet, changePolicyFor, ChangeSetError, decideChangePolicy, prepareTaskChanges, taskChangeFields, type ChangeContext, type ChangePolicy, type ChangePolicyDecision, type ChangePrincipal, type PreparedChangeSet, type SourceRevision, type TaskChangeField, type TaskChangePatch, type TaskChangeRequest, type TaskFieldOrigin, type UIChangeApproval } from './change-set'
 import { operationMode, operationsForFields } from './automation-policy'
 import { confirmTaskInstructionFromUI, type VerifiedTaskInstruction } from './task-user-instruction'
 
@@ -64,6 +65,11 @@ const STATES: Record<string, CommandState> = {
 }
 /** Shared labels and outcome text so S06, S21, file and MCP read the same (K12). */
 export const ENTRANCE_LABELS = { ui_human: 'アプリ（本人）', ui_coach: 'アプリ内コーチ', file: 'ファイル受信箱', mcp: 'ローカルMCP', app: 'アプリの確認画面' } as const
+/** Shared Japanese labels for the codes S21 shows on rejected/cancelled commands. */
+export const COMMAND_CODE_LABELS: Record<string, string> = {
+  CHANGES_STOPPED: 'AIによる変更の停止中', UNAUTHORIZED: '許可していない操作・項目', SCHEDULE_BOUND: '予定日の移動範囲を超過', DAILY_BOUND: '1日の上限に到達', AUTHORITY_UNVERIFIED: '権限を確認できません', SPLIT_NOT_ALLOWED: '分割できない状態',
+  CONFLICT: 'その後の更新と競合', IDEMPOTENCY_MISMATCH: '同じIDで別の内容', EXPIRED: '確認期限切れ', POLICY_CHANGED: '設定・権限の変更', DIGEST_MISMATCH: '確認後に内容が変化', OWNER_CANCELLED: '本人が取消', NO_CHANGE: '変更なし', BASIS_UNVERIFIED: '根拠を確認できません',
+}
 export const outcomeNotice = (outcome: Pick<CommandOutcome, 'message' | 'code'>) => `${outcome.message}${outcome.code ? `（${outcome.code}）` : ''}`
 export function commonCommandCode(code: string): string { return COMMON_CODES[code] ?? code }
 export function commandStateFor(code: string | null): CommandState { return code === null ? 'failed' : STATES[commonCommandCode(code)] ?? 'failed' }
@@ -75,17 +81,25 @@ export function commandOutcome(error: unknown, context: { commandId?: string | n
   const code = explicit ?? (raw ? commonCommandCode(raw) : null)
   return freeze({ commandId: context.commandId ?? null, entrance: context.entrance ?? null, state: commandStateFor(code), code, message: error instanceof Error ? error.message : String(error), receipt: null })
 }
-/** N09: AI changes are off, or every task edit operation is denied in the operation table. */
-export function agentChangesStopped(settings: Settings): boolean {
+/** N09 per command type: the operation groups whose denial stops that type (same sets the type handlers enforce). */
+export function commandOperationStopped(policy: ChangePolicy, type: string): boolean {
+  if (type === 'task.split') return operationMode(policy, 'task.split') === 'deny' || operationMode(policy, 'task.manual_points') === 'deny'
+  if (type === 'routine.change') return operationMode(policy, 'routine.change') === 'deny'
+  if (type === 'task.create') return operationMode(policy, 'task.text') === 'deny'
+  return operationMode(policy, 'task.text') === 'deny' && operationMode(policy, 'task.schedule') === 'deny'
+}
+/** N09: AI changes are off, or every operation the connection's grant carries is denied (no grant = task edits). */
+export function agentChangesStopped(settings: Settings, grant?: CommandGrant | null): boolean {
   const policy = changePolicyFor(settings)
-  return !settings.aiEnabled || !policy.aiChangesEnabled || operationMode(policy, 'task.text') === 'deny' && operationMode(policy, 'task.schedule') === 'deny'
+  if (!settings.aiEnabled || !policy.aiChangesEnabled) return true
+  return (grant?.operations ?? ['task.update']).every(type => commandOperationStopped(policy, type))
 }
 /** An authority change seen while AI changes are stopped reports the stop itself (design 29.4 puts stop first). */
 export async function refineCommandOutcome(outcome: CommandOutcome, actor: ActorContext | null): Promise<CommandOutcome> {
   if (!actor || actor.principal.kind === 'human' || outcome.code !== 'POLICY_CHANGED') return outcome
   try {
     const settings = await db.settings.get('main'), policy = settings ? changePolicyFor(settings) : null
-    if (settings && policy && agentChangesStopped(settings)) return freeze({ ...outcome, state: 'denied', code: 'CHANGES_STOPPED' })
+    if (settings && policy && agentChangesStopped(settings, actor.grant)) return freeze({ ...outcome, state: 'denied', code: 'CHANGES_STOPPED' })
   } catch { /* An unreadable policy keeps the original outcome. */ }
   return outcome
 }
@@ -234,10 +248,12 @@ export function receivedCommands(): ReceivedCommand[] { return [...received.valu
 
 export async function prepareCommand(raw: CommandEnvelope, actor: ActorContext, options: { instruction?: unknown; reason?: string } = {}): Promise<CommandPreparation> {
   const commandId = record(raw) && id(raw.command_id) ? raw.command_id as string : null
+  let validated: CommandEnvelope | null = null
   try {
     verifyActor(actor)
     const envelope = freeze(structuredClone(raw))
     validateCommandEnvelope(envelope)
+    validated = envelope
     verifyBasis(envelope, actor)
     if (actor.grant && !actor.grant.operations.includes(envelope.type)) fail('UNAUTHORIZED', 'この接続で許可していない操作です')
     sweep()
@@ -247,9 +263,14 @@ export async function prepareCommand(raw: CommandEnvelope, actor: ActorContext, 
     pending.set(stored.id, stored); changed()
     const settings = (await db.settings.get('main'))!
     const decision = handlerFor(envelope.type).decide(stored, settings)
-    if (decision.status === 'denied') { await discard(stored); return { outcome: outcomeOf(stored, 'denied', 'CHANGES_STOPPED', decision.reason), prepared: null } }
+    if (decision.status === 'denied') { const outcome = outcomeOf(stored, 'denied', 'CHANGES_STOPPED', decision.reason); await recordCommandOutcomeAudit(commandOutcomeFacts(stored), outcome); await discard(stored); return { outcome, prepared: null } }
     return { outcome: pendingOutcome(stored, decision), prepared: stored }
-  } catch (error) { const trusted = Boolean(actor && typeof actor === 'object' && trustedActors.has(actor)); return { outcome: await refineCommandOutcome(commandOutcome(error, { commandId, entrance: trusted ? actor.entrance : null }), trusted ? actor : null), prepared: null } }
+  } catch (error) {
+    // Unverified actors and malformed envelopes are refused without an audit; their identity is never trusted.
+    const trusted = Boolean(actor && typeof actor === 'object' && trustedActors.has(actor)), outcome = await refineCommandOutcome(commandOutcome(error, { commandId, entrance: trusted ? actor.entrance : null }), trusted ? actor : null)
+    if (trusted && validated && terminalCommandState(outcome.state)) await recordCommandOutcomeAudit({ commandId: validated.command_id, entrance: actor.entrance, principal: actor.principal, type: validated.type, targetId: validated.target_id, basis: validated.basis.kind, fields: Object.keys(validated.payload) }, outcome)
+    return { outcome, prepared: null }
+  }
 }
 /** Owner confirms the exact values an agent proposed (S06 parity, design 28.9 external_request). */
 export async function confirmCommandValuesFromUI(prepared: PreparedCommand, event: Event, message: string, timezone = Intl.DateTimeFormat().resolvedOptions().timeZone): Promise<CommandPreparation> {
@@ -273,8 +294,15 @@ export async function approveCommandFromUI(prepared: PreparedCommand, event: Eve
   const saved = verifyPrepared(prepared)
   return handlerFor(saved.envelope.type).approve(saved, event, checked)
 }
-export async function applyCommand(prepared: PreparedCommand, approval: unknown, requestKey: string): Promise<CommandReceipt> {
+/** File/MCP commands apply only with a one-time capability the file controller issues after main's lease, durable claim and daily bound passed. */
+const externalApplyCapabilities = new WeakMap<object, PreparedCommand>()
+export function issueExternalApplyCapability(prepared: PreparedCommand): object { const token = Object.freeze({}); externalApplyCapabilities.set(token, prepared); return token }
+export async function applyCommand(prepared: PreparedCommand, approval: unknown, requestKey: string, capability?: object): Promise<CommandReceipt> {
   const saved = verifyPrepared(prepared)
+  if (saved.actor.entrance === 'file' || saved.actor.entrance === 'mcp') {
+    if (!capability || externalApplyCapabilities.get(capability) !== saved) fail('LEASE_INVALID', 'ローカルエージェント接続の画面から承認してください')
+    externalApplyCapabilities.delete(capability)
+  }
   if (Date.parse(saved.expiresAt) <= Date.now()) fail('EXPIRED', '変更案の確認期限が切れました。差分を作り直してください')
   const result = await handlerFor(saved.envelope.type).apply(saved, approval, requestKey, commandTrace(saved))
   return freeze({ commandId: saved.envelope.command_id, ...result })
@@ -287,7 +315,12 @@ export async function reprepareCommand(prepared: PreparedCommand, instruction: u
 export function assertPendingCommand(prepared: PreparedCommand): PreparedCommand { return verifyPrepared(prepared) }
 export function settleCommand(prepared: PreparedCommand) { if (pending.get(prepared.id) === prepared) { pending.delete(prepared.id); changed() } }
 async function discard(prepared: PreparedCommand) { settleCommand(prepared); await handlerFor(prepared.envelope.type).cancel?.(prepared).catch(() => undefined) }
-export async function cancelCommand(prepared: PreparedCommand) { if (isPendingCommand(prepared)) await discard(prepared) }
+/** `owner`: the owner's own 取消 button, recorded for S21; internal cleanups pass nothing. */
+export async function cancelCommand(prepared: PreparedCommand, reason?: 'owner') {
+  if (!isPendingCommand(prepared)) return
+  if (reason === 'owner') await recordCommandOutcomeAudit(commandOutcomeFacts(prepared), { state: 'cancelled', code: 'OWNER_CANCELLED', message: '本人が変更案を取り消しました' })
+  await discard(prepared)
+}
 export async function submitCommand(prepared: PreparedCommand, request: CommandSubmitRequest): Promise<CommandOutcome> {
   try {
     const saved = verifyPrepared(prepared)
@@ -297,9 +330,29 @@ export async function submitCommand(prepared: PreparedCommand, request: CommandS
     return outcomeOf(saved, 'applied', null, '変更を保存しました', receipt)
   } catch (error) {
     const outcome = await refineCommandOutcome(commandOutcome(error, { commandId: prepared?.envelope?.command_id ?? null, entrance: prepared?.actor?.entrance ?? null }), isPendingCommand(prepared) ? prepared.actor : null)
-    if (terminalCommandState(outcome.state) && isPendingCommand(prepared)) await discard(prepared)
+    if (terminalCommandState(outcome.state) && isPendingCommand(prepared)) { await recordCommandOutcomeAudit(commandOutcomeFacts(prepared), outcome); await discard(prepared) }
     return outcome
   }
+}
+
+/** K12/S21: a command that ends without being applied leaves one small audit. Names only: no payload, values or ICS/CSV bodies. */
+export type CommandOutcomeFacts = { commandId: string; entrance: CommandEntrance; principal: ChangePrincipal; type: string; targetId: string | null; basis: string; fields: string[] }
+export const commandOutcomeFacts = (prepared: PreparedCommand): CommandOutcomeFacts => ({ commandId: prepared.envelope.command_id, entrance: prepared.actor.entrance, principal: prepared.actor.principal, type: prepared.envelope.type, targetId: prepared.envelope.target_id, basis: prepared.envelope.basis.kind, fields: (handlers.get(prepared.envelope.type)?.fields?.(prepared) as string[] | undefined) ?? Object.keys(prepared.envelope.payload) })
+const RECORDED_OUTCOMES = ['denied', 'conflict', 'expired', 'rejected', 'cancelled']
+const recordedOutcomes = new Map<string, string>()
+export async function recordCommandOutcomeAudit(facts: CommandOutcomeFacts, outcome: { state: string; code: string | null; message: string }): Promise<void> {
+  if (!RECORDED_OUTCOMES.includes(outcome.state)) return
+  // One row per command and result: the file entrance reports through the same bus paths, and a cancel after a denial adds nothing.
+  const prior = recordedOutcomes.get(facts.commandId)
+  if (prior === outcome.state || prior && outcome.state === 'cancelled') return
+  recordedOutcomes.set(facts.commandId, outcome.state)
+  if (recordedOutcomes.size > 5000) recordedOutcomes.delete(recordedOutcomes.keys().next().value!)
+  try {
+    await Dexie.ignoreTransaction(async () => {
+      const taskId = facts.targetId && facts.type.startsWith('task.') && await db.tasks.get(facts.targetId) ? facts.targetId : null
+      await db.audits.add({ id: uid(), taskId, operation: 'command.rejected', at: new Date().toISOString(), detail: JSON.stringify({ schema: 'command.audit/1', entrance: facts.entrance, principal: { kind: facts.principal.kind, id: facts.principal.id, model: facts.principal.model ?? null }, decision: outcome.state, code: outcome.code, commandId: facts.commandId.slice(0, 200), basis: facts.basis, operation: facts.type.slice(0, 40), fields: facts.fields.slice(0, 50).map(field => String(field).slice(0, 40)), summary: outcome.message.slice(0, 200) }) })
+    })
+  } catch { /* An audit failure never changes the command outcome. */ }
 }
 
 /** K12-G3: owner direct edits keep their own authority but share the structured audit shape. Call inside the write transaction. */
@@ -313,7 +366,10 @@ function bounded(value: unknown): unknown {
 }
 export function changedFields(before: Record<string, unknown> | null, after: Record<string, unknown> | null): string[] {
   const keys = [...new Set([...Object.keys(before ?? {}), ...Object.keys(after ?? {})])]
-  return keys.filter(key => canonicalJSON(bounded(before?.[key] ?? null)) !== canonicalJSON(bounded(after?.[key] ?? null))).sort()
+  // Raw values are compared; only the stored excerpts are bounded, so a change past the cutoff still counts.
+  // JSON round trip drops nested undefined keys, which canonicalJSON would refuse.
+  const raw = (value: unknown) => canonicalJSON(JSON.parse(JSON.stringify(value ?? null)))
+  return keys.filter(key => raw(before?.[key]) !== raw(after?.[key])).sort()
 }
 export async function recordHumanCommand(input: HumanCommandAudit): Promise<void> {
   const settings = await db.settings.get('main'), fields = changedFields(input.before, input.after), at = input.at ?? new Date().toISOString()

@@ -9,6 +9,7 @@ import { applyChangeSet, changePolicyFor, clearChangeSetAuthority, prepareTaskCh
 import { presetRules } from './automation-policy'
 import { previewAutomationPolicy, reduceAuthority, setAutomationPolicyFromUI } from './automation-control'
 import { createFileBridgeController, readFileBridgeApplicationReceipt } from './file-bridge-commands'
+import { isPendingCommand, pendingCommands, submitCommand } from './command-bus'
 import { assertFileBridgeCommand, assertFileBridgeInboxEntry, assertFileBridgeStatus } from './file-bridge-contract'
 import { fileBridgeReceiptKey, fileBridgeScopeKey, type FileBridgeApplicationBinding, type FileBridgeGateway, type FileBridgeInboxEntry, type FileBridgeLease, type FileBridgeRegistration, type FileBridgeResult, type FileBridgeStatus } from './file-bridge-types'
 
@@ -46,6 +47,16 @@ describe('registered external file commands require native owner approval',()=>{
     expect((await db.audits.toArray()).filter(item=>item.operation==='filebridge.approved')).toHaveLength(1)
     expect((await f.controller.applyFromUI(prepared,click())).receipt).toEqual(result.receipt)
     expect((await db.tasks.get(f.taskId))?.revision).toBe(2)
+  })
+  it('a rescan cancels the dropped review so S21 lists no stale pending copy of an applied command (synthetic gateway, temp data)',async()=>{
+    const f=await fixture(),first=await f.controller.prepare(f.reference)
+    expect(pendingCommands().filter(item=>item.envelope.command_id===f.command.command_id)).toHaveLength(1)
+    await f.rescan()
+    expect(isPendingCommand(first.command)).toBe(false)
+    const second=await f.controller.prepare(f.reference)
+    expect((await f.controller.applyFromUI(second,click())).result?.state).toBe('applied')
+    expect(pendingCommands().filter(item=>item.envelope.command_id===f.command.command_id)).toHaveLength(0)
+    expect((await db.tasks.get(f.taskId))?.revision).toBe(2);expect(await readFileBridgeApplicationReceipt(f.command.command_id)).not.toBeNull()
   })
   it('creates through N02 with unknown score and deadline, without interpreting title or note points',async()=>{
     const f=await fixture('task.create'),prepared=await f.controller.prepare(f.reference)
@@ -193,6 +204,17 @@ describe('N09 owner-delegated automatic application for file/MCP entries',()=>{
     const decisions=(await db.audits.toArray()).filter(audit=>audit.operation==='changeset.update').map(audit=>{const detail=JSON.parse(audit.detail);return {decision:detail.decision,operations:detail.operations,approvedBy:detail.approvedBy}})
     expect(decisions).toEqual([{decision:'auto',operations:['task.text','task.schedule'],approvedBy:null},{decision:'auto',operations:['task.text','task.schedule'],approvedBy:null}])
     expect(JSON.parse((await db.audits.toArray()).find(audit=>audit.operation==='filebridge.auto')!.detail)).toMatchObject({decision:'auto',entrance:'file',basis:'external_request',approvedBy:null})
+  })
+  it('the shared bus refuses file commands outside the controller lease, with a click or without one under an auto grant',async()=>{
+    await enableA2()
+    const f=await fixture('task.update',{auto:true}),prepared=await f.controller.prepare(f.reference),receipts=async()=>(await db.commands.toArray()).filter(row=>row.key.startsWith('filebridge:applied:')).length
+    for(const event of [click(),null])expect(await submitCommand(prepared.command,{event,checkedProtectedFields:[],requestKey:`bypass-${event?'click':'auto'}`})).toMatchObject({state:'awaiting_approval',code:'LEASE_INVALID'})
+    expect((await db.tasks.get(f.taskId))!).toMatchObject({notes:'元のメモ',revision:1});expect(await receipts()).toBe(0)
+    expect(isPendingCommand(prepared.command)).toBe(true)
+    expect((await f.controller.applyAutomatically(prepared)).result?.state).toBe('applied');expect(await receipts()).toBe(1)
+    const g=await fixture(),manual=await g.controller.prepare(g.reference)
+    expect(await submitCommand(manual.command,{event:click(),checkedProtectedFields:[],requestKey:'bypass-manual'})).toMatchObject({state:'awaiting_approval',code:'LEASE_INVALID'})
+    expect((await g.controller.applyFromUI(manual,click())).result?.state).toBe('applied');expect(await receipts()).toBe(2)
   })
   it('keeps out-of-bound or non-delegated entries waiting for native approval',async()=>{
     await enableA2()

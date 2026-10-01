@@ -11,7 +11,9 @@ import { commandOutcome, pendingCommands, prepareCommand, submitCommand, uiCoach
 import { confirmSplitCommandFromUI, splitBody, type SplitChildDraft } from './task-split-change'
 import { prepareTripBundle } from './trip-bundles'
 import { applyTripBundle } from './trip-bundle-save'
-import { bridgeHarness, click, resetApp } from './command-test-harness'
+import { bridgeHarness, click, outcomeOf, resetApp } from './command-test-harness'
+import { captureSnapshot, restoreBackup } from './backup'
+import { validateSnapshot } from './backup-validation'
 // Each case drives the real file bridge service and MCP client on a temp folder; allow for a loaded runner.
 vi.setConfig({ testTimeout: 30000 })
 
@@ -162,6 +164,88 @@ describe('N03 split parity: S06, file inbox and MCP give the same card and the s
     }
     expect(states[1]).toEqual(states[0]); expect(states[2]).toEqual(states[0])
     expect(states[0]).toMatchObject({ parent: { score: { manualPoints: 0 }, effectivePoints: 0 }, origins: 3, checklist: 2, ledger: 0 })
+  })
+  it('after an S06, file or MCP split (and a re-split of an allocated child) backups still export and restore the allocated agent rows', async () => {
+    const values: SplitChildDraft[] = [{ title: '調査', points: 15, titleOrigin: 'agent_proposal', pointsOrigin: 'agent_proposal' }, { title: '実装', points: 25, titleOrigin: 'agent_proposal', pointsOrigin: 'agent_proposal' }]
+    for (const entrance of ['ui_coach', 'file', 'mcp'] as const) {
+      await resetApp()
+      const taskId = await parent()
+      if (entrance === 'ui_coach') {
+        const { review } = await coachSplit(taskId, values)
+        expect(await submitCommand(review!, { event: click(), checkedProtectedFields: ['manualPoints'], requestKey: 'ui' })).toMatchObject({ state: 'applied' })
+        // A re-split of an allocated child keeps the instruction origin on an 'allocated' parent row.
+        const child = (await db.tasks.toArray()).find(task => task.title === '実装')!, again = await coachSplit(child.id, [{ ...values[0], title: '設計', points: 10 }, { ...values[1], title: '実装本体', points: 15 }])
+        expect(await submitCommand(again.review!, { event: click(), checkedProtectedFields: ['manualPoints'], requestKey: 'ui-2' })).toMatchObject({ state: 'applied' })
+        expect((await db.assessments.toArray()).some(item => item.taskId === child.id && item.origin === 'user_instruction_via_agent' && item.score.mode === 'allocated' && item.score.manualPoints === 0)).toBe(true)
+      } else {
+        const harness = await bridgeHarness({ taskIds: [taskId], fields: ['title'], allowSplit: true })
+        try {
+          const commandId = crypto.randomUUID(), children = values.map(child => ({ title: child.title, points: child.points }))
+          if (entrance === 'file') await harness.writeCommand({ command_id: commandId, type: 'task.split', target_id: taskId, expected_revision: 1, payload: { children } })
+          else expect((await harness.mcpCall('michi_propose_split', { commandId, snapshotId: harness.snapshotId(), targetId: taskId, expectedRevision: 1, children })).isError).toBeFalsy()
+          const scanned = await harness.controller.scanInbox(), entry = scanned.entries.find(item => item.state === 'awaiting_approval') as Extract<typeof scanned.entries[number], { state: 'awaiting_approval' }>
+          const confirmed = await harness.controller.confirmSplitFromUI(await harness.controller.prepare(entry.reference), values, click(), '外部の分割案を本人が確認')
+          expect((await harness.controller.applyFromUI(confirmed, click(), ['manualPoints'])).result?.state).toBe('applied')
+        } finally { await harness.close() }
+      }
+      const kid = (await db.tasks.toArray()).find(task => task.title === '調査')!
+      await completeTask(kid.id, kid.revision)
+      const agentRows = (await db.assessments.toArray()).filter(item => item.origin === 'user_instruction_via_agent' && item.score.mode === 'allocated')
+      expect(agentRows.length).toBeGreaterThanOrEqual(2)
+      const snapshot = await captureSnapshot()
+      expect(() => validateSnapshot(JSON.parse(JSON.stringify(snapshot)))).not.toThrow()
+      const before = { assessments: (await db.assessments.toArray()).sort((a, b) => a.id.localeCompare(b.id)), ledger: await ledgerTotal(), receipts: (await db.commands.toArray()).map(row => row.key).filter(key => key.startsWith('breakdown:')).sort() }
+      // An allocated instruction row without its own split receipt is still rejected.
+      const forged = structuredClone(snapshot), forgedTask = forged.tasks.find(task => task.id === kid.id)!
+      forgedTask.generationKey = 'breakdown:unknown-split:0'
+      expect(() => validateSnapshot(forged)).toThrow('本人指示による評価履歴が不正です')
+      const unsplit = structuredClone(snapshot); unsplit.commands = unsplit.commands.filter(row => !row.key.startsWith('breakdown:'))
+      expect(() => validateSnapshot(unsplit)).toThrow('本人指示による評価履歴が不正です')
+      await restoreBackup(JSON.parse(JSON.stringify(snapshot)))
+      expect({ assessments: (await db.assessments.toArray()).sort((a, b) => a.id.localeCompare(b.id)), ledger: await ledgerTotal(), receipts: (await db.commands.toArray()).map(row => row.key).filter(key => key.startsWith('breakdown:')).sort() }).toEqual(before)
+      expect(before.ledger).toBe(15)
+    }
+  })
+  it('with text and schedule denied but splitting allowed, every entrance reaches the owner split stage and task.update on the same connection is CHANGES_STOPPED', async () => {
+    const denyEdits = async () => {
+      const settings = (await db.settings.get('main'))!, policy = changePolicyFor(settings), owner = { principal: { id: settings.profileId, kind: 'human' as const }, ownerId: settings.profileId, datasetId: settings.datasetId, allowedFields: [] as TaskChangeField[], sourceRevisions: [] }
+      const input = { preset: 'custom' as const, rules: presetRules('A1').map(rule => rule.operation === 'task.text' || rule.operation === 'task.schedule' ? { ...rule, mode: 'deny' as const } : rule.operation === 'task.split' ? { ...rule, mode: 'require_approval' as const } : rule), allowedHours: {}, titleRule: 'require_approval' as const, bounds: policy.bounds, locks: policy.locks }
+      await setAutomationPolicyFromUI(owner, click(), input, (await previewAutomationPolicy(input)).token)
+    }
+    const values: SplitChildDraft[] = [{ title: '調査', points: 15, titleOrigin: 'agent_proposal', pointsOrigin: 'agent_proposal' }, { title: '実装', points: 25, titleOrigin: 'agent_proposal', pointsOrigin: 'agent_proposal' }]
+    const results: Record<string, unknown> = {}
+    {
+      const taskId = await parent(); await denyEdits()
+      const settings = (await db.settings.get('main'))!, first = await prepareCommand({ schema_version: '1', command_id: uid(), type: 'task.split', target_id: taskId, expected_revision: 1, payload: { children: values.map(child => ({ title: child.title, points: child.points })) }, basis: { kind: 'app_instruction' } }, uiCoachActor(settings, 'synthetic/coach-a'))
+      const update = await prepareCommand({ schema_version: '1', command_id: uid(), type: 'task.update', target_id: taskId, expected_revision: 1, payload: { notes: 'コーチの案' }, basis: { kind: 'app_instruction' } }, uiCoachActor(settings, 'synthetic/coach-a'))
+      const confirmed = await confirmSplitCommandFromUI(first.prepared!, values, click(), '外部の分割案を本人が確認')
+      results.ui_coach = { split: { state: first.outcome.state, code: first.outcome.code }, stage: splitBody(confirmed.prepared!).stage, update: { state: update.outcome.state, code: update.outcome.code }, applied: (await submitCommand(confirmed.prepared!, { event: click(), checkedProtectedFields: ['manualPoints'], requestKey: 'ui' })).state }
+    }
+    for (const entrance of ['file', 'mcp'] as const) {
+      await resetApp()
+      const taskId = await parent(); await denyEdits()
+      const harness = await bridgeHarness({ taskIds: [taskId], fields: ['title', 'notes'], allowSplit: true })
+      try {
+        const splitId = crypto.randomUUID(), updateId = crypto.randomUUID(), children = values.map(child => ({ title: child.title, points: child.points }))
+        if (entrance === 'file') { await harness.writeCommand({ command_id: splitId, type: 'task.split', target_id: taskId, expected_revision: 1, payload: { children } }); await harness.writeCommand({ command_id: updateId, type: 'task.update', target_id: taskId, expected_revision: 1, payload: { notes: 'コーチの案' } }) }
+        else { expect((await harness.mcpCall('michi_propose_split', { commandId: splitId, snapshotId: harness.snapshotId(), targetId: taskId, expectedRevision: 1, children })).isError).toBeFalsy(); expect((await harness.mcpCall('michi_propose_update', { commandId: updateId, snapshotId: harness.snapshotId(), targetId: taskId, expectedRevision: 1, payload: { notes: 'コーチの案' } })).isError).toBeFalsy() }
+        const scanned = await harness.controller.scanInbox(), reference = (id: string) => (scanned.entries.find(item => item.filename.startsWith(id) && item.state === 'awaiting_approval') as Extract<typeof scanned.entries[number], { state: 'awaiting_approval' }>).reference
+        const update = await outcomeOf(() => harness.controller.prepare(reference(updateId)))
+        const prepared = await harness.controller.prepare(reference(splitId)), stage = splitBody(prepared.command).stage
+        const confirmed = await harness.controller.confirmSplitFromUI(prepared, values, click(), '外部の分割案を本人が確認')
+        results[entrance] = { split: { state: 'awaiting_approval', code: stage === 'owner_values' ? 'USER_INSTRUCTION_REQUIRED' : stage }, stage: splitBody(confirmed.command).stage, update: { state: update.state, code: update.code }, applied: (await harness.controller.applyFromUI(confirmed, click(), ['manualPoints'])).result?.state }
+        expect(await harness.mcpCall('michi_command_result', { commandId: updateId })).toMatchObject({ isError: true, structuredContent: { state: 'denied', code: 'CHANGES_STOPPED' } })
+        if (entrance === 'mcp') {
+          // Queued entries are closed as a policy change, not as a stop, while the grant still carries an allowed operation.
+          const queued = crypto.randomUUID(); await harness.refreshSnapshot()
+          await harness.mcpCall('michi_propose_update', { commandId: queued, snapshotId: harness.snapshotId(), targetId: taskId, expectedRevision: 2, payload: { notes: '待機中' } })
+          await harness.controller.scanInbox(); await harness.controller.closePending('CHANGES_STOPPED')
+          expect(await harness.mcpCall('michi_command_result', { commandId: queued })).toMatchObject({ isError: true, structuredContent: { state: 'expired', code: 'POLICY_CHANGED' } })
+        }
+      } finally { await harness.close() }
+    }
+    expect(results.ui_coach).toEqual({ split: { state: 'awaiting_approval', code: 'USER_INSTRUCTION_REQUIRED' }, stage: 'review', update: { state: 'denied', code: 'CHANGES_STOPPED' }, applied: 'applied' })
+    expect(results.file).toEqual(results.ui_coach); expect(results.mcp).toEqual(results.ui_coach)
   })
   it('the split tool is listed and accepted only when the owner granted splitting', async () => {
     const taskId = await parent(), harness = await bridgeHarness({ taskIds: [taskId], fields: ['title'] })

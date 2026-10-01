@@ -47,15 +47,18 @@ export type TraceEntrance = 'ui_human' | 'ui_coach' | 'file' | 'mcp' | 'app'
 export type TraceOperator = { kind: 'human' | 'coach' | 'external-agent'; id: string | null; model: string | null }
 export type ChangeTraceEntry = {
   auditId: string; at: string; operation: string; label: string; taskId: string | null; entrance: TraceEntrance; operator: TraceOperator
-  decision: 'auto' | 'approved' | 'self'; approver: string | null; policyEpoch: number | null; digest: string | null; basis: string | null; commandId: string | null
+  decision: 'auto' | 'approved' | 'self' | 'denied' | 'conflict' | 'expired' | 'rejected' | 'cancelled'; code: string | null; approver: string | null; policyEpoch: number | null; digest: string | null; basis: string | null; commandId: string | null
   fields: string[]; before: Record<string, unknown>; after: Record<string, unknown>; summary: string; legacy: boolean
 }
 export const TRACE_LABELS: Record<string, string> = {
   'changeset.update': 'タスクの変更', 'filebridge.approved': '外部コマンドの適用', 'filebridge.auto': '外部コマンドの自動適用', breakdown: 'タスクの分割', 'calendar.configuration': '周期・暦の設定', 'calendar.apply': '発生回の反映', 'calendar.csv.approved': '暦CSVの取込', 'routine.assistance.approved': '周期補助の承認',
   'assist.approved': '作成補助の登録', 'detection.approved': '検出タスクの登録', 'localaction.result': 'PCの許可済み操作', 'achievement.approve': '実績公開の承認',
   update: '本人の編集', bulk_update: '一括編集', set_flag: 'フラグ変更', complete: '完了', undo: '完了の取消', correct_points: '実績の訂正', trash: 'ゴミ箱へ移動', restore_task: 'ゴミ箱から戻す',
+  rollover: '繰越', snooze: 'スヌーズ', allocate_points: '子タスクへの配分', create_from_checklist: 'チェック項目から作成', create: '作成', auto_schedule: '自動の予定割当', assign_time_block: '時間枠の割当', assign_period: '期間の割当', add_dependency: '依存関係の追加', remove_dependency: '依存関係の解除',
+  'trip_bundle.allocate': '共通外出の配分', 'trip_bundle.restore': '共通外出の配分戻し', 'trip_bundle.create': '共通外出の作成', 'trip_bundle.remove': '共通外出の取消', 'completion.reconfirmed': '完了ポイントの再確認', 'command.rejected': '変更の拒否・取消',
 }
-const HUMAN_OPERATIONS = new Set(['update', 'bulk_update', 'set_flag', 'complete', 'undo', 'correct_points', 'trash', 'restore_task', 'breakdown'])
+const HUMAN_OPERATIONS = new Set(['update', 'bulk_update', 'set_flag', 'complete', 'undo', 'correct_points', 'trash', 'restore_task', 'breakdown', 'rollover', 'snooze', 'allocate_points', 'create_from_checklist', 'create', 'auto_schedule', 'assign_time_block', 'assign_period', 'add_dependency', 'remove_dependency', 'trip_bundle.allocate', 'trip_bundle.restore', 'trip_bundle.create', 'trip_bundle.remove'])
+const OUTCOME_DECISIONS = ['denied', 'conflict', 'expired', 'rejected', 'cancelled'] as const
 const isRecord = (value: unknown): value is Record<string, unknown> => Boolean(value && typeof value === 'object' && !Array.isArray(value))
 const text = (value: unknown, max = 200) => typeof value === 'string' && value ? value.slice(0, max) : null
 const number = (value: unknown) => Number.isSafeInteger(value) ? Number(value) : null
@@ -71,13 +74,20 @@ export function changeTraceEntry(audit: Audit): ChangeTraceEntry | null {
   let detail: unknown = null
   try { detail = typeof audit.detail === 'string' && audit.detail.trim().startsWith('{') ? JSON.parse(audit.detail) : null } catch { detail = null }
   const owner: TraceOperator = { kind: 'human', id: null, model: null }
-  const base = { auditId: audit.id, at: audit.at, operation: audit.operation, label: TRACE_LABELS[audit.operation], taskId: audit.taskId ?? null }
+  const base = { auditId: audit.id, at: audit.at, operation: audit.operation, label: TRACE_LABELS[audit.operation], taskId: audit.taskId ?? null, code: null as string | null }
   const empty = { fields: [] as string[], before: {}, after: {}, approver: null, policyEpoch: null, digest: null, basis: null, commandId: null }
   if (!isRecord(detail)) {
     // Legacy rows kept a short sentence only; they are shown as such.
     const summary = typeof audit.detail === 'string' ? audit.detail.slice(0, 300) : ''
-    if (audit.operation === 'assist.approved') return { ...base, ...empty, entrance: 'app', operator: /origin=ai_accepted/.test(summary) ? { kind: 'coach', id: 'app-coach', model: null } : owner, decision: 'approved', digest: summary.match(/[a-f0-9]{64}/)?.[0] ?? null, summary: '本人が内容を確認して登録', legacy: true }
+    if (audit.operation === 'assist.approved') {
+      // The actor marker names a verified file/MCP agent; only an unmarked AI acceptance is the in-app coach.
+      const external = String(audit.detail).match(/; actor=external-agent:([\w.:-]{1,200}); entrance=(file|mcp); command=([\w.:-]{1,200})/)
+      if (external) return { ...base, ...empty, entrance: external[2] as TraceEntrance, operator: { kind: 'external-agent', id: external[1], model: null }, decision: 'approved', digest: summary.match(/[a-f0-9]{64}/)?.[0] ?? null, basis: 'external_request', commandId: external[3], summary: '外部依頼の新規作成を本人が確認して登録', legacy: false }
+      return { ...base, ...empty, entrance: 'app', operator: /origin=ai_accepted/.test(summary) ? { kind: 'coach', id: 'app-coach', model: null } : owner, decision: 'approved', digest: summary.match(/[a-f0-9]{64}/)?.[0] ?? null, summary: '本人が内容を確認して登録', legacy: true }
+    }
     if (!HUMAN_OPERATIONS.has(audit.operation)) return null
+    // Routine occurrences are traced through calendar.apply; they are not owner edits.
+    if (audit.operation === 'create' && summary !== '本人が作成') return null
     return { ...base, ...empty, entrance: 'ui_human', operator: owner, decision: 'self', summary, legacy: true }
   }
   if (audit.operation === 'changeset.update') {
@@ -86,6 +96,12 @@ export function changeTraceEntry(audit: Audit): ChangeTraceEntry | null {
     const fallback: TraceEntrance = fact.principal.kind === 'human' ? 'ui_human' : fact.principal.kind === 'coach' ? 'ui_coach' : 'file'
     return { ...base, entrance: entranceOf(detail.entrance, fallback), operator: operatorOf(fact.principal, owner), decision: fact.decision, approver: text(detail.approvedBy), policyEpoch: number(detail.policyEpoch), digest: text(detail.digest, 64), basis: text(detail.basis, 40) ?? (fact.principal.kind === 'external-agent' ? 'external_request' : 'app_instruction'), commandId: text(detail.commandId), fields: fact.fields, before: pick(fact.before, fact.fields), after: pick(fact.after, fact.fields), summary: fact.undoOf ? '代理変更の取り消し' : '', legacy: !Object.hasOwn(detail, 'entrance') }
   }
+  if (audit.operation === 'command.rejected') {
+    if (detail.schema !== 'command.audit/1' || !OUTCOME_DECISIONS.includes(detail.decision as typeof OUTCOME_DECISIONS[number])) return null
+    const fields = Array.isArray(detail.fields) ? detail.fields.filter((field): field is string => typeof field === 'string').slice(0, 50) : []
+    return { ...base, ...empty, entrance: entranceOf(detail.entrance, 'app'), operator: operatorOf(detail.principal, owner), decision: detail.decision as typeof OUTCOME_DECISIONS[number], code: text(detail.code, 60), basis: text(detail.basis, 40), commandId: text(detail.commandId), fields, summary: text(detail.summary, 200) ?? '', legacy: false }
+  }
+  if (audit.operation === 'completion.reconfirmed') return { ...base, ...empty, entrance: 'ui_human', operator: owner, decision: 'approved', approver: text(detail.ownerId), policyEpoch: number(detail.policyEpoch), digest: text(detail.digest, 64), fields: ['completionPoints'], before: { completionPoints: number(detail.previousStoredPoints) }, after: { completionPoints: number(detail.newPoints) }, summary: text(detail.reason, 200) ?? '', legacy: false }
   if (detail.schema === 'command.audit/1') {
     const fields = Array.isArray(detail.fields) ? detail.fields.filter((field): field is string => typeof field === 'string').slice(0, 50) : []
     const decision = detail.decision === 'auto' || detail.decision === 'approved' ? detail.decision : 'self'

@@ -7,7 +7,10 @@ import Dexie from 'dexie'
 
 export type AssistedDraft = { input: TaskInput; notices: string[] }
 export type SourcedDraft = AssistedDraft & { source: string }
-export type PreparedAssistedTasks = { id: string; profileId: string; datasetId: string; expiresAt: string; inputs: TaskInput[]; sources: string[]; origin: 'manual' | 'ai'; policyEpoch: number | null; digest: string }
+/** The verified external actor behind a file/MCP creation; covered by the digest the owner approves (S21 shows it, not the coach). */
+export type AssistActor = { kind: 'external-agent'; id: string; entrance: 'file' | 'mcp'; commandId: string }
+export type PreparedAssistedTasks = { id: string; profileId: string; datasetId: string; expiresAt: string; inputs: TaskInput[]; sources: string[]; origin: 'manual' | 'ai'; policyEpoch: number | null; actor?: AssistActor; digest: string }
+const assistActorValid = (actor: unknown) => Boolean(actor && typeof actor === 'object' && !Array.isArray(actor) && Object.keys(actor).length === 4 && (actor as AssistActor).kind === 'external-agent' && ['file', 'mcp'].includes((actor as AssistActor).entrance) && [(actor as AssistActor).id, (actor as AssistActor).commandId].every(value => typeof value === 'string' && /^[\w.:-]{1,200}$/.test(value)))
 
 function uniqueNumber(raw: string, pattern: RegExp, maximum: number): number | null {
   const values = [...raw.matchAll(pattern)].map(match => Number(match[1]))
@@ -81,9 +84,9 @@ export function acceptAssistedDrafts(raw: string, answer: string, baseDate: stri
   return drafts
 }
 
-export async function prepareAssistedTasks(drafts: SourcedDraft[], origin: 'manual' | 'ai'): Promise<PreparedAssistedTasks> {
+export async function prepareAssistedTasks(drafts: SourcedDraft[], origin: 'manual' | 'ai', actor?: AssistActor): Promise<PreparedAssistedTasks> {
   if (!drafts.length || drafts.length > 20) throw new Error('候補は1〜20件で指定してください')
-  if (!['manual', 'ai'].includes(origin) || drafts.some(draft => typeof draft.source !== 'string' || !draft.source.trim() || draft.source.length > 2000)) throw new Error('候補の出典が不正です')
+  if (!['manual', 'ai'].includes(origin) || actor !== undefined && (origin !== 'ai' || !assistActorValid(actor)) || drafts.some(draft => typeof draft.source !== 'string' || !draft.source.trim() || draft.source.length > 2000)) throw new Error('候補の出典が不正です')
   for (const { input } of drafts) {
     validateTaskInput(input)
     for (const value of [input.scheduledDate, input.dueDate]) validateDate(value, '日付')
@@ -94,13 +97,13 @@ export async function prepareAssistedTasks(drafts: SourcedDraft[], origin: 'manu
   // AI proposals follow the AI-processing and AI-change stops; raw-text drafts saved by the owner do not.
   const policy = changePolicyFor(settings)
   if (origin === 'ai' && (!settings.aiEnabled || !policy.aiChangesEnabled)) throw new Error('AIによる変更案の受付は停止中です。原文から下書きを使ってください')
-  const payload = { id: uid(), profileId: settings.profileId, datasetId: settings.datasetId, expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(), inputs: structuredClone(drafts.map(draft => draft.input)), sources: drafts.map(draft => draft.source), origin, policyEpoch: origin === 'ai' ? policy.epoch : null }
+  const payload = { id: uid(), profileId: settings.profileId, datasetId: settings.datasetId, expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(), inputs: structuredClone(drafts.map(draft => draft.input)), sources: drafts.map(draft => draft.source), origin, policyEpoch: origin === 'ai' ? policy.epoch : null, ...(actor ? { actor: { kind: actor.kind, id: actor.id, entrance: actor.entrance, commandId: actor.commandId } } : {}) }
   return { ...payload, digest: await contentDigest(payload) }
 }
 
 export async function applyAssistedTasks(prepared: PreparedAssistedTasks, confirmedDigest: string): Promise<string[]> {
   const { digest, ...payload } = prepared
-  if (!prepared.inputs.length || prepared.inputs.length > 20 || prepared.sources.length !== prepared.inputs.length || !['manual', 'ai'].includes(prepared.origin)) throw new Error('確認した候補の形式が不正です')
+  if (!prepared.inputs.length || prepared.inputs.length > 20 || prepared.sources.length !== prepared.inputs.length || !['manual', 'ai'].includes(prepared.origin) || prepared.actor !== undefined && !assistActorValid(prepared.actor)) throw new Error('確認した候補の形式が不正です')
   if (digest !== confirmedDigest || digest !== await Dexie.waitFor(contentDigest(payload))) throw new Error('確認後に内容が変わりました。もう一度確認してください')
   if (!Number.isFinite(Date.parse(prepared.expiresAt)) || Date.parse(prepared.expiresAt) <= Date.now()) throw new Error('確認の有効期限が切れました')
   return db.transaction('rw', [db.tasks, db.assessments, db.commands, db.audits, db.containers, db.settings, db.labelGroups, db.labelDefinitions], async () => {
@@ -110,7 +113,7 @@ export async function applyAssistedTasks(prepared: PreparedAssistedTasks, confir
     if (prepared.origin === 'ai') { const policy = changePolicyFor(settings); if (!settings.aiEnabled || !policy.aiChangesEnabled || policy.epoch !== prepared.policyEpoch) throw new Error('AIの停止または権限の変更により、この案は使えません。作り直してください') }
     const ids = await createTasksAtomic(prepared.inputs, `assist:${prepared.id}`)
     const auditId = `assist-approval:${prepared.id}`
-    if (!await db.audits.get(auditId)) await db.audits.add({ id: auditId, taskId: null, operation: 'assist.approved', at: new Date().toISOString(), detail: `本人承認 ${confirmedDigest}; origin=${prepared.origin === 'ai' ? 'ai_accepted' : 'human'}; tasks=${ids.join(',')}` })
+    if (!await db.audits.get(auditId)) await db.audits.add({ id: auditId, taskId: null, operation: 'assist.approved', at: new Date().toISOString(), detail: `本人承認 ${confirmedDigest}; origin=${prepared.origin === 'ai' ? 'ai_accepted' : 'human'}; tasks=${ids.join(',')}${prepared.actor ? `; actor=external-agent:${prepared.actor.id}; entrance=${prepared.actor.entrance}; command=${prepared.actor.commandId}` : ''}` })
     return ids
   })
 }

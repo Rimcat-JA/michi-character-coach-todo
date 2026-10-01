@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useLiveQuery } from 'dexie-react-hooks'
-import { applyChangeSet, approveChangeSetFromUI, autoChangeCountsToday, cancelChangeSet, decideChangePolicy, taskChangeValueText, type ChangeContext, type ChangePolicy, type ChangeReceipt, type PreparedChangeSet, type TaskChangeField } from './change-set'
+import { applyChangeSet, approveChangeSetFromUI, autoChangeCountsToday, cancelChangeSet, decideChangePolicy, taskChangeValueText, type ChangeContext, type ChangeTrace, type ChangePolicy, type ChangeReceipt, type PreparedChangeSet, type TaskChangeField } from './change-set'
 import { cancelCommand, ENTRANCE_LABELS as entranceLabels, grantDecision, outcomeNotice, submitCommand, type CommandOutcome, type PreparedCommand } from './command-bus'
 import { db } from './db'
 
@@ -9,10 +9,10 @@ const labels: Record<TaskChangeField,string> = {title:'タイトル',notes:'メ�
  * The one approval card for task edits from every entrance. With `command` the shared bus approves and applies;
  * `onApprove` lets the file entrance wrap the same approval in its main-process lease.
  */
-export default function ChangeSetPreview({ prepared, policy, actorContext, humanContext, onApplied, onCancel, command, onApprove, approveAttributes }: {
+export default function ChangeSetPreview({ prepared, policy, actorContext, humanContext, onApplied, onCancel, command, onApprove, approveAttributes, trace }: {
   prepared: PreparedChangeSet; policy: ChangePolicy; actorContext: ChangeContext; humanContext: ChangeContext
   onApplied: (receipt: ChangeReceipt)=>void; onCancel: ()=>void
-  command?: PreparedCommand; onApprove?: (event: Event, checked: TaskChangeField[])=>Promise<void>; approveAttributes?: Record<string,string>
+  command?: PreparedCommand; onApprove?: (event: Event, checked: TaskChangeField[])=>Promise<void>; approveAttributes?: Record<string,string>; trace?: ChangeTrace
 }) {
   const [checks,setChecks]=useState<{digest:string;fields:TaskChangeField[]}>({digest:prepared.digest,fields:[]})
   const checked=checks.digest===prepared.digest?checks.fields:[]
@@ -31,7 +31,7 @@ export default function ChangeSetPreview({ prepared, policy, actorContext, human
       if(onApprove&&event){await onApprove(event,checked);return}
       if(command){const outcome=await submitCommand(command,{event,checkedProtectedFields:checked,requestKey});if(outcome.state==='applied')onApplied({...receiptOf(outcome),revisions:await revisionsOf(outcome)});else setNotice(outcomeNotice(outcome));return}
       const approval=event?await approveChangeSetFromUI(prepared,humanContext,event,checked):null
-      onApplied(await applyChangeSet(prepared,approval,actorContext,requestKey))
+      onApplied(await applyChangeSet(prepared,approval,actorContext,requestKey,trace??null))
     } catch(error) { setNotice(error instanceof Error?`${error.message}${'code' in error&&typeof error.code==='string'?`（${error.code}）`:''}`:String(error)) }
     finally {setBusy(false)}
   }
@@ -41,7 +41,7 @@ export default function ChangeSetPreview({ prepared, policy, actorContext, human
   async function cancel() {
     if(busy)return
     setBusy(true)
-    try {if(command)await cancelCommand(command);else await cancelChangeSet(prepared,humanContext);onCancel()}
+    try {if(command)await cancelCommand(command,'owner');else await cancelChangeSet(prepared,humanContext);onCancel()}
     catch(error){setNotice(error instanceof Error?error.message:String(error))}
     finally{setBusy(false)}
   }

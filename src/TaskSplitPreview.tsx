@@ -18,7 +18,7 @@ export default function TaskSplitPreview({ command, onApplied, onCancel, onAppro
     } catch (error) { setNotice(error instanceof Error ? `${error.message}${'code' in error && typeof error.code === 'string' ? `（${error.code}）` : ''}` : String(error)) }
     finally { setBusy(false) }
   }
-  async function cancel() { if (busy) return; await cancelCommand(command); onCancel() }
+  async function cancel() { if (busy) return; await cancelCommand(command, 'owner'); onCancel() }
   return <section className="card change-set-preview task-split-preview" aria-label="分割内容の確認">
     <h3>分割内容の確認</h3>
     <p>今回の操作者：{principal.kind === 'human' ? '本人' : principal.kind === 'coach' ? 'アプリ内コーチ' : '外部エージェント'}{principal.model ? `（${principal.model}）` : ''} · 入口：{entranceLabels[command.actor.entrance]}{command.actor.label ? `（${command.actor.label}・自己申告）` : ''}</p>

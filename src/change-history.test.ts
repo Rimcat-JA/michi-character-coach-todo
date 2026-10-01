@@ -27,9 +27,10 @@ const fixtures: Audit[] = [
   audit('a12', 'localaction.result', '2026-10-01T12:00:00.000Z', { requestId: 'q', digest: '4'.repeat(64), policyEpoch: 4, status: 'succeeded', output: 'PCの出力は表示しない' }, null),
   audit('a13', 'breakdown', '2026-10-01T13:00:00.000Z', { schema: 'command.audit/1', entrance: 'file', basis: 'external_request', commandId: 'c13', principal: { kind: 'external-agent', id: 'client-a', model: null }, decision: 'approved', approvedBy: 'owner', digest: '5'.repeat(64), policyEpoch: 4, operation: 'task.split', fields: ['manualPoints', 'children'], before: { manualPoints: 40, children: [] }, after: { manualPoints: 0, children: [{ title: '調査', points: 15 }] } }),
   audit('a14', 'breakdown', '2026-10-01T14:00:00.000Z', 'large: 30ptを3件へ配分'),
-  audit('a15', 'snooze', '2026-10-01T15:00:00.000Z', 'ignored'),
+  audit('a15', 'session.started', '2026-10-01T15:00:00.000Z', 'ignored'),
   audit('a16', 'changeset.update', '2026-10-01T16:00:00.000Z', '{broken json'),
   audit('a17', 'automation.policy', '2026-10-01T17:00:00.000Z', { preset: 'A2' }, null),
+  audit('a18', 'snooze', '2026-10-01T18:00:00.000Z', '2026-10-02T00:00:00.000Z'),
 ]
 describe('S21 change trace from every entrance', () => {
   it('parses every audit type including legacy strings without throwing and skips unrelated rows', () => {
@@ -39,8 +40,10 @@ describe('S21 change trace from every entrance', () => {
     expect(changeTraceEntry(fixtures.find(row => row.id === 'a17')!)).toBeNull()
     expect(changeTraceEntry({ id: 'x', taskId: null, operation: 'changeset.update', at: 'bad', detail: null as unknown as string })).toBeNull()
     const { entries, total } = changeTrace(fixtures)
-    expect(total).toBe(14)
-    expect(entries.map(entry => entry.auditId)).toEqual(['a14', 'a13', 'a12', 'a11', 'a10', 'a9', 'a8', 'a7', 'a6', 'a5', 'a4', 'a3', 'a2', 'a1'])
+    expect(total).toBe(15)
+    expect(entries.map(entry => entry.auditId)).toEqual(['a18', 'a14', 'a13', 'a12', 'a11', 'a10', 'a9', 'a8', 'a7', 'a6', 'a5', 'a4', 'a3', 'a2', 'a1'])
+    // Legacy owner snoozes are shown as the owner's own operation, never guessed further.
+    expect(entries[0]).toMatchObject({ label: 'スヌーズ', entrance: 'ui_human', operator: { kind: 'human' }, decision: 'self', summary: '2026-10-02T00:00:00.000Z', legacy: true })
   })
   it('shows the operator and entrance, distinguishes automatic from approved and self, and keeps legacy rows', () => {
     const byId = Object.fromEntries(changeTrace(fixtures).entries.map(entry => [entry.auditId, entry]))
@@ -56,7 +59,7 @@ describe('S21 change trace from every entrance', () => {
     expect(byId.a14).toMatchObject({ decision: 'self', legacy: true })
   })
   it('never shows ICS/CSV bodies, quotes or local action output', () => {
-    const text = JSON.stringify(changeTrace(fixtures)) + renderToStaticMarkup(createElement(ChangeTraceList, { entries: changeTrace(fixtures).entries, tasks: [], total: 14, page: 0 }))
+    const text = JSON.stringify(changeTrace(fixtures)) + renderToStaticMarkup(createElement(ChangeTraceList, { entries: changeTrace(fixtures).entries, tasks: [], total: 15, page: 0 }))
     for (const secret of ['BEGIN:VCALENDAR', '社外秘', '資料の引用は表示しない', 'PCの出力は表示しない']) expect(text).not.toContain(secret)
     expect(text).toContain('設定版 1 → 2')
   })
