@@ -26,6 +26,7 @@ import { validateCalendarRulesRecords } from './calendar-rules-validation'
 import { validateCoachNotificationState } from './coach-notifications'
 import type { AchievementPolicy, AchievementEvidence, AchievementExport } from './achievements'
 import { validateAchievementRecords } from './achievements-validation'
+import { validateTaskSourceEvidenceRecords, type TaskSourceEvidence } from './task-source-evidence'
 
 export type Snapshot = {
   format: 'coachbundle'; version: 1; exportedAt: string
@@ -69,6 +70,7 @@ export type Snapshot = {
   achievementPolicies?: AchievementPolicy[]
   achievementEvidence?: AchievementEvidence[]
   achievementExports?: AchievementExport[]
+  taskSourceEvidence?: TaskSourceEvidence[]
 }
 
 const tableNames = ['tasks', 'assessments', 'completions', 'ledger', 'routines', 'sessions', 'commands', 'audits', 'settings'] as const
@@ -382,6 +384,7 @@ export function validateSnapshot(input: unknown): asserts input is Snapshot {
   if (settings.changePolicy !== undefined) validateChangePolicy(settings.changePolicy)
   if (settings.notificationState !== undefined) validateCoachNotificationState(settings.notificationState, settings.profileId, settings.datasetId)
   validateSourceRecords(input.contextSources, input.contextSnapshots, input.sourceSummaries, input.sourceArtifacts, settings.profileId, settings.changePolicy)
+  validateTaskSourceEvidenceRecords(input.taskSourceEvidence, taskIds, new Set(((input.contextSources ?? []) as ContextSource[]).map(source => source.id)), settings.profileId, settings.datasetId)
   validateAchievementRecords(input.achievementPolicies ?? [], input.achievementEvidence ?? [], input.achievementExports ?? [], tables.tasks as Task[], tables.completions as Completion[], attachments, notes, [settings])
   validateChatHistoryRecords(input.coachConversations, input.coachMessages, settings.profileId)
   validateCalendarRulesRecords(input.calendarRules ?? [], input.tasks as Task[], (input.calendarEvents ?? []) as CalendarEvent[], input.settings as Settings[])

@@ -6,6 +6,9 @@ import { uid, validateDate } from './domain'
 import type { CoachMemory, MemoryTombstone } from './coach-memory'
 import { purgeChatSourceResponses } from './chat-history'
 import { purgeCoachNotificationSource } from './coach-notification-save'
+import type { CoachMessage } from './chat-history'
+import { legacyReviewTasks, purgeTaskSourceEvidence, scrubLegacySourceCopies, type LegacyReviewTask } from './task-source-evidence'
+import { candidateExpired, defaultSourceRetention } from './retention-defaults'
 
 export type SourceProvider = 'local' | 'slack' | 'line' | 'teams' | 'discord' | 'other'
 export type SourcePermissions = { acquire: boolean; retain: boolean; index: boolean; aiEgress: boolean; notify: boolean; externalWrite: boolean; disclose: boolean }
@@ -19,7 +22,12 @@ export type SourceSpan = { id: string; index: number; start: number; end: number
 export type ContextSnapshot = { id: string; sourceId: string; ownerId: string; revision: number; originalText: string; text: string; sha256: string; spans: SourceSpan[]; createdAt: string }
 export type SourceSummary = { id: string; ownerId: string; sourceId: string; sourceRevision: number; permissionRevision: number; policyEpoch: number; sourcePermissionRevision: number; model: string; provider: 'openrouter'; text: string; sha256: string; createdAt: string }
 export type SourceArtifact = { id: string; ownerId: string; sourceId: string; sourceRevision: number; permissionRevision: number; kind: 'cache' | 'embedding' | 'candidate'; payload: string; createdAt: string }
-export type SourceImport = Pick<ContextSource, 'title' | 'provider' | 'externalId' | 'conversation' | 'author' | 'sourceUrl' | 'date' | 'permissions' | 'allowedModels' | 'retentionUntil'> & { text: string; fromDate: string; toDate: string; timezone?: string }
+/** retentionUntil omitted = design default (conversation exports 90 days, local documents none); null = owner chose no expiry. */
+export type SourceImport = Pick<ContextSource, 'title' | 'provider' | 'externalId' | 'conversation' | 'author' | 'sourceUrl' | 'date' | 'permissions' | 'allowedModels'> & { retentionUntil?: string | null; text: string; fromDate: string; toDate: string; timezone?: string }
+export type SourceErasure = { original: number; summaries: number; caches: number; embeddings: number; candidates: number; memories: number; aiReplies: number; taskQuotes: number; legacyCopies: number }
+export type SourceDeletionReport = { sourceId: string; alreadyDeleted: boolean; erased: SourceErasure; reviewTaskIds: string[]; reviewTasks: LegacyReviewTask[]; sentModels: string[] }
+export type SourceSendRoute = 'source-summary' | 'source-detection' | 'coach-chat'
+export type SourceDerivedCounts = { summaries: number; caches: number; embeddings: number; candidates: number; taskQuotes: number; memories: number }
 export const sourceDb = baseDb
 const db = sourceDb
 const providerNames: SourceProvider[] = ['local', 'slack', 'line', 'teams', 'discord', 'other']
@@ -53,15 +61,26 @@ async function bumpPolicy() {
   if (!Number.isSafeInteger(policy.epoch + 1) || !Number.isSafeInteger(policy.sourcePermissionRevision + 1)) throw new Error('資料の権限版が上限に達しています')
   await db.settings.put({ ...settings, changePolicy: { ...policy, epoch: policy.epoch + 1, sourcePermissionRevision: policy.sourcePermissionRevision + 1 } })
 }
-const purgeTables = () => [db.contextSources, db.contextSnapshots, db.sourceSummaries, db.sourceArtifacts, db.coachMemories, db.memoryTombstones, db.coachConversations, db.coachMessages, db.settings]
+// Expiry erases the same rows but needs no report, so tasks, receipts and audits stay unlocked.
+const expiryTables = () => [db.contextSources, db.contextSnapshots, db.sourceSummaries, db.sourceArtifacts, db.coachMemories, db.memoryTombstones, db.coachConversations, db.coachMessages, db.settings, db.taskSourceEvidence]
+const purgeTables = () => [...expiryTables(), db.tasks, db.audits, db.commands]
+/** Redacted deletion record shared by manual deletion, expiry and restore. */
+export function erasedSourceRow(source: ContextSource, at: string): ContextSource {
+  return { ...source, title: '削除した資料', externalId: null, conversation: null, author: null, sourceUrl: null, permissions: Object.fromEntries(permissionKeys.map(key => [key, false])) as SourcePermissions, revision: source.revision + 1, permissionRevision: source.permissionRevision + 1, deletedAt: at, updatedAt: at }
+}
+/** Body-free, append-only record that this source's text left for a model. Never purged: the provider copy cannot be recalled (design 23.3). */
+export async function recordSourceSent(source: Pick<ContextSource, 'id' | 'latestRevision' | 'permissionRevision'>, model: string, route: SourceSendRoute): Promise<void> {
+  await db.audits.add({ id: uid(), taskId: null, operation: 'source.sent', at: new Date().toISOString(), detail: JSON.stringify({ sourceId: source.id, model, route, snapshotRevision: source.latestRevision, permissionRevision: source.permissionRevision }) })
+}
 function usesSource(memory: CoachMemory, sourceId: string) { return memory.sources.some(ref => (ref.kind as string) === 'library' && ref.refId === sourceId || ref.kind === 'derived-summary' && ref.refId === `library:${sourceId}`) }
-async function purgeDerived(source: ContextSource, at: string) {
+async function purgeDerived(source: ContextSource, at: string, quotes: boolean): Promise<Omit<SourceErasure, 'original' | 'legacyCopies'>> {
   await purgeCoachNotificationSource(source.id, at)
-  await purgeChatSourceResponses(source.id, source.ownerId)
-  await db.sourceSummaries.where('sourceId').equals(source.id).delete()
+  const aiReplies = await purgeChatSourceResponses(source.id, source.ownerId), artifacts = await db.sourceArtifacts.where('sourceId').equals(source.id).toArray()
+  const erased = { summaries: await db.sourceSummaries.where('sourceId').equals(source.id).delete(), caches: artifacts.filter(row => row.kind === 'cache').length, embeddings: artifacts.filter(row => row.kind === 'embedding').length, candidates: artifacts.filter(row => row.kind === 'candidate').length, memories: 0, aiReplies, taskQuotes: quotes ? await purgeTaskSourceEvidence(source.id) : 0 }
   await db.sourceArtifacts.where('sourceId').equals(source.id).delete()
   const memories = await db.coachMemories.where('ownerId').equals(source.ownerId).toArray()
   for (const memory of memories) if (!memory.sourcePurged && !memory.contentPurged && usesSource(memory, source.id)) {
+    erased.memories++
     const existing = new Set((await db.memoryTombstones.where('ownerId').equals(source.ownerId).toArray()).map(row => row.sourceKey))
     for (const tombstone of await db.memoryTombstones.where('ownerId').equals(source.ownerId).toArray()) if (tombstone.memoryId === memory.id) await db.memoryTombstones.put({ ...tombstone, reason: 'source-deleted', at })
     for (const ref of memory.sources) {
@@ -71,6 +90,21 @@ async function purgeDerived(source: ContextSource, at: string) {
     // Source-derived text and its historical copies must not survive as a hidden cache.
     await db.coachMemories.put({ ...memory, text: '', sourcePurged: true, history: [], revision: memory.revision + 1, deletedAt: at, updatedAt: at })
   }
+  return erased
+}
+// Models that already received this source's text; the provider copy cannot be recalled (design 23.3).
+async function sentModels(source: ContextSource): Promise<string[]> {
+  const models = new Set((await db.sourceSummaries.where('sourceId').equals(source.id).toArray()).map(row => row.model))
+  for (const row of await db.sourceArtifacts.where('sourceId').equals(source.id).toArray()) if (row.kind === 'candidate') { try { const model = (JSON.parse(row.payload) as { detectorModel?: unknown }).detectorModel; if (typeof model === 'string') models.add(model) } catch { /* Malformed caches carry no provenance. */ } }
+  for (const audit of await db.audits.toArray()) if (audit.operation === 'detection.approved' || audit.operation === 'source.sent' || audit.operation.startsWith('egress.')) {
+    try {
+      const detail = JSON.parse(audit.detail) as { source?: { sourceId?: unknown }; detectorModel?: unknown; sourceId?: unknown; model?: unknown; tasks?: { sources?: { sourceId?: unknown }[] }[] }
+      if (audit.operation === 'detection.approved') { if (detail.source?.sourceId === source.id && typeof detail.detectorModel === 'string') models.add(detail.detectorModel) }
+      else if (typeof detail.model === 'string' && (detail.sourceId === source.id || Array.isArray(detail.tasks) && detail.tasks.some(task => Array.isArray(task?.sources) && task.sources.some(ref => ref?.sourceId === source.id)))) models.add(detail.model)
+    } catch { /* Plain audit text is not send provenance. */ }
+  }
+  for (const message of await db.coachMessages.where('ownerId').equals(source.ownerId).toArray()) if (message.origin === 'live_ai' && message.model && message.selectedSources.some(ref => ref.kind === 'library' && ref.id === source.id)) models.add(message.model)
+  return [...models].sort()
 }
 
 export async function importLocalSource(input: SourceImport): Promise<string> {
@@ -82,10 +116,11 @@ export async function importLocalSource(input: SourceImport): Promise<string> {
   if (input.sourceUrl !== null) { try { const url = new URL(input.sourceUrl); if (!['http:', 'https:'].includes(url.protocol) || input.sourceUrl.length > 2000) throw new Error() } catch { throw new Error('出典URLを確認してください') } }
   for (const date of [input.date, input.fromDate, input.toDate]) { if (typeof date !== 'string' || !date) throw new Error('資料の日付と取得範囲を確認してください'); validateDate(date, '取得範囲') }
   if (input.fromDate > input.toDate || input.date < input.fromDate || input.date > input.toDate) throw new Error('資料の日付を取得範囲内にしてください')
-  validateSourcePermissions(input.permissions); validateSourceModels(input.allowedModels); validTime(input.retentionUntil)
+  const retentionUntil = input.retentionUntil === undefined ? defaultSourceRetention(input.provider) : input.retentionUntil
+  validateSourcePermissions(input.permissions); validateSourceModels(input.allowedModels); validTime(retentionUntil)
   if (!input.permissions.acquire || !input.permissions.retain) throw new Error('取り込みには取得と保存の許可が必要です')
   if (input.permissions.aiEgress && !input.allowedModels.length) throw new Error('AI送信を許可するモデルIDを指定してください')
-  if (input.retentionUntil !== null && Date.parse(input.retentionUntil) <= Date.now()) throw new Error('保持期限は未来の日時にしてください')
+  if (retentionUntil !== null && Date.parse(retentionUntil) <= Date.now()) throw new Error('保持期限は未来の日時にしてください')
   const digest = await Dexie.waitFor(hash(text)), id = uid(), snapshotId = `${id}:1`, spans = sourceSpans(snapshotId, text), at = new Date().toISOString()
   return db.transaction('rw', [db.contextSources, db.contextSnapshots, db.settings], async () => {
     const settings = await owner()
@@ -96,7 +131,7 @@ export async function importLocalSource(input: SourceImport): Promise<string> {
       if (snapshot?.sha256 === digest) return source.id
     }
     await bumpPolicy()
-    await db.contextSources.add({ id, ownerId: settings.profileId, title: input.title.trim(), provider: input.provider, externalId: input.externalId, conversation: input.conversation, author: input.author, sourceUrl: input.sourceUrl, date: input.date, timezone, revision: 1, latestRevision: 1, permissionRevision: 1, permissions: { ...input.permissions }, aiProvider: 'openrouter', allowedModels: [...input.allowedModels], coverage: { fromDate: input.fromDate, toDate: input.toDate, complete: false, method: 'manual-import', lastCheckedAt: at }, retentionUntil: input.retentionUntil, createdAt: at, updatedAt: at, deletedAt: null })
+    await db.contextSources.add({ id, ownerId: settings.profileId, title: input.title.trim(), provider: input.provider, externalId: input.externalId, conversation: input.conversation, author: input.author, sourceUrl: input.sourceUrl, date: input.date, timezone, revision: 1, latestRevision: 1, permissionRevision: 1, permissions: { ...input.permissions }, aiProvider: 'openrouter', allowedModels: [...input.allowedModels], coverage: { fromDate: input.fromDate, toDate: input.toDate, complete: false, method: 'manual-import', lastCheckedAt: at }, retentionUntil, createdAt: at, updatedAt: at, deletedAt: null })
     await db.contextSnapshots.add({ id: snapshotId, sourceId: id, ownerId: settings.profileId, revision: 1, originalText: input.text, text, sha256: digest, spans, createdAt: at })
     return id
   })
@@ -111,27 +146,97 @@ export async function setSourcePermissions(id: string, expectedRevision: number,
     if (source.revision !== expectedRevision) throw new ConflictError()
     const clock = new Date().toISOString(), at = clock < source.updatedAt ? source.updatedAt : clock
     await bumpPolicy()
-    await purgeDerived(source, at)
+    await purgeDerived(source, at, !permissions.acquire || !permissions.retain || !permissions.index)
     if (!permissions.retain) await db.contextSnapshots.where('sourceId').equals(id).delete()
     await db.contextSources.put({ ...source, permissions: { ...permissions }, allowedModels: [...allowedModels], retentionUntil, permissionRevision: source.permissionRevision + 1, revision: source.revision + 1, updatedAt: at })
   })
 }
-export async function deleteSource(id: string, expectedRevision: number): Promise<void> {
-  await db.transaction('rw', purgeTables(), async () => {
+export async function deleteSource(id: string, expectedRevision: number): Promise<SourceDeletionReport> {
+  return db.transaction('rw', purgeTables(), async () => {
     const settings = await owner(), source = await db.contextSources.get(id)
     if (!source || source.ownerId !== settings.profileId) throw new Error('本人の資料がありません')
     if (source.revision !== expectedRevision) throw new ConflictError()
-    if (source.deletedAt) return
-    const clock = new Date().toISOString(), at = clock < source.updatedAt ? source.updatedAt : clock
-    await bumpPolicy(); await purgeDerived(source, at)
-    await db.contextSnapshots.where('sourceId').equals(id).delete()
-    await db.contextSources.put({ ...source, title: '削除した資料', externalId: null, conversation: null, author: null, sourceUrl: null, permissions: Object.fromEntries(permissionKeys.map(key => [key, false])) as SourcePermissions, revision: source.revision + 1, permissionRevision: source.permissionRevision + 1, deletedAt: at, updatedAt: at })
+    if (source.deletedAt) return { sourceId: id, alreadyDeleted: true, erased: { original: 0, summaries: 0, caches: 0, embeddings: 0, candidates: 0, memories: 0, aiReplies: 0, taskQuotes: 0, legacyCopies: 0 }, reviewTaskIds: [], reviewTasks: [], sentModels: [] }
+    return eraseSource(source, true)
   })
+}
+/** Runs inside a purge transaction. Only the reported deletion reads tasks/audits and rewrites legacy receipt copies. */
+async function eraseSource(source: ContextSource, report: boolean): Promise<SourceDeletionReport> {
+  const clock = new Date().toISOString(), at = clock < source.updatedAt ? source.updatedAt : clock, models = report ? await sentModels(source) : []
+  await bumpPolicy(); const erased = await purgeDerived(source, at, true)
+  const original = await db.contextSnapshots.where('sourceId').equals(source.id).delete()
+  const legacyCopies = report ? await scrubLegacySourceCopies(source.id) : 0, reviewTasks = report ? legacyReviewTasks(await db.tasks.toArray(), source.id) : []
+  await db.contextSources.put(erasedSourceRow(source, at))
+  return { sourceId: source.id, alreadyDeleted: false, erased: { original, ...erased, legacyCopies }, reviewTaskIds: reviewTasks.map(task => task.id), reviewTasks, sentModels: models }
+}
+async function expireSource(id: string, expectedRevision: number): Promise<void> {
+  await db.transaction('rw', expiryTables(), async () => {
+    const settings = await owner(), source = await db.contextSources.get(id)
+    if (!source || source.ownerId !== settings.profileId) throw new Error('本人の資料がありません')
+    if (source.revision !== expectedRevision) throw new ConflictError()
+    if (source.deletedAt || source.retentionUntil === null || Date.parse(source.retentionUntil) > Date.now()) return
+    await eraseSource(source, false)
+  })
+}
+/** Inside the restore transaction: the same derived-row purge a deletion or permission save runs, for sources erased or re-permissioned here. */
+export async function purgeRestoredSourceDerived(source: ContextSource, at: string): Promise<void> {
+  await purgeDerived(source, at, Boolean(source.deletedAt) || !source.permissions.acquire || !source.permissions.retain || !source.permissions.index)
+  if (source.deletedAt || !source.permissions.retain) await db.contextSnapshots.where('sourceId').equals(source.id).delete()
+}
+export type RestoredSourceConsent = { sources: ContextSource[]; erased: string[]; revised: string[] }
+const earlierRetention = (left: string | null, right: string | null) => left === null ? right : right === null ? left : left < right ? left : right
+/** Erasures, permission/model revocations and earlier expiries made on this device after the backup are re-applied before the restore writes, never undone.
+ * A backup row is narrowed only when this device saved permissions after it (higher permissionRevision); a newer backup's re-grant is kept. */
+export function applyCurrentSourceConsent(backup: ContextSource[], local: ContextSource[], ownerId: string, at: string): RestoredSourceConsent {
+  const here = new Map(local.filter(source => source.ownerId === ownerId).map(source => [source.id, source])), erased = new Set<string>(), revised = new Set<string>()
+  const sources = backup.map(row => {
+    const current = here.get(row.id)
+    if (row.ownerId !== ownerId) return row
+    if (current?.deletedAt) { if (!row.deletedAt) erased.add(row.id); return current }
+    let next = row
+    if (current && !row.deletedAt && current.permissionRevision > row.permissionRevision) {
+      const permissions = Object.fromEntries(permissionKeys.map(key => [key, row.permissions[key] && current.permissions[key]])) as SourcePermissions, allowedModels = row.allowedModels.filter(model => current.allowedModels.includes(model))
+      if (!allowedModels.length) permissions.aiEgress = false
+      next = { ...row, permissions, allowedModels, retentionUntil: earlierRetention(row.retentionUntil, current.retentionUntil), permissionRevision: current.permissionRevision, revision: row.latestRevision + current.permissionRevision - 1, updatedAt: current.updatedAt > row.updatedAt ? current.updatedAt : row.updatedAt }
+      revised.add(row.id)
+    }
+    if (!next.deletedAt && next.retentionUntil !== null && Date.parse(next.retentionUntil) <= Date.parse(at)) { erased.add(row.id); revised.delete(row.id); return erasedSourceRow(next, at < next.updatedAt ? next.updatedAt : at) }
+    return next
+  })
+  const restored = new Set(backup.map(row => row.id))
+  // A tombstone the backup lacks is kept as-is; the backup holds nothing derived from that source.
+  for (const current of here.values()) if (current.deletedAt && !restored.has(current.id)) sources.push(current)
+  return { sources, erased: [...erased], revised: [...revised] }
+}
+type RestoredSourceRows = { contextSnapshots?: ContextSnapshot[]; sourceSummaries?: SourceSummary[]; sourceArtifacts?: SourceArtifact[]; coachMessages?: CoachMessage[]; coachMemories?: CoachMemory[] }
+/** Drops what purgeDerived would remove before the restore writes it: originals, summaries, artifacts and AI replies of the touched sources. */
+export function withoutTouchedSourceRows<T extends RestoredSourceRows>(data: T, consent: RestoredSourceConsent): T {
+  const touched = new Set([...consent.erased, ...consent.revised]), retained = new Set(consent.sources.filter(source => !source.deletedAt && source.permissions.retain).map(source => source.id))
+  if (!touched.size) return data
+  const memories = new Set((data.coachMemories ?? []).filter(memory => [...touched].some(id => usesSource(memory, id))).map(memory => memory.id))
+  const keep = <R extends { sourceId: string }>(rows: R[] | undefined) => rows?.filter(row => !touched.has(row.sourceId))
+  return { ...data, contextSnapshots: data.contextSnapshots?.filter(row => retained.has(row.sourceId) && !consent.erased.includes(row.sourceId)), sourceSummaries: keep(data.sourceSummaries), sourceArtifacts: keep(data.sourceArtifacts), coachMessages: data.coachMessages?.filter(message => message.role !== 'assistant' || !message.selectedSources.some(ref => ref.kind === 'library' && touched.has(ref.id) || ref.kind === 'memory' && memories.has(ref.id))) }
+}
+/** Unadopted detection candidates expire after 30 days; adopted tasks, evidence rows and approval audits stay. */
+export async function purgeExpiredDetectionCandidates(): Promise<number> {
+  return db.transaction('rw', db.sourceArtifacts, db.settings, async () => {
+    const settings = await owner(), rows = (await db.sourceArtifacts.where('ownerId').equals(settings.profileId).toArray()).filter(row => row.kind === 'candidate' && row.id.startsWith('detection:') && candidateExpired(row.createdAt))
+    for (const row of rows) await db.sourceArtifacts.delete(row.id)
+    return rows.length
+  })
+}
+export async function sourceDerivedCounts(ownerId: string): Promise<Map<string, SourceDerivedCounts>> {
+  const counts = new Map<string, SourceDerivedCounts>(), row = (id: string) => { if (!counts.has(id)) counts.set(id, { summaries: 0, caches: 0, embeddings: 0, candidates: 0, taskQuotes: 0, memories: 0 }); return counts.get(id)! }
+  for (const summary of await db.sourceSummaries.where('ownerId').equals(ownerId).toArray()) row(summary.sourceId).summaries++
+  for (const artifact of await db.sourceArtifacts.where('ownerId').equals(ownerId).toArray()) row(artifact.sourceId)[artifact.kind === 'cache' ? 'caches' : artifact.kind === 'embedding' ? 'embeddings' : 'candidates']++
+  for (const evidence of await db.taskSourceEvidence.where('ownerId').equals(ownerId).toArray()) row(evidence.sourceId).taskQuotes++
+  for (const memory of await db.coachMemories.where('ownerId').equals(ownerId).toArray()) if (!memory.deletedAt && !memory.sourcePurged) for (const ref of memory.sources) { const id = ref.kind === 'derived-summary' && ref.refId.startsWith('library:') ? ref.refId.slice(8) : (ref.kind as string) === 'library' ? ref.refId : null; if (id) row(id).memories++ }
+  return counts
 }
 let sourcePurge: Promise<void> | null = null
 export async function purgeExpiredSources(): Promise<void> {
   if (sourcePurge) return sourcePurge
-  sourcePurge = (async () => { const settings = await owner(), sources = await db.contextSources.where('ownerId').equals(settings.profileId).toArray(); for (const source of sources) if (!source.deletedAt && source.retentionUntil !== null && Date.parse(source.retentionUntil) <= Date.now()) await deleteSource(source.id, source.revision) })()
+  sourcePurge = (async () => { const settings = await owner(), sources = await db.contextSources.where('ownerId').equals(settings.profileId).toArray(); for (const source of sources) if (!source.deletedAt && source.retentionUntil !== null && Date.parse(source.retentionUntil) <= Date.now()) await expireSource(source.id, source.revision) })()
   try { await sourcePurge } finally { sourcePurge = null }
 }
 export async function readSource(id: string): Promise<{ source: ContextSource; snapshot: ContextSnapshot }> {
@@ -159,12 +264,14 @@ export async function searchSources(query: string, fromDate: string, toDate: str
 export async function summarizeSelectedSource(id: string, expectedRevision: number, model: string, send: (text: string) => Promise<string>): Promise<string> {
   await purgeExpiredSources()
   let prepared: { source: ContextSource; snapshot: ContextSnapshot; ownerId: string; datasetId: string; epoch: number; sourcePermissionRevision: number }
-  await db.transaction('r', [db.contextSources, db.contextSnapshots, db.settings], async () => {
+  await db.transaction('rw', [db.contextSources, db.contextSnapshots, db.settings, db.audits], async () => {
     const settings = await owner(), { source, snapshot } = await readSource(id), policy = changePolicyFor(settings)
     if (source.revision !== expectedRevision) throw new ConflictError()
     if (!settings.aiEnabled || !source.permissions.index || !source.permissions.aiEgress || source.aiProvider !== 'openrouter' || !source.allowedModels.includes(model)) throw new Error('この資料とモデルへのAI送信は許可されていません')
     if (snapshot.text.length > 50000) throw new Error('AI要約は50000文字以内の資料で使えます')
     prepared = { source: structuredClone(source), snapshot: structuredClone(snapshot), ownerId: settings.profileId, datasetId: settings.datasetId, epoch: policy.epoch, sourcePermissionRevision: policy.sourcePermissionRevision }
+    // Recorded when the text is handed over, so a failed or rejected reply still counts as a possible provider copy.
+    await recordSourceSent(source, model, 'source-summary')
   })
   // This helper is called only after the person selects a source and presses summarize.
   const result = await send(prepared!.snapshot.text)

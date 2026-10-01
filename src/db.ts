@@ -6,6 +6,7 @@ import type { ContextSource, ContextSnapshot, SourceSummary, SourceArtifact } fr
 import type { CalendarRulesState } from './calendar-resolver'
 import type { CoachConversation, CoachMessage } from './chat-history'
 import type { AchievementPolicy, AchievementEvidence, AchievementExport } from './achievements'
+import type { TaskSourceEvidence } from './task-source-evidence'
 import type { Assessment, Audit, CalendarEvent, ChecklistItem, CommandReceipt, Completion, Container, DayNote, FocusProjectSelection, Goal, GoalCheckIn, Habit, HabitLog, LabelDefinition, LabelGroup, LedgerEntry, PlanningBucket, PomodoroCycle, RolloverEntry, Routine, SavedTemplate, Settings, SmartList, Task, TaskAttachment, TaskComment, TaskDependency, TaskNote, ThemeRule, TimeBlock, TrackerDefinition, TrackerEntry, WorkSession } from './domain'
 
 export const db = new Dexie('character-coach-v1') as Dexie & {
@@ -56,6 +57,7 @@ export const db = new Dexie('character-coach-v1') as Dexie & {
   achievementPolicies: EntityTable<AchievementPolicy, 'id'>
   achievementEvidence: EntityTable<AchievementEvidence, 'id'>
   achievementExports: EntityTable<AchievementExport, 'id'>
+  taskSourceEvidence: EntityTable<TaskSourceEvidence, 'id'>
 }
 db.version(1).stores({
   tasks: 'id, &generationKey, status, scheduledDate, dueDate, project, routineId, deletedAt, updatedAt',
@@ -189,6 +191,8 @@ db.version(20).stores({ contextSources: 'id, ownerId, provider, latestRevision, 
 db.version(21).stores({ coachConversations: 'id, ownerId, deletedAt, updatedAt', coachMessages: 'id, conversationId, ownerId, [conversationId+sequence], replyTo, createdAt' })
 db.version(22).stores({ calendarRules: 'id, ownerId, datasetId, revision' })
 db.version(23).stores({ achievementPolicies: 'id,&repositoryId,ownerId,datasetId,revision', achievementEvidence: 'id,ownerId,datasetId,taskId,completionId,status', achievementExports: 'id,&[repositoryId+completionId],ownerId,datasetId,completionId,state' })
+// Source quotes behind adopted detection tasks live here, never in task notes, so source erasure can reach them.
+db.version(24).stores({ taskSourceEvidence: 'id, ownerId, taskId, sourceId, runId' })
 
 export async function ensureSettings() {
   const current = await db.settings.get('main')

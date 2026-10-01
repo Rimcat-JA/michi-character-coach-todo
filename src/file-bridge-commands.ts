@@ -6,6 +6,7 @@ import { uid, type Settings } from './domain'
 import { applyChangeSet, approveChangeSetFromUI, changePolicyFor, prepareTaskChanges, type ChangeContext, type PreparedChangeSet, type TaskChangeField, type UIChangeApproval } from './change-set'
 import { applyAssistedTasks, prepareAssistedTasks, type PreparedAssistedTasks } from './task-assist'
 import { assertFileBridgeInboxEntry, assertFileBridgeLease, assertFileBridgeResult, assertFileBridgeStatus, fileBridgeDigest, fileBridgeTimestamp, rejectFileBridge } from './file-bridge-contract'
+import { loadTaskEgress, recordEgressAudit } from './egress-policy'
 import { fileBridgeReceiptKey, fileBridgeScopeKey, type FileBridgeApplicationBinding, type FileBridgeApplicationReceipt, type FileBridgeConfigure, type FileBridgeGateway, type FileBridgeInboxEntry, type FileBridgeLease, type FileBridgeRegistration, type FileBridgeResult, type FileBridgeStatus } from './file-bridge-types'
 
 type PendingEntry = Extract<FileBridgeInboxEntry,{state:'awaiting_approval'}>
@@ -50,7 +51,7 @@ export async function readFileBridgeApplicationReceipt(commandId:string):Promise
 /** Instantiate only with the isolated preload gateway, never a gateway from external material. */
 export function createFileBridgeController(gateway:FileBridgeGateway) {
   const entries=new Map<string,PendingEntry>(),preparedRegistry=new Map<string,PreparedFileBridgeApplication>(),leases=new Map<string,FileBridgeLease>()
-  let currentStatus:FileBridgeStatus|null=null
+  let currentStatus:FileBridgeStatus|null=null,lastEgress:{withheldQuotes:number;notesWithheld:number}|null=null
   function clear(){entries.clear();preparedRegistry.clear();leases.clear()}
   async function adoptStatus(raw:FileBridgeStatus):Promise<FileBridgeStatus> {
     assertFileBridgeStatus(raw)
@@ -94,6 +95,7 @@ export function createFileBridgeController(gateway:FileBridgeGateway) {
   }
   return {
     clearAuthority:clear,
+    lastEgress:()=>lastEgress,
     refresh:async()=>adoptStatus(await gateway.status()),
     async configure(request:Pick<FileBridgeConfigure,'intendedHost'|'taskIds'|'fields'|'lifetimeHours'>,event:Event) {
       trustedClick(event)
@@ -115,7 +117,12 @@ export function createFileBridgeController(gateway:FileBridgeGateway) {
       assertSettings(reg,await settings())
       const tasks=await db.tasks.bulkGet(reg.task_ids)
       if(tasks.some(task=>!task||task.deletedAt||task.status!=='open'||reg.client.grant.project_ids.length&&!reg.client.grant.project_ids.includes(task.containerId??'')))rejectFileBridge('TASK_SCOPE')
-      return adoptStatus(await gateway.exportSnapshot({tasks:tasks.map(task=>({id:task!.id,revision:task!.revision,title:task!.title,notes:task!.notes,scheduledDate:task!.scheduledDate,containerId:task!.containerId??null}))}))
+      // An agent host cannot be bound to a model or a revocable copy, so source quotes never enter the view.
+      const destination={kind:'external-agent' as const,route:'file-bridge' as const,clientId:reg.client.id,host:reg.client.intended_host}
+      const views=await Promise.all(tasks.map(async task=>({task:task!,egress:await loadTaskEgress(task!,destination)})))
+      await db.transaction('rw',db.audits,db.settings,()=>recordEgressAudit(destination,views.map(({task,egress})=>({taskId:task.id,egress}))))
+      lastEgress={withheldQuotes:views.reduce((sum,view)=>sum+view.egress.withheldQuotes,0),notesWithheld:views.filter(view=>view.egress.notesWithheld).length}
+      return adoptStatus(await gateway.exportSnapshot({tasks:views.map(({task,egress})=>({id:task.id,revision:task.revision,title:task.title,notes:egress.notes,scheduledDate:task.scheduledDate,containerId:task.containerId??null}))}))
     },
     async scanInbox() {
       const scanned=await gateway.scanInbox(),status=await adoptStatus(scanned.status)

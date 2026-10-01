@@ -9,6 +9,13 @@ const exact = (value, keys) => value && typeof value === 'object' && !Array.isAr
 function fail(code) { const error = new Error(code); error.code = code; throw error }
 const policy = settings => settings.changePolicy ?? { epoch: 0, sourcePermissionRevision: 0, aiChangesEnabled: true }
 const receiptKey = id => `filebridge:applied:${id}`
+function redactedNotes(stored, wanted) {
+  if (typeof stored !== 'string' || typeof wanted !== 'string' || wanted.length > stored.length) return null
+  if (wanted === stored || wanted === '') return wanted
+  const lines = stored.split('\n'); let index = 0
+  for (const line of wanted.split('\n')) { while (index < lines.length && lines[index] !== line) index++; if (index++ >= lines.length) return null }
+  return wanted
+}
 
 /** Coordinates the durable file claim BEFORE the renderer's atomic DB write. */
 async function createFileBridgeService({ agentDirectory, journalDirectory, signingKey, getSettings, getTasks, getReceipt, loadConfiguration, saveConfiguration, verifyNativeProof, leaseMilliseconds = 60000 }) {
@@ -87,7 +94,9 @@ async function createFileBridgeService({ agentDirectory, journalDirectory, signi
     if (ids.length > 100 || ids.some(id => !current.registration.task_ids.includes(id)) || new Set(ids).size !== ids.length) fail('TASK_SCOPE')
     const tasks = await getTasks(ids)
     if (tasks.length !== ids.length || tasks.some(task => task.deletedAt)) fail('TASK_SCOPE')
-    current.snapshot = await current.bridge.exportSnapshot(tasks)
+    // The renderer may withhold source-derived lines from notes, but can never add text the DB does not hold.
+    const requested = new Map(request.tasks.map(task => [task.id, task]))
+    current.snapshot = await current.bridge.exportSnapshot(tasks.map(task => { const wanted = requested.get(task.id); if (!wanted || !Object.hasOwn(wanted, 'notes')) return task; const notes = redactedNotes(task.notes, wanted.notes); if (notes === null) fail('TASK_SCOPE'); return { ...task, notes } }))
     return status()
   }
   async function scanInbox() {

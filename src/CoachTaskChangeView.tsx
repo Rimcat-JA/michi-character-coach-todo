@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
 import ChangeSetPreview from './ChangeSetPreview'
 import { cancelChangeSet, changePolicyFor, prepareTaskChanges, taskChangeFields, type ChangeContext, type ChangeReceipt, type PreparedChangeSet, type TaskChangeField, type TaskChangePatch, type TaskFieldOrigin } from './change-set'
-import { createCoachTaskRequest, parseCoachTaskChange, prepareCoachTaskChange, type CoachTaskSnapshot } from './coach-task-change'
+import { parseCoachTaskChange, prepareCoachTaskChange, prepareCoachTaskRequest, type CoachTaskSnapshot } from './coach-task-change'
 import { confirmTaskInstructionFromUI } from './task-user-instruction'
+import { egressNotice } from './egress-policy'
 import { today, type Settings, type Task } from './domain'
 
 type Draft = { snapshot:CoachTaskSnapshot; title:string; notes:string; scheduledDate:string|null; dueDate:string|null; points:string; fields:TaskChangeField[]; origin:'manual'|'ai'; model:string|null; fieldOrigins:Partial<Record<TaskChangeField,TaskFieldOrigin>> }
@@ -41,12 +42,14 @@ export default function CoachTaskChangeView({selectedTask,settings,onEdit,onAppl
     const base=fromTask(selectedTask),referenceDate=today(),model=settings.aiModel!,token=++generation.current
     setBusy(true);setNotice('')
     try{
-      const answer=await bridge!(createCoachTaskRequest(base.snapshot,instruction,model,referenceDate,Intl.DateTimeFormat().resolvedOptions().timeZone))
+      const {request,egress}=await prepareCoachTaskRequest(selectedTask,instruction,model,referenceDate,Intl.DateTimeFormat().resolvedOptions().timeZone)
+      if(token!==generation.current)throw new Error('送信前に対象・版・AI設定が変わりました。新しい内容で相談してください。')
+      const answer=await bridge!(request)
       if(token!==generation.current)throw new Error('候補待ちの間に対象・版・AI設定が変わりました。新しい内容で相談してください。')
       const proposal=parseCoachTaskChange(answer,base.snapshot,instruction,referenceDate)
       const fields=Object.keys(proposal.patch) as TaskChangeField[]
       setDraft({...base,...proposal.patch,points:proposal.patch.manualPoints===undefined?base.points:String(proposal.patch.manualPoints),fields,origin:'ai',model,fieldOrigins:Object.fromEntries(fields.map(field=>[field,'agent_proposal']))})
-      setNotice('変更候補を作りました。まだ適用していません。本人の指定値を確認してください。')
+      setNotice(`変更候補を作りました。まだ適用していません。本人の指定値を確認してください。${egressNotice(egress)??''}`)
     }catch(error){setNotice(`${error instanceof Error?error.message:String(error)} 相談文と入力欄は残っています。`)}
     finally{setBusy(false)}
   }
@@ -79,7 +82,7 @@ export default function CoachTaskChangeView({selectedTask,settings,onEdit,onAppl
     <h3>選んだタスクの変更相談</h3>
     {selectedTask?<p>対象：<strong>{selectedTask.title}</strong>（版 {selectedTask.revision}）</p>:<p>変更するタスクを一つ選んでください。</p>}
     <label className="field">相談文<textarea aria-label="既存タスクの変更相談" rows={3} maxLength={4000} value={instruction} disabled={disabled} onChange={event=>setInstruction(event.target.value)} placeholder="例：明日に移して / この25ptを30ptへ変更して"/></label>
-    <p className="muted">AIには相談文と選択タスクの名前・予定日・期限・版を送ります。メモと点数は、その変更を指定した場合だけ送ります。</p>
+    <p className="muted">AIには相談文と選択タスクの名前・予定日・期限・版を送ります。メモと点数は、その変更を指定した場合だけ送ります。資料から検出したタスクの引用（資料の根拠）はメモに含めず、送りません。</p>
     <button type="button" className="secondary-button" disabled={!selectedTask||!instruction.trim()||disabled} onClick={ask}>{busy?'変更案を用意しています…':'AIで変更候補を作る'}</button>
     {draft&&<div className="coach-task-manual"><h4>本人の指定値を確認</h4><small>対象：{draft.snapshot.title}（版 {draft.snapshot.revision}）{draft.origin==='ai'?` · AI候補 ${draft.model}`:' · 本人入力'}</small>
       {stale&&<p role="alert">対象または版が変わりました。現在値を読み込んでから変更を指定してください。</p>}

@@ -28,11 +28,13 @@ declare global {
   }
 }
 
-export function selectedTaskContext(task: Task | undefined): string | null {
+/** Callers pass notes already filtered by egress-policy; evidence lines are only the quotes the sources allow. */
+export function selectedTaskContext(task: Task | undefined, evidence: string[] = []): string | null {
   if (!task) return null
   return [
     `タイトル: ${task.title}`,
     task.notes ? `メモ: ${task.notes.slice(0, 3000)}` : null,
+    ...evidence.map(line => line.slice(0, 2100)),
     task.scheduledDate ? `予定日: ${task.scheduledDate}` : null,
     task.dueDate ? `締め切り: ${task.dueDate}` : null,
     task.effectivePoints === null ? '必要ポイント: 未設定' : `必要ポイント: ${task.effectivePoints}pt`
