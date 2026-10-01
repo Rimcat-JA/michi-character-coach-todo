@@ -35,3 +35,8 @@ test('main.cjs routes notification wording through the automatic lock and everyt
   assert.doesNotMatch(main, /chatInFlight/)
   assert.match(main, /channel === 'michi:ai-notification-text' \? aiLocks\.automatic\(/)
 })
+test('automatic notification wording goes through the N10 network gateway (offline_only blocks before key/budget)', () => {
+  const main = readFileSync(new URL('./main.cjs', import.meta.url), 'utf8')
+  assert.match(main, /egress\(\)\.assertAllowed\('openrouter'\)/)
+  assert.match(main, /notificationTextWithOpenRouter[\s\S]*?openRouterCompletion\('chat'[\s\S]*?\{\s*automatic:\s*true\s*\}/)
+})
