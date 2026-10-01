@@ -8,6 +8,7 @@ import { clearDetectionAuthority } from './detection-run'
 import { clearCoachTurnAuthority } from './chat-history'
 import { clearCalendarRulesAuthority } from './calendar-rules-save'
 import { clearRoutineAssistanceAuthority } from './routine-assist-save'
+import { clearCompletionReconfirmationAuthority } from './completion-reconfirmation'
 import { invalidateExternalConnection } from './external-connection'
 import { restoreCoachNotificationState } from './coach-notifications'
 import { purgeExpiredSources } from './source-library'
@@ -116,6 +117,7 @@ export async function restoreBackup(snapshot: Snapshot) {
     return { ...metadata, blob: new Blob([bytes], { type: 'application/octet-stream' }) }
   }))
   await invalidateExternalConnection()
+  clearCompletionReconfirmationAuthority()
   await db.transaction('rw', [db.tasks, db.assessments, db.completions, db.ledger, db.routines, db.sessions, db.commands, db.audits, db.settings, db.containers, db.checklistItems, db.labelGroups, db.labelDefinitions, db.savedTemplates, db.taskNotes, db.taskComments, db.taskAttachments, db.taskDependencies, db.planningBuckets, db.timeBlocks, db.calendarEvents, db.rollovers, db.themeRules, db.smartLists, db.focusSelections, db.habits, db.habitLogs, db.goals, db.goalCheckIns, db.trackerDefinitions, db.trackerEntries, db.dayNotes, db.pomodoroCycles, db.reviewRecords, db.tripBundles, db.coachMemories, db.memoryTombstones, db.contextSources, db.contextSnapshots, db.sourceSummaries, db.sourceArtifacts, db.coachConversations, db.coachMessages, db.calendarRules, db.achievementPolicies, db.achievementEvidence, db.achievementExports], async () => {
     await Promise.all([db.tasks.clear(), db.assessments.clear(), db.completions.clear(), db.ledger.clear(), db.routines.clear(), db.sessions.clear(), db.commands.clear(), db.audits.clear(), db.settings.clear(), db.containers.clear(), db.checklistItems.clear(), db.labelGroups.clear(), db.labelDefinitions.clear(), db.savedTemplates.clear(), db.taskNotes.clear(), db.taskComments.clear(), db.taskAttachments.clear(), db.taskDependencies.clear(), db.planningBuckets.clear(), db.timeBlocks.clear(), db.calendarEvents.clear(), db.rollovers.clear(), db.themeRules.clear(), db.smartLists.clear(), db.focusSelections.clear(), db.habits.clear(), db.habitLogs.clear(), db.goals.clear(), db.goalCheckIns.clear(), db.trackerDefinitions.clear(), db.trackerEntries.clear(), db.dayNotes.clear(), db.pomodoroCycles.clear(), db.reviewRecords.clear(), db.tripBundles.clear(), db.coachMemories.clear(), db.memoryTombstones.clear(), db.contextSources.clear(), db.contextSnapshots.clear(), db.sourceSummaries.clear(), db.sourceArtifacts.clear(), db.coachConversations.clear(), db.coachMessages.clear(), db.calendarRules.clear(), db.achievementPolicies.clear(), db.achievementEvidence.clear(), db.achievementExports.clear()])
     await db.tasks.bulkAdd(prepared.tasks); await db.assessments.bulkAdd(prepared.assessments); await db.completions.bulkAdd(prepared.completions); await db.ledger.bulkAdd(prepared.ledger)
@@ -127,6 +129,7 @@ export async function restoreBackup(snapshot: Snapshot) {
   clearCoachTurnAuthority()
   clearCalendarRulesAuthority()
   clearRoutineAssistanceAuthority()
+  clearCompletionReconfirmationAuthority()
   clearAchievementAuthority()
   await purgeExpiredSources()
   await purgeExpiredMemories()

@@ -72,6 +72,7 @@ import { reconcileAchievementExports } from './achievements-save'
 import PrintPreview from './PrintPreview'
 import PomodoroPanel from './PomodoroPanel'
 import SessionCorrectionView from './SessionCorrectionView'
+import CompletionReconfirmationView, { ReconfirmationTaskEntry } from './CompletionReconfirmationView'
 import { FocusChoiceTools } from './FocusChoiceTools'
 import SuperFocusView from './SuperFocusView'
 import TopOfMindView from './TopOfMindView'
@@ -108,6 +109,7 @@ function App() {
   const [editor, setEditor] = useState<Task | 'new' | null>(null)
   const [jumpOpen, setJumpOpen] = useState(false)
   const [linkTaskId, setLinkTaskId] = useState(() => taskIdFromHash(location.hash))
+  const [reconfirmationId, setReconfirmationId] = useState<string | null>(null)
   const [toast, setToast] = useState('')
   const [menuOpen, setMenuOpen] = useState(false)
   const [featureQuery, setFeatureQuery] = useState('')
@@ -216,7 +218,7 @@ function App() {
   useEffect(() => { if (!toast) return; const id = setTimeout(() => setToast(''), 4500); return () => clearTimeout(id) }, [toast])
   function showError(e: unknown) { setToast(`エラー: ${e instanceof Error ? e.message : String(e)}`) }
   async function run(fn: () => Promise<unknown>, success = 'この端末に保存しました') { try { await fn(); setToast(success); return true } catch (e) { showError(e); return false } }
-  function go(next: View) { setLinkTaskId(null); setView(next); setMenuOpen(false) }
+  function go(next: View) { setLinkTaskId(null); setReconfirmationId(null); setView(next); setMenuOpen(false) }
   async function toggleTask(t: Task) { await run(() => t.status === 'open' ? completeTask(t.id, t.revision) : undoCompletion(t.id, t.revision), t.status === 'open' ? '完了を記録しました' : '完了を取り消しました'); await expandRoutines().catch(showError) }
   const focusSelection = focusSelections.find(selection => selection.date === currentDate && selection.ownerId === settings?.profileId)
   const suggested = suggestedTasks(tasks, currentDate, 3, dependencies, nowIso, themeRules.filter(rule => rule.ownerId === settings?.profileId), focusSelection?.projects ?? [])
@@ -251,7 +253,7 @@ function App() {
           <section className="card suggestion-card"><div className="card-heading"><div><span className="eyebrow">NEXT UP</span><h2>次に考えること</h2></div><span className="subtle">登録済みタスクから表示</span></div><div className="suggestion-list">{suggested.length ? suggested.map(t => <button key={t.id} className="suggestion" onClick={() => setEditor(t)}><span className="suggestion-dot"/><span>{t.title}</span><small>{t.dueDate ? `期限 ${dateLabel(t.dueDate)}` : t.scheduledDate ? `予定 ${dateLabel(t.scheduledDate)}` : '日付なし'}</small></button>) : <p className="muted">未完了のタスクはありません。</p>}</div></section>
           <ContextSuggestions tasks={tasks} dependencies={dependencies} themes={themeRules.filter(rule => rule.ownerId === settings.profileId)} date={currentDate} now={nowIso} onEdit={setEditor} />
         </>}
-        {view === 'tasks' && <><TasksView tasks={tasks} lists={smartLists} settings={settings} onEdit={setEditor} onToggle={toggleTask} onNew={() => setEditor('new')} run={run} /><CustomSplitView tasks={tasks} lists={smartLists} settings={settings} onEdit={setEditor} onToggle={toggleTask} run={run} /></>}
+        {view === 'tasks' && <><TasksView tasks={tasks} completions={completions} lists={smartLists} settings={settings} onEdit={setEditor} onToggle={toggleTask} onNew={() => setEditor('new')} onReconfirm={id => { go('history'); setReconfirmationId(id) }} run={run} /><CustomSplitView tasks={tasks} lists={smartLists} settings={settings} onEdit={setEditor} onToggle={toggleTask} run={run} /></>}
         {view === 'wall' && <WallView tasks={tasks} settings={settings} onEdit={setEditor} run={run} />}
         {view === 'projects' && <ContainersView containers={containers} tasks={tasks} completions={completions} dependencies={dependencies} ownerId={settings.profileId} run={run} />}
         {view === 'labels' && <LabelsView groups={labelGroups} definitions={labelDefinitions} ownerId={settings.profileId} run={run} />}
@@ -261,7 +263,7 @@ function App() {
         {view === 'calendar' && <CalendarPlanningView blocks={timeBlocks} events={calendarEvents} tasks={tasks} projects={containers} sessions={sessions} ownerId={settings.profileId} run={run} />}
         {view === 'coach' && <CoachView tasks={open} goals={goals.filter(goal => goal.ownerId === settings.profileId && !goal.deletedAt)} checkIns={goalCheckIns} settings={settings} onEdit={setEditor} onNew={() => setEditor('new')} />}
         {view === 'focus' && <><SuperFocusView tasks={open} sessions={sessions} onEdit={setEditor} onBack={() => go('today')} run={run} /><PomodoroPanel tasks={open} run={run} /><FocusChoiceTools tasks={tasks} dependencies={dependencies} themes={themeRules.filter(rule => rule.ownerId === settings.profileId)} focusProjects={focusSelection?.projects ?? []} lists={smartLists} ownerId={settings.profileId} date={currentDate} now={nowIso} onEdit={setEditor} run={run} /></>}
-        {view === 'history' && <><HistoryView completions={completions} ledger={ledger} sessions={sessions} tasks={tasks} onEdit={id => { const t = tasks.find(x => x.id === id); if (t) setEditor(t) }} run={run} /><TimeTargetsView settings={settings} containers={containers} tasks={tasks} sessions={sessions} run={run} /><AnalyticsView completions={completions} sessions={sessions} /><AchievementsView /><SessionCorrectionView sessions={sessions} tasks={tasks} run={run} /></>}
+        {view === 'history' && <><HistoryView completions={completions} ledger={ledger} sessions={sessions} tasks={tasks} onEdit={id => { const t = tasks.find(x => x.id === id); if (t) setEditor(t) }} run={run} /><CompletionReconfirmationView key={`${settings.datasetId}:${reconfirmationId ?? 'choose'}`} settings={settings} tasks={tasks} completions={completions} ledger={ledger} initialCompletionId={reconfirmationId} onApplied={receipt => { setReconfirmationId(null); setToast(`${receipt.points} ptで実績を再確定しました`) }} /><TimeTargetsView settings={settings} containers={containers} tasks={tasks} sessions={sessions} run={run} /><AnalyticsView completions={completions} sessions={sessions} /><AchievementsView /><SessionCorrectionView sessions={sessions} tasks={tasks} run={run} /></>}
         {view === 'routines' && <><RoutinesView routines={routines} run={run} />{calendarRulesState && <>{settings && <RoutineAssistView key={`assist:${calendarRulesState.ownerId}:${calendarRulesState.datasetId}`} state={calendarRulesState} settings={settings} />}<CalendarRulesView key={`${calendarRulesState.ownerId}:${calendarRulesState.datasetId}`} state={calendarRulesState} onPrepareConfiguration={prepareCalendarConfiguration} onPrepareImport={prepareCalendarScheduleImport} onPrepareGeneration={prepareCalendarGeneration} onApply={applyCalendarProposalFromUI} /><CalendarImportView key={`ics:${calendarRulesState.ownerId}:${calendarRulesState.datasetId}`} state={calendarRulesState} /></>}</>}
         {view === 'habits' && <HabitsView run={run} />}
         {view === 'goals' && <GoalsView run={run} />}
@@ -327,7 +329,7 @@ function TodaySections({ tasks, blocks, date, mode, onEdit, onToggle, onNew, onA
   </section>
 }
 
-function TasksView({ tasks, lists, settings, onEdit, onToggle, onNew, run }: { tasks: Task[]; lists: SmartList[]; settings: Settings; onEdit: (t: Task) => void; onToggle: (t: Task) => void; onNew: () => void; run: (fn: () => Promise<unknown>, success?: string) => Promise<boolean> }) {
+function TasksView({ tasks, completions, lists, settings, onEdit, onToggle, onNew, onReconfirm, run }: { tasks: Task[]; completions: Completion[]; lists: SmartList[]; settings: Settings; onEdit: (t: Task) => void; onToggle: (t: Task) => void; onNew: () => void; onReconfirm: (completionId: string) => void; run: (fn: () => Promise<unknown>, success?: string) => Promise<boolean> }) {
   const [filter, setFilter] = useState<'open' | 'completed' | 'trash' | 'backburner' | 'orbit'>('open')
   const [sortBy, setSortBy] = useState<'scheduled' | 'frog' | 'weight'>('scheduled')
   const [query, setQuery] = useState('')
@@ -382,6 +384,7 @@ function TasksView({ tasks, lists, settings, onEdit, onToggle, onNew, run }: { t
       {shown.length ? shown.map(t => <div key={t.id} className="task-with-actions">
         {filter !== 'trash' && <input className="task-select" type="checkbox" aria-label={`${t.title}を一括編集に選択`} checked={selected[t.id] !== undefined} onChange={e => setSelected(current => { const next = { ...current }; if (e.target.checked) next[t.id] = t.revision; else delete next[t.id]; return next })} />}
         <TaskRow task={t} onToggle={() => onToggle(t)} onEdit={() => onEdit(t)} />
+        {!t.deletedAt && t.status === 'open' && <ReconfirmationTaskEntry completion={completions.find(completion => completion.taskId === t.id && completion.currentAt === null)} onOpen={onReconfirm} />}
         {!t.deletedAt && t.status === 'open' && <div className="task-flags"><button className="text-button" onClick={() => run(() => setTaskFlag(t.id, t.revision, 'pinned', !t.pinned))}>{t.pinned ? 'ピン解除' : 'ピン留め'}</button><button className="text-button" onClick={() => run(() => setSpotlight(t.id, t.revision, t.spotlightOrder == null), t.spotlightOrder == null ? 'Spotlightへ追加しました' : 'Spotlightから外しました')}>{t.spotlightOrder == null ? 'Spotlightへ' : 'Spotlight解除'}</button><button className="text-button" onClick={() => run(() => setTaskFlag(t.id, t.revision, 'backburner', !t.backburner))}>{t.backburner ? '保留解除' : '保留'}</button><button className="text-button" onClick={() => run(() => setTaskFlag(t.id, t.revision, 'orbit', !t.orbit))}>{t.orbit ? 'Orbit解除' : 'Orbitへ'}</button>{t.scheduledDate && <button className="text-button" onClick={() => run(() => rolloverTask(t.id, t.revision, addDays(t.scheduledDate!, 1)), '1日繰り越しました')}>1日繰越</button>}<button className="text-button" onClick={() => run(() => snoozeTask(t.id, t.revision, t.snoozedUntil ? null : new Date(`${addDays(today(), 1)}T09:00:00`).toISOString()), t.snoozedUntil ? 'スヌーズを解除しました' : '明日までスヌーズしました')}>{t.snoozedUntil ? 'スヌーズ解除' : '明日までスヌーズ'}</button></div>}
         {filter === 'trash' ? <button className="ghost-action" onClick={() => run(() => restoreTask(t.id, t.revision))}><ArchiveRestore size={15} /> 復元</button> : <button className="ghost-action" onClick={() => run(() => trashTask(t.id, t.revision))}><Trash2 size={15} /> ゴミ箱</button>}
       </div>) : <Empty title="該当するタスクはありません" detail="検索条件を変えるか、新しく追加してください。" action={<button className="secondary-button" onClick={onNew}><Plus size={16} /> タスクを追加</button>} />}

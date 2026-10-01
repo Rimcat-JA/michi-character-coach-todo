@@ -1,5 +1,6 @@
 import { db } from './db'
 import { calculateScore, type Completion, type Task } from './domain'
+import { validCompletionLedgerEntry, validReconfirmationAssessment, validReconfirmedPoints } from './completion-reconfirmation-integrity'
 
 function cancelled(completion: Completion) {
   if (completion.currentAt !== null || completion.netPoints !== null) throw new Error('未完了の親タスクと完了記録が一致しません。配分・再完了前に実績を確認してください')
@@ -61,6 +62,18 @@ export async function pointsForRecompletion(task: Task, completion: Completion):
   cancelled(completion)
   const previous = completion.lastConfirmedPoints !== undefined ? completion.lastConfirmedPoints : task.effectivePoints
   const result = { points: previous, repaired: false }
+  if (completion.reconfirmedAssessmentId !== undefined) {
+    const assessment = await db.assessments.get(completion.reconfirmedAssessmentId), history = await db.ledger.where('completionId').equals(completion.id).toArray()
+    if (!validReconfirmationAssessment(assessment, task.id) || !history.some(row => row.kind === 'restore' && row.assessmentId === assessment.id && row.delta === assessment.result.effective) || history.some(row => !validCompletionLedgerEntry(row, task.id, completion.id)) || history.reduce((sum, row) => sum + row.delta, 0) !== 0) throw new Error('本人が再確認した実績の評価参照と台帳を確認してください')
+    for (const entry of history.filter(row => row.assessmentId !== undefined)) {
+      const reference = await db.assessments.get(entry.assessmentId!)
+      if (entry.kind !== 'restore' || !validReconfirmationAssessment(reference, task.id) || entry.delta !== reference.result.effective) throw new Error('本人が再確認した実績の評価参照と台帳を確認してください')
+    }
+    if (!validReconfirmedPoints(completion.lastConfirmedPoints)) throw new Error('本人が再確認した取消済み確定ポイントがありません、または不正です。実績を確認してください')
+    // The immutable reference proves the explicit reconfirmation. Later human
+    // corrections still restore their own cached amount, not that old value.
+    return result
+  }
   if (completion.allocationAssessmentId !== undefined) {
     const assessment = await db.assessments.get(completion.allocationAssessmentId)
     if (!assessment || assessment.taskId !== task.id || !['manual', 'allocated'].includes(assessment.score.mode)) throw new Error('配分後の完了記録を確認してください')

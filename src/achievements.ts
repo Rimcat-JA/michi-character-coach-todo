@@ -1,5 +1,5 @@
 import { canonicalJSON, contentDigest } from './canonical'
-import { validateDate, type Assessment, type Completion, type Container, type LedgerEntry, type ScoreMode, type Settings, type Task } from './domain'
+import { calculateScore, validateDate, type Assessment, type Completion, type Container, type LedgerEntry, type ScoreMode, type Settings, type Task } from './domain'
 import type { GitHubGatewayStatus, GitHubPublishManifest, GitHubRepositoryTarget } from './github-publish-types'
 
 export type AchievementEvidenceKind = 'artifact_file' | 'code_link' | 'submission_receipt' | 'photo' | 'external_reference' | 'user_statement'
@@ -40,9 +40,33 @@ export function achievementCategoryIds(task: Task, containers: Container[], owne
   while (id) { if (seen.has(id)) throw new Error('所属カテゴリが循環しています'); seen.add(id); const row = containers.find(item => item.id === id && item.ownerId === ownerId && !item.deletedAt); if (!row) break; if (row.kind === 'category') result.push(row.id); id = row.parentId }
   return result
 }
-export function completionScoreMode(completion: Completion, assessments: Assessment[], ledger: LedgerEntry[] = []): ScoreMode { const original = assessments.filter(item => item.taskId === completion.taskId && item.createdAt <= completion.originalAt).sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.id.localeCompare(a.id))[0]; if(completion.scoreState==='confirmed'&&(original?.score.mode==='unset'||ledger.some(item=>item.completionId===completion.id&&item.kind==='adjust')))return 'manual';return original?.score.mode ?? 'unset' }
+function completionAssessmentFacts(completion: Completion, assessments: Assessment[], entries: LedgerEntry[]) {
+  const ledger = entries.filter(item => item.completionId === completion.id).sort((a, b) => a.id.localeCompare(b.id))
+  const references = new Set<string>()
+  for (const entry of ledger) {
+    if (entry.assessmentId === undefined) continue
+    const candidates = assessments.filter(item => item.id === entry.assessmentId), assessment = candidates[0]
+    if (typeof entry.assessmentId !== 'string' || !entry.assessmentId.trim() || entry.kind !== 'restore' || entry.taskId !== completion.taskId || !Number.isSafeInteger(entry.delta) || entry.delta < 0 || entry.delta > 100000 || candidates.length !== 1 || assessment.taskId !== completion.taskId || assessment.origin !== 'human' || assessment.ruleVersion !== 'v1' || Object.hasOwn(assessment, 'instruction') || assessment.score.mode !== 'manual' || assessment.score.manualPoints !== entry.delta || !Number.isFinite(Date.parse(assessment.createdAt))) throw new Error('再確認実績の本人評価参照が不正です')
+    const result = calculateScore(assessment.score)
+    if (result.effective !== assessment.result.effective || result.lower !== assessment.result.lower || result.upper !== assessment.result.upper) throw new Error('再確認実績の本人評価ポイントが一致しません')
+    references.add(entry.assessmentId)
+  }
+  if (completion.reconfirmedAssessmentId !== undefined && (!references.has(completion.reconfirmedAssessmentId) || !Number.isSafeInteger(completion.lastConfirmedPoints) || completion.lastConfirmedPoints! < 0 || completion.lastConfirmedPoints! > 100000)) throw new Error('再確認実績と再完了台帳が一致しません')
+  // A new manual assessment can precede originalAt when the clock rolls back.
+  // Its restore reference establishes its role without inferring time order.
+  const originalAssessment = assessments.filter(item => item.taskId === completion.taskId && !references.has(item.id) && item.createdAt <= completion.originalAt).sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.id.localeCompare(a.id))[0] ?? null
+  return { completion, ledger, originalAssessment, ...(references.size ? { reconfirmationAssessments: assessments.filter(item => references.has(item.id)).sort((a, b) => a.id.localeCompare(b.id)) } : {}) }
+}
+export function completionScoreMode(completion: Completion, assessments: Assessment[], ledger: LedgerEntry[] = []): ScoreMode {
+  const facts = completionAssessmentFacts(completion, assessments, ledger)
+  if (completion.scoreState === 'confirmed' && (facts.originalAssessment?.score.mode === 'unset' || facts.reconfirmationAssessments?.length || facts.ledger.some(item => item.kind === 'adjust'))) return 'manual'
+  return facts.originalAssessment?.score.mode ?? 'unset'
+}
 export function evaluateAchievement(facts: AchievementFacts, selectedEvidenceIds: string[] = facts.evidence.map(item => item.id)): AchievementEligibility {
-  const { task, completion, settings, policy } = facts, scoreMode = completionScoreMode(completion, facts.assessments, facts.ledger), result = (state: AchievementEligibility['state'], reason: string, eligible = false): AchievementEligibility => ({ state, eligible, reason, points: completion.netPoints, scoreMode })
+  const { task, completion, settings, policy } = facts
+  let scoreMode: ScoreMode
+  try { scoreMode = completionScoreMode(completion, facts.assessments, facts.ledger) } catch { return { state: 'not_eligible', eligible: false, reason: '再確認実績の本人評価と台帳を確認してください', points: completion.netPoints, scoreMode: 'unset' } }
+  const result = (state: AchievementEligibility['state'], reason: string, eligible = false): AchievementEligibility => ({ state, eligible, reason, points: completion.netPoints, scoreMode })
   if (completion.taskId !== task.id || policy.ownerId !== settings.profileId || policy.datasetId !== settings.datasetId || task.deletedAt || task.status !== 'completed' || !completion.currentAt || !policy.enabled) return result('not_eligible', '有効な本人の完了実績・公開設定を確認してください')
   if (completion.scoreState !== 'confirmed' || completion.netPoints === null) return result('awaiting_score', '完了ポイントが未確定です。0ptとして判定しません')
   const ledger = facts.ledger.filter(item => item.completionId === completion.id)
@@ -54,7 +78,7 @@ export function evaluateAchievement(facts: AchievementFacts, selectedEvidenceIds
   if (evidence.some(item => !item.publicReviewed || !item.publicText.trim())) return result('awaiting_review', '原本と別の公開用説明を本人が確認してください')
   return result('awaiting_review', '公開する内容・証拠・リポジトリの確認を待っています', true)
 }
-export async function achievementCompletionDigest(facts: Pick<AchievementFacts, 'completion' | 'ledger' | 'assessments'>) { return contentDigest({ completion: facts.completion, ledger: facts.ledger.filter(item => item.completionId === facts.completion.id).sort((a, b) => a.id.localeCompare(b.id)), originalAssessment: facts.assessments.filter(item => item.taskId === facts.completion.taskId && item.createdAt <= facts.completion.originalAt).sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.id.localeCompare(a.id))[0] ?? null }) }
+export async function achievementCompletionDigest(facts: Pick<AchievementFacts, 'completion' | 'ledger' | 'assessments'>) { return contentDigest(completionAssessmentFacts(facts.completion, facts.assessments, facts.ledger)) }
 export const achievementEvidenceOrder = (evidence: AchievementEvidence[]) => evidence.slice().sort((a, b) => a.id.localeCompare(b.id))
 export function publicAchievementText(value: string, max = 20000) {
   if (typeof value !== 'string' || !value.trim() || value.length > max || new TextDecoder().decode(new TextEncoder().encode(value)) !== value || [...value].some(char => char.charCodeAt(0) < 32 && !['\n', '\r', '\t'].includes(char))) throw new Error('公開用文章の文字・長さを確認してください')

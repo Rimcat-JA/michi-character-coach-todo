@@ -209,6 +209,10 @@ export function validateSnapshot(input: unknown): asserts input is Snapshot {
       const assessment = filled(completion.allocationAssessmentId) ? assessmentById.get(completion.allocationAssessmentId) : undefined
       if (!assessment || assessment.taskId !== completion.taskId || !record(assessment.score) || !['manual', 'allocated'].includes(assessment.score.mode as string) || completion.currentAt === null && completion.lastConfirmedPoints === undefined) throw new Error('完了履歴の配分評価参照が不正です')
     }
+    if (completion.reconfirmedAssessmentId !== undefined) {
+      const assessment = filled(completion.reconfirmedAssessmentId) ? assessmentById.get(completion.reconfirmedAssessmentId) : undefined
+      if (!assessment || assessment.taskId !== completion.taskId || assessment.origin !== 'human' || !record(assessment.score) || assessment.score.mode !== 'manual' || !Number.isInteger(completion.lastConfirmedPoints) || completion.lastConfirmedPoints! < 0 || completion.lastConfirmedPoints! > 100000) throw new Error('完了履歴の本人再確認評価参照が不正です')
+    }
     completionById.set(completion.id, completion)
   }
 
@@ -217,9 +221,14 @@ export function validateSnapshot(input: unknown): asserts input is Snapshot {
     const entry = raw as LedgerEntry
     const completion = completionById.get(entry.completionId)
     if (!completionIds.has(entry.completionId) || !completion || completion.taskId !== entry.taskId || !['award', 'adjust', 'reverse', 'restore'].includes(entry.kind) || !Number.isInteger(entry.delta) || !timestamp(entry.at) || typeof entry.reason !== 'string') throw new Error('台帳に不正な記録があります')
+    if (entry.assessmentId !== undefined) {
+      const assessment = filled(entry.assessmentId) ? assessmentById.get(entry.assessmentId) : undefined
+      if (entry.kind !== 'restore' || !assessment || assessment.taskId !== entry.taskId || assessment.origin !== 'human' || !record(assessment.score) || assessment.score.mode !== 'manual' || assessment.score.manualPoints !== entry.delta || !record(assessment.result) || assessment.result.effective !== entry.delta || !filled(entry.reason)) throw new Error('再確認台帳の本人評価参照が不正です')
+    }
     ledgerSum.set(entry.completionId, (ledgerSum.get(entry.completionId) ?? 0) + entry.delta)
   }
   for (const completion of completionById.values()) {
+    if (completion.reconfirmedAssessmentId !== undefined && !(tables.ledger as LedgerEntry[]).some(entry => entry.completionId === completion.id && entry.kind === 'restore' && entry.assessmentId === completion.reconfirmedAssessmentId)) throw new Error('本人再確認評価に対応する再完了台帳がありません')
     const sum = ledgerSum.get(completion.id) ?? 0
     if (!completion.currentAt && (completion.netPoints !== null || sum !== 0)) throw new Error('取消済み台帳が一致しません')
     if (completion.currentAt && completion.scoreState === 'pending' && (completion.netPoints !== null || sum !== 0)) throw new Error('未確定の台帳が一致しません')

@@ -10,7 +10,21 @@ function delegatedAssessment(assessment,task,ownerId,datasetId){
 }
 function text(value,max=20000){if(typeof value!=='string'||!value.trim()||value.length>max||new TextDecoder().decode(new TextEncoder().encode(value))!==value||[...value].some(char=>char.charCodeAt(0)<32&&!['\n','\r','\t'].includes(char))||/-----BEGIN (?:[A-Z ]+)?PRIVATE KEY-----|\b(?:gh[pousr]_[A-Za-z0-9]+|github_pat_[A-Za-z0-9_]+|sk-(?:or-v1-)?[A-Za-z0-9_-]{12,})|\bBearer\s+\S+|X-Amz-(?:Credential|Signature|Security-Token)=|[?&](?:access_token|token|signature|sig)=|\b[A-Za-z]:[\\/]|\bfile:\/\//i.test(value))fail('PUBLIC_TEXT_INVALID');return value.trim().normalize('NFC')}
 const md=value=>value.replaceAll('\\','\\\\').replace(/[<>&`*_[\]#]/g,char=>'\\'+char)
-function scoreMode(completion,assessment,ledger){return completion.scoreState==='confirmed'&&(assessment?.score.mode==='unset'||ledger.some(item=>item.completionId===completion.id&&item.kind==='adjust'))?'manual':assessment?.score.mode??'unset'}
+function completionAssessmentFacts(completion,assessments,entries){
+ const ledger=entries.filter(item=>item.completionId===completion.id).sort((a,b)=>a.id.localeCompare(b.id)),references=new Set()
+ for(const entry of ledger){
+  if(entry.assessmentId===undefined)continue
+  const candidates=assessments.filter(item=>item.id===entry.assessmentId),assessment=candidates[0],score=assessment?.score,result=assessment?.result
+  if(typeof entry.assessmentId!=='string'||!entry.assessmentId.trim()||entry.kind!=='restore'||entry.taskId!==completion.taskId||!Number.isSafeInteger(entry.delta)||entry.delta<0||entry.delta>100000||candidates.length!==1||assessment.taskId!==completion.taskId||assessment.origin!=='human'||assessment.ruleVersion!=='v1'||Object.hasOwn(assessment,'instruction')||score?.mode!=='manual'||score.manualPoints!==entry.delta||!Number.isFinite(Date.parse(assessment.createdAt))||result?.effective!==entry.delta||result.lower!==entry.delta||result.upper!==entry.delta)fail('RECONFIRMATION_ASSESSMENT_INVALID')
+  for(const [key,max] of [['minutes',10080],['travelMinutes',10080],['difficulty',4],['uncertainty',3],['coordination',3],['physical',3]])if(score[key]!==null&&(!Number.isInteger(score[key])||score[key]<0||score[key]>max))fail('RECONFIRMATION_ASSESSMENT_INVALID')
+  if(score.outing!==null&&typeof score.outing!=='boolean')fail('RECONFIRMATION_ASSESSMENT_INVALID')
+  references.add(entry.assessmentId)
+ }
+ if(completion.reconfirmedAssessmentId!==undefined&&(!references.has(completion.reconfirmedAssessmentId)||!Number.isSafeInteger(completion.lastConfirmedPoints)||completion.lastConfirmedPoints<0||completion.lastConfirmedPoints>100000))fail('RECONFIRMATION_ASSESSMENT_INVALID')
+ const originalAssessment=assessments.filter(item=>item.taskId===completion.taskId&&!references.has(item.id)&&item.createdAt<=completion.originalAt).sort((a,b)=>b.createdAt.localeCompare(a.createdAt)||b.id.localeCompare(a.id))[0]??null
+ return {completion,ledger,originalAssessment,...(references.size?{reconfirmationAssessments:assessments.filter(item=>references.has(item.id)).sort((a,b)=>a.id.localeCompare(b.id))}:{})}
+}
+function scoreMode(completion,assessment,ledger){return completion.scoreState==='confirmed'&&(assessment?.score.mode==='unset'||ledger.some(item=>item.completionId===completion.id&&(item.kind==='adjust'||item.kind==='restore'&&item.assessmentId!==undefined)))?'manual':assessment?.score.mode??'unset'}
 function publicFiles({row,completion,evidence,assessment,published,ledger=[]}){
  const manifest=row.manifest,selection=row.selection,recordDate=completion.localDate??completion.originalAt.slice(0,10),prefix=`records/${recordDate.slice(0,4)}/${recordDate.slice(5,7)}/${row.publicId}`
  const title=text(selection.title,300),body=text(selection.body),points=completion.netPoints,mode=scoreMode(completion,assessment,ledger)
@@ -39,8 +53,8 @@ function validateGitHubPublicationFacts(facts,configuration,{allowHistorical=fal
  if(!['approved','committing'].includes(row.state)||row.approvedBy!==owner||!row.approvedAt||task.deletedAt||task.status!=='completed'||!completion.currentAt||completion.scoreState!=='confirmed'||!Number.isSafeInteger(completion.netPoints)||completion.netPoints<0||completion.netPoints<policy.threshold||!Number.isSafeInteger(policy.threshold)||policy.threshold<0||policy.threshold>100000)fail('COMPLETION_NOT_ELIGIBLE')
  if(!row.selection||row.selection.includePastCompletion!==true&&completion.originalAt<policy.effectiveAt)fail('PAST_COMPLETION_NOT_SELECTED')
  if(!Array.isArray(facts.ledger)||facts.ledger.length>10000||!Array.isArray(facts.assessments)||facts.assessments.length>10000||!Array.isArray(facts.evidence)||facts.evidence.length>10000||!Array.isArray(facts.published)||facts.published.length>10000)fail('FACT_BUDGET')
- const ledger=facts.ledger.filter(item=>item.completionId===completion.id).sort((a,b)=>a.id.localeCompare(b.id)),assessment=facts.assessments.filter(item=>item.taskId===task.id&&item.createdAt<=completion.originalAt).sort((a,b)=>b.createdAt.localeCompare(a.createdAt)||b.id.localeCompare(a.id))[0]??null
- if(ledger.some(item=>item.taskId!==task.id||!Number.isSafeInteger(item.delta))||ledger.reduce((sum,item)=>sum+item.delta,0)!==completion.netPoints||!assessment||!['unset','manual','formula','allocated'].includes(assessment.score.mode)||githubValueDigest({completion,ledger,originalAssessment:assessment})!==manifest.completionDigest)fail('COMPLETION_CHANGED')
+ const completionFacts=completionAssessmentFacts(completion,facts.assessments,facts.ledger),ledger=completionFacts.ledger,assessment=completionFacts.originalAssessment
+ if(ledger.some(item=>item.taskId!==task.id||!Number.isSafeInteger(item.delta))||ledger.reduce((sum,item)=>sum+item.delta,0)!==completion.netPoints||!assessment||!['unset','manual','formula','allocated'].includes(assessment.score.mode)||githubValueDigest(completionFacts)!==manifest.completionDigest)fail('COMPLETION_CHANGED')
  delegatedAssessment(assessment,task,owner,dataset)
  const selected=row.selection.evidenceIds
  if(!Array.isArray(selected)||!selected.length||selected.length>20||new Set(selected).size!==selected.length)fail('EVIDENCE_SELECTION_INVALID')
