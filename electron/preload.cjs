@@ -98,6 +98,8 @@ contextBridge.exposeInMainWorld('michiAI', {
   proposeRoutine: request => ipcRenderer.invoke('michi:ai-propose-routine', request),
   detectObligations: request => ipcRenderer.invoke('michi:ai-detect-obligations', request),
   verifyObligations: request => ipcRenderer.invoke('michi:ai-verify-obligations', request),
+  notificationText: request => ipcRenderer.invoke('michi:ai-notification-text', request),
+  resolveTarget: request => ipcRenderer.invoke('michi:ai-resolve-target', request),
   usage: () => ipcRenderer.invoke('michi:ai-usage'),
   setUsageLimits: limits => ipcRenderer.invoke('michi:ai-usage-limits', limits)
 })
@@ -109,5 +111,7 @@ contextBridge.exposeInMainWorld('michiNetwork', {
 contextBridge.exposeInMainWorld('michiDesktop', {
   openTopOfMind: () => ipcRenderer.invoke('michi:open-top-of-mind'),
   showMain: () => ipcRenderer.invoke('michi:show-main'),
-  notify: payload => ipcRenderer.invoke('michi:notify', payload)
+  notify: payload => ipcRenderer.invoke('michi:notify', payload),
+  setTrayMode: enabled => ipcRenderer.invoke('michi:set-tray-mode', enabled),
+  onTrayStopNotifications: callback => { const listener = () => callback(); ipcRenderer.on('michi:tray-stop-notifications', listener); return () => ipcRenderer.removeListener('michi:tray-stop-notifications', listener) }
 })

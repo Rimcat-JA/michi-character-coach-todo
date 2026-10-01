@@ -107,7 +107,10 @@ function stricterAuthority(restored: Settings, current: Settings): Settings {
   // The owner's egress choice on this device is never widened or erased by a backup (offline_only wins); a device that has not chosen yet takes the backup's.
   const mine = current.runtimeProfile === undefined ? null : effectiveNetworkPolicy(current).policy, back = restored.runtimeProfile === undefined ? null : effectiveNetworkPolicy(restored).policy
   const runtimeProfile = mine ? standaloneProfile(restored.datasetId, mine === 'offline_only' || back === 'offline_only' ? 'offline_only' : 'explicit_online') : restored.runtimeProfile
-  return { ...restored, aiEnabled: restored.aiEnabled && current.aiEnabled, changePolicy: policy, ...(runtimeProfile ? { runtimeProfile } : {}) }
+  // Fact triggers and AI wording are standing consents: a restore never turns on one that is off on this device (missing = all off).
+  const state = restored.notificationState, from = state?.triggers, now = current.notificationState?.triggers
+  const triggers = from && { ...from, deadlineNear: { ...from.deadlineNear, enabled: from.deadlineNear.enabled && Boolean(now?.deadlineNear.enabled), os: from.deadlineNear.os && Boolean(now?.deadlineNear.os) }, calendarChange: { enabled: from.calendarChange.enabled && Boolean(now?.calendarChange.enabled), os: from.calendarChange.os && Boolean(now?.calendarChange.os) }, replanPrompt: { ...from.replanPrompt, enabled: from.replanPrompt.enabled && Boolean(now?.replanPrompt.enabled), os: from.replanPrompt.os && Boolean(now?.replanPrompt.os) }, aiText: from.aiText && Boolean(now?.aiText), trayResident: from.trayResident && Boolean(now?.trayResident) }
+  return { ...restored, aiEnabled: restored.aiEnabled && current.aiEnabled, changePolicy: policy, ...(runtimeProfile ? { runtimeProfile } : {}), ...(state && triggers ? { notificationState: { ...state, triggers } } : {}) }
 }
 export async function restoreBackup(snapshot: Snapshot) {
   validateSnapshot(snapshot)

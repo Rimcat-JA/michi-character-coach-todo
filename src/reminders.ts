@@ -2,7 +2,7 @@ import { db } from './db'
 import { addDays, today, uid, validateDate, type ReminderEvent, type ReminderRule, type ReminderState, type Settings, type Task } from './domain'
 import { querySmartList } from './smart-lists'
 import { coachNotificationGuardFor, coachNotificationStateFor, prepareCoachNotificationDelivery, setCoachNotificationPolicy } from './coach-notification-save'
-import { cancelPendingCoachNotifications, notificationDedupeKey, notificationLocalClock, reserveCoachNotification, settleCoachNotificationDelivery, type CoachNotificationState, type NotificationRequest } from './coach-notifications'
+import { acceptInAppDelivery, cancelPendingCoachNotifications, notificationDedupeKey, notificationLocalClock, reserveCoachNotification, type NotificationRequest } from './coach-notifications'
 
 export const defaultReminderState = (): ReminderState => ({ quietStart: '22:00', quietEnd: '08:00', dailyCap: 6, rules: [], events: [] })
 
@@ -128,7 +128,7 @@ export async function dispatchDueReminders(now = new Date()): Promise<ReminderEv
       const reservation = reserveCoachNotification(notifications, request, coachNotificationGuardFor(settings, { ...request.target, active: true }, { id: rule.id, revision: stamp, active: true, sentCount: rule.sentCount }), stamp)
       if (!reservation.intent) continue
       notifications = reservation.state
-      if (channels.includes('in-app')) notifications = acceptInApp(notifications, event.id, stamp)
+      if (channels.includes('in-app')) notifications = acceptInAppDelivery(notifications, event.id, stamp)
       events.push(event); emitted.push(event); rule.sentCount++; rule.updatedAt = stamp
       if (rule.kind === 'smart-daily') rule.nextAt = nextDaily(now, rule.timeOfDay!)
       else if (rule.kind === 'review') continue
@@ -161,10 +161,4 @@ export async function pendingOSReminder(event: ReminderEvent, now = new Date()) 
   if (!task || task.deletedAt || task.status !== 'open') return null
   const payload = await prepareCoachNotificationDelivery(event.id, 'os', now.toISOString())
   return payload
-}
-
-function acceptInApp(state: CoachNotificationState, id: string, at: string): CoachNotificationState {
-  const intent = state.intents.find(item => item.id === id)!, attemptId = `in-app:${id}`
-  const sending: CoachNotificationState = { ...state, intents: state.intents.map(item => item.id === id ? { ...intent, deliveries: item.deliveries.map(delivery => delivery.destinationId === 'in-app' ? { ...delivery, state: 'sending', attemptId, at } : delivery) } : item) }
-  return settleCoachNotificationDelivery(sending, id, 'in-app', attemptId, 'accepted_by_provider', at)
 }

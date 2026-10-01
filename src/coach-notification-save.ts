@@ -1,9 +1,11 @@
+import Dexie from 'dexie'
 import { db } from './db'
 import { changePolicyFor, type ChangePolicy } from './change-set'
 import { operationMode } from './automation-policy'
 import { uid, type ReminderRule, type Settings } from './domain'
 import { querySmartList } from './smart-lists'
-import { beginCoachNotificationDelivery, cancelPendingCoachNotifications, changeCoachNotificationPolicy, emptyCoachNotificationState, notificationLocalClock, reserveCoachNotification, settleCoachNotificationDelivery, validateCoachNotificationState, type CoachNotificationIntent, type CoachNotificationPolicy, type CoachNotificationState, type NotificationGuard, type NotificationRequest } from './coach-notifications'
+import { acceptInAppDelivery, beginCoachNotificationDelivery, cancelPendingCoachNotifications, changeCoachNotificationPolicy, coachTriggersOf, emptyCoachNotificationState, markCoachNotificationRead, notificationLocalClock, reserveCoachNotification, revalidateCoachNotification, settleCoachNotificationDelivery, validateCoachNotificationState, validateCoachTriggers, type CoachNotificationIntent, type CoachNotificationPolicy, type CoachNotificationState, type CoachTriggerSettings, type NotificationGuard, type NotificationRequest } from './coach-notifications'
+import { deadlineFacts, factsDigest, isCalendarIntent, isDeadlineIntent, isReplanIntent, triggerGuardState } from './coach-facts'
 
 export function coachNotificationStateFor(settings: Settings): CoachNotificationState {
   if (settings.notificationState) { validateCoachNotificationState(settings.notificationState, settings.profileId, settings.datasetId); return structuredClone(settings.notificationState) }
@@ -17,7 +19,7 @@ export function notificationStopReason(policy: ChangePolicy): string | null {
 export function coachNotificationGuardFor(settings: Settings, target: NotificationGuard['target'], rule: NotificationGuard['rule'], sources: NotificationGuard['sources'] = []): NotificationGuard {
   const policy = changePolicyFor(settings)
   // Only registered local channels have delivery adapters in this build.
-  return { ownerId: settings.profileId, datasetId: settings.datasetId, authorityEpoch: policy.epoch, sourcePermissionRevision: policy.sourcePermissionRevision, aiEnabled: settings.aiEnabled, target, rule, sources, availableDestinationIds: ['in-app', ...(settings.notifications ? ['os'] : [])], stopped: notificationStopReason(policy) }
+  return { ownerId: settings.profileId, datasetId: settings.datasetId, authorityEpoch: policy.epoch, sourcePermissionRevision: policy.sourcePermissionRevision, aiEnabled: settings.aiEnabled, target, rule, sources, availableDestinationIds: ['in-app', ...(settings.notifications ? ['os'] : [])], stopped: notificationStopReason(policy), aiModel: settings.aiModel ?? null }
 }
 export async function setCoachNotificationPolicy(patch: Partial<Omit<CoachNotificationPolicy, 'epoch'>>, at = new Date().toISOString()): Promise<void> {
   await db.transaction('rw', db.settings, async () => {
@@ -61,12 +63,19 @@ async function currentGuard(settings: Settings, intent: CoachNotificationIntent,
     const list = await db.smartLists.get(intent.target.id)
     target = { ...intent.target, revision: list?.revision ?? -1, active: Boolean(list && list.ownerId === settings.profileId && querySmartList(list, await db.tasks.toArray(), settings.profileId).some(task => task.status === 'open')) }
   }
+  let facts: string | null = null
+  if (isDeadlineIntent(intent) || isCalendarIntent(intent) || isReplanIntent(intent)) {
+    const state = coachNotificationStateFor(settings), task = intent.target.kind === 'task' ? await db.tasks.get(intent.target.id) : undefined
+    const derived = triggerGuardState(intent, task, isReplanIntent(intent) ? await db.tasks.toArray() : [], coachTriggersOf(state), state.policy.timezone, at)!
+    target = derived.target; ruleState = derived.rule
+    if (task?.dueDate && isDeadlineIntent(intent)) facts = await Dexie.waitFor(factsDigest(deadlineFacts(task)))
+  }
   const sources: NotificationGuard['sources'] = []
   for (const ref of intent.sourceRefs) {
     const source = await db.contextSources.get(ref.id)
     if (source) sources.push({ id: source.id, revision: source.revision, permissionRevision: source.permissionRevision, active: source.ownerId === settings.profileId && !source.deletedAt && source.permissions.retain && (source.retentionUntil === null || source.retentionUntil > at), notify: source.permissions.notify, disclose: source.permissions.disclose })
   }
-  return coachNotificationGuardFor(settings, target, ruleState, sources)
+  return { ...coachNotificationGuardFor(settings, target, ruleState, sources), factsDigest: facts }
 }
 /** The snooze selected by the person supplies the factual trigger and stable window. */
 export async function queueSnoozeNotification(taskId: string, at = new Date().toISOString()): Promise<CoachNotificationIntent | null> {
@@ -128,5 +137,55 @@ export async function purgeCoachNotificationSource(sourceId: string, at = new Da
     const matches = (intent: CoachNotificationIntent) => intent.target.kind === 'source' && intent.target.id === sourceId || intent.sourceRefs.some(ref => ref.id === sourceId)
     const state = cancelPendingCoachNotifications(coachNotificationStateFor(settings), '資料の削除・権限変更で取り消しました', at, matches)
     await db.settings.put({ ...settings, notificationState: { ...state, intents: state.intents.map(intent => matches(intent) ? { ...intent, text: { factual: '削除・権限変更した資料の通知', savedAI: null } } : intent) } })
+  })
+}
+/** Turning a trigger OFF cancels its pending reservations; other producers are untouched. */
+export async function setCoachNotificationTriggers(patch: Partial<CoachTriggerSettings>, at = new Date().toISOString()): Promise<void> {
+  await db.transaction('rw', db.settings, async () => {
+    const settings = await db.settings.get('main'); if (!settings) throw new Error('本人の設定がありません')
+    const state = coachNotificationStateFor(settings), previous = coachTriggersOf(state), next = { ...previous, ...structuredClone(patch) }
+    validateCoachTriggers(next)
+    const changed = (key: 'deadlineNear' | 'calendarChange' | 'replanPrompt') => JSON.stringify(previous[key]) !== JSON.stringify(next[key])
+    let updated = cancelPendingCoachNotifications(state, '通知のきっかけ設定が変わりました', at, intent => changed('deadlineNear') && isDeadlineIntent(intent) || changed('calendarChange') && isCalendarIntent(intent) || changed('replanPrompt') && isReplanIntent(intent))
+    // Saved AI wording is dropped only where no delivery can have shown it; shown wording stays as the record of what was sent.
+    const shown = (intent: CoachNotificationIntent) => intent.deliveries.some(delivery => ['sending', 'accepted_by_provider', 'delivery_unknown'].includes(delivery.state))
+    if (previous.aiText && !next.aiText) updated = { ...updated, intents: updated.intents.map(intent => intent.text.savedAI === null || shown(intent) ? intent : { ...intent, text: { factual: intent.text.factual, savedAI: null } }) }
+    await db.settings.put({ ...settings, notificationState: { ...updated, triggers: next } })
+  })
+}
+export async function acceptCoachNotificationInApp(intentId: string, at = new Date().toISOString()): Promise<boolean> {
+  return db.transaction('rw', db.settings, db.tasks, db.smartLists, db.contextSources, async () => {
+    const settings = await db.settings.get('main'); if (!settings) return false
+    const state = coachNotificationStateFor(settings), intent = state.intents.find(item => item.id === intentId)
+    if (!intent || !intent.deliveries.some(item => item.destinationId === 'in-app' && ['prepared', 'queued'].includes(item.state))) return false
+    const decision = revalidateCoachNotification(state, intent, await currentGuard(settings, intent, at), at)
+    if (!decision.allowed) { await db.settings.put({ ...settings, notificationState: cancelPendingCoachNotifications(state, decision.reason, at, item => item.id === intentId) }); return false }
+    await db.settings.put({ ...settings, notificationState: acceptInAppDelivery(state, intentId, at) })
+    return true
+  })
+}
+export async function readCoachNotification(intentId: string, at = new Date().toISOString()): Promise<void> {
+  await db.transaction('rw', db.settings, async () => {
+    const settings = await db.settings.get('main'); if (!settings) throw new Error('本人の設定がありません')
+    await db.settings.put({ ...settings, notificationState: markCoachNotificationRead(coachNotificationStateFor(settings), intentId, at) })
+  })
+}
+/** Persists validated AI wording only if the reservation still passes every check and the facts are unchanged. */
+export async function saveCoachNotificationAIText(intentId: string, text: string, model: string, digest: string, at = new Date().toISOString()): Promise<boolean> {
+  return db.transaction('rw', db.settings, db.tasks, db.smartLists, db.contextSources, async () => {
+    const settings = await db.settings.get('main'); if (!settings || !settings.aiEnabled || settings.aiModel !== model) return false
+    const state = coachNotificationStateFor(settings), intent = state.intents.find(item => item.id === intentId)
+    if (!intent || !coachTriggersOf(state).aiText || !intent.deliveries.some(item => ['prepared', 'queued'].includes(item.state))) return false
+    const guard = await currentGuard(settings, intent, at)
+    if (guard.factsDigest !== digest || !revalidateCoachNotification(state, intent, guard, at).allowed) return false
+    await db.settings.put({ ...settings, notificationState: { ...state, intents: state.intents.map(item => item.id === intentId ? { ...item, text: { factual: item.text.factual, savedAI: text, savedAIModel: model, factsDigest: digest } } : item) } })
+    return true
+  })
+}
+/** Current recomputed facts digest for display decisions (in-app inbox). */
+export async function currentCoachNotificationGuard(intentId: string, at = new Date().toISOString()): Promise<NotificationGuard | null> {
+  return db.transaction('r', db.settings, db.tasks, db.smartLists, db.contextSources, async () => {
+    const settings = await db.settings.get('main'), intent = settings ? coachNotificationStateFor(settings).intents.find(item => item.id === intentId) : undefined
+    return settings && intent ? currentGuard(settings, intent, at) : null
   })
 }

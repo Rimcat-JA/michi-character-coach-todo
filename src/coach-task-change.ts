@@ -16,11 +16,18 @@ export function requestsDeadlineChange(instruction:string){
   const text=instruction.replace(/(?:締め?切り|期限)(?:は|を)?(?:変えず(?:に)?|変更せず(?:に)?|そのまま|維持(?:して)?|変えない(?:で)?|変更しない(?:で)?|動かさず(?:に)?)/g,'')
   return /締め?切り|期限|dueDate|due_date/.test(text)
 }
+// 「今日は無理」 states the person's condition, not a target date.
+const conditionOnly=/(?:今日|本日|明日)は?(?:もう)?(?:無理|むり|できない|できなさそう|厳しい|きびしい|きつい|難しい|休み|休む|疲れ(?:た|てる|ている|てて)?)(?:(?:なので|ので|だから|から|けど|けれど|し)[、。,，\s]?|(?=[、。,，\s]|$))/g
+// Relative dates this reader does not parse must never collapse to 今日/明日.
+const unreadRelative=/明後日|あさって|明々後日|しあさって|来週|再来週|\d+日後/
+const unreadError='この日付の言い方は読み取れません。手動欄で予定日を指定してください'
 export function requestedScheduleDate(instruction:string,referenceDate:string):string|null|undefined{
   validateDate(referenceDate,'基準日')
+  instruction=instruction.replace(conditionOnly,'')
   if(requestsDeadlineChange(instruction)&&!/予定日|実施日|日程/.test(instruction))throw new Error('予定日と締め切りは別の変更項目です。予定日を明示してください')
   if(/予定日.*(?:解除|消して|空欄|未設定)|(?:予定|日程).*(?:外して|取り消して)/.test(instruction))return null
   if(/までに?/.test(instruction)&&!/予定日|実施日|日程/.test(instruction))throw new Error('予定日と締め切りのどちらを変えるか不明です。手動欄で予定日を確認してください')
+  if(unreadRelative.test(instruction))throw new Error(unreadError)
   const dates=new Set<string>()
   if(/明日/.test(instruction))dates.add(addDays(referenceDate,1))
   if(/今日/.test(instruction))dates.add(referenceDate)
@@ -51,6 +58,7 @@ export function requestedDeadlineDate(instruction:string,referenceDate:string):s
   if(!requestsDeadlineChange(instruction))return undefined
   if(/変更しない|変えない|そのまま|維持|触らない|しないで|不要|ではない|じゃない/.test(instruction))throw new Error('本当の締め切りを変更する指示を確認してください')
   if(/(?:締め?切り|期限).*(?:解除|消して|空欄|未設定)/.test(instruction))return null
+  if(unreadRelative.test(instruction))throw new Error(unreadError)
   const dates=new Set<string>()
   if(/明日/.test(instruction))dates.add(addDays(referenceDate,1))
   if(/今日/.test(instruction))dates.add(referenceDate)
@@ -123,4 +131,15 @@ export async function prepareCoachTaskChange(proposal:CoachTaskProposal,latest:C
   const labels={title:'タイトル',notes:'メモ',scheduledDate:'予定日',dueDate:'本当の締め切り',manualPoints:'本人指定ポイント'}
   const fields=Object.keys(proposal.patch).map(field=>labels[field as keyof typeof labels]).join('・')
   return prepareTaskChanges([{taskId:latest!.id,expectedRevision:latest!.revision,patch:proposal.patch}],context,`選択したタスクの${fields}を変更するコーチ候補（まだ適用していません）`,instruction)
+}
+/** AI-free reading of a reply such as 「今日は無理、明日に移して」: scheduledDate only, never the real deadline. */
+export function scheduleOnlyPatch(task:Pick<Task,'scheduledDate'>,instruction:string,referenceDate:string):{scheduledDate?:string;notice:string}{
+  if(!instruction.trim())return{notice:''}
+  if(requestsDeadlineChange(instruction))return{notice:'本当の締め切りの変更は、期限欄で本人が日付を指定して確認します。予定日だけの移動なら予定日を指定してください。'}
+  try{
+    const date=requestedScheduleDate(instruction,referenceDate)
+    if(typeof date!=='string'||!scheduleRequested(instruction))return{notice:'相談文から予定日を一つに決められませんでした。予定日欄で指定してください。'}
+    if(date===task.scheduledDate)return{notice:`予定日はすでに ${date} です。`}
+    return{scheduledDate:date,notice:`相談文から予定日だけを ${date} に入れました（締め切りは変えません）。まだ適用していません。`}
+  }catch(error){return{notice:error instanceof Error?error.message:String(error)}}
 }

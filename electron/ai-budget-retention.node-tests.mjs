@@ -89,7 +89,7 @@ test('古いpendingは今日の未知課金timeoutへ復旧して残り、日/�
   assert.deepEqual(usage.daily, expected); assert.deepEqual(usage.monthly, expected)
   assert.deepEqual(usage.byKind.assist, expected)
   assert.deepEqual(usage.limits, input.limits)
-  assert.deepEqual(usage.automaticBudget, { requests: 0, tokens: 0 })
+  assert.deepEqual(usage.automaticBudget, { requests: 0, used: 0 })
   assert.equal(usage.cost, null)
   assert.deepEqual((await read(filePath)).entries, [{ ...pending, outcome: 'timeout', settledDay: '2026-10-01' }])
   const saved = await fs.readFile(filePath, 'utf8')

@@ -12,6 +12,7 @@ import { getBrowserVoiceMediaController, type VoiceMediaController, type VoiceMe
 import { egressLine, loadConnectionStatus, runRowStop, stopAIProcessingRow, UNPROVIDED_CONNECTIONS, type RowStopState } from './feature-connections'
 import { effectiveNetworkPolicy, networkStatus, type NetworkStatus } from './runtime-profile'
 import { NetworkCounters } from './CapabilityView'
+import { keyStatusOnOpen } from './ai-key-status'
 
 export type ConnectionGateways = { fileBridge?: FileBridgeGateway; localActions?: LocalActionGateway; github?: GitHubAchievementsGateway }
 type Row = { id: string; label: string; display: string; data: string; authority: string; background: string; stop: ((event: Event) => Promise<RowStopState>) | null; feature: PanelFeatureId | null; stopLabel?: string; note?: string; egress?: string }
@@ -33,15 +34,16 @@ export default function FeatureConnectionsView({ settings, taskCount, gateways, 
     let alive = true
     void loadConnectionStatus({ fileBridge, localActions }).then(([bridgeResult, actionsResult]) => { if (!alive) return; setBridge(bridgeResult.status === 'fulfilled' ? bridgeResult.value ?? null : null); setActions(actionsResult.status === 'fulfilled' ? actionsResult.value ?? null : null) })
     if (networkProp === undefined) void networkStatus().then(value => { if (alive) setLoadedNetwork(value) })
-    if (!aiStatus) void host?.michiAI?.status().then(value => { if (alive) setAi(value) }).catch(() => undefined)
+    // With AI OFF the stored key file is not read on open.
+    if (!aiStatus) void keyStatusOnOpen(settings.aiEnabled, host?.michiAI ? () => host.michiAI!.status() : undefined)?.then(value => { if (alive) setAi(value) }).catch(() => undefined)
     return () => { alive = false }
-  }, [fileBridge, localActions, aiStatus, host, refresh, networkProp, settings.runtimeProfile?.network_policy])
+  }, [fileBridge, localActions, aiStatus, host, refresh, networkProp, settings.runtimeProfile?.network_policy, settings.aiEnabled])
   useEffect(() => { const controller = voice ?? (typeof window === 'undefined' ? null : getBrowserVoiceMediaController()); return controller?.subscribe(setMedia) }, [voice])
   const shown = (id: PanelFeatureId) => featureEnabled(hidden, id) ? '表示' : '非表示（データ・接続は維持）'
   const playing = media && (media.speech !== 'idle' || media.music === 'playing' || ['permission', 'recording', 'transcribing'].includes(media.input))
   const connectionHost = gateways ? { michiFileBridge: gateways.fileBridge, michiLocalActions: gateways.localActions, michiGitHubAchievements: gateways.github } : undefined
   const rows: Row[] = [
-    { id: 'ai', label: 'OpenRouter AI', feature: null, display: featureEnabled(hidden, 'coach') ? 'コーチ画面に表示' : 'コーチ画面は非表示', data: ai?.configured ? 'APIキー保存済み（Windowsの暗号化保存・バックアップ対象外）' : 'APIキーなし', authority: settings.aiEnabled ? `ON（${settings.aiModel ?? 'モデル未設定'}）` : 'OFF', background: 'なし（本人が送信したときだけ）', stop: settings.aiEnabled ? stopAIProcessingRow : null, stopLabel: 'AI処理を停止（他の接続も取り消し）', egress: egressLine(egressPolicy, network, 'openrouter'), note: 'AIを止めると、ファイル接続/MCP・PC操作・GitHubの接続も取り消され、未確定の変更案は無効になります（登録済みのPC操作は再開後に再登録が必要です）。' },
+    { id: 'ai', label: 'OpenRouter AI', feature: null, display: featureEnabled(hidden, 'coach') ? 'コーチ画面に表示' : 'コーチ画面は非表示', data: ai?.configured ? 'APIキー保存済み（Windowsの暗号化保存・バックアップ対象外）' : !ai && !settings.aiEnabled ? 'AIがOFFのため保存済みキーは読み込んでいません' : 'APIキーなし', authority: settings.aiEnabled ? `ON（${settings.aiModel ?? 'モデル未設定'}）` : 'OFF', background: 'なし（本人が送信したときだけ）', stop: settings.aiEnabled ? stopAIProcessingRow : null, stopLabel: 'AI処理を停止（他の接続も取り消し）', egress: egressLine(egressPolicy, network, 'openrouter'), note: 'AIを止めると、ファイル接続/MCP・PC操作・GitHubの接続も取り消され、未確定の変更案は無効になります（登録済みのPC操作は再開後に再登録が必要です）。' },
     { id: 'fileBridge', label: FEATURE_REGISTRY.fileBridge.label, feature: 'fileBridge', display: shown('fileBridge'), data: bridge?.registration ? `選択タスク ${bridge.registration.task_ids.length}件・結果 ${bridge.results.length}件` : '接続なし', authority: !fileBridge ? 'この環境では未提供' : bridge?.connected ? bridge.registration?.client.grant.mutation_mode === 'auto_within_bounds' ? `接続中・範囲内自動を委任（${bridge.registration.client.grant.automation?.max_schedule_shift_days}日以内・1日${bridge.registration.client.grant.automation?.max_operations_per_day}件）` : '接続中・毎回本人承認' : '未接続', background: 'なし（受信箱の確認時だけ処理）', stop: fileBridge ? async () => runRowStop(() => stopConnection('fileBridge', connectionHost)) : null },
     { id: 'localActions', label: FEATURE_REGISTRY.localActions.label, feature: 'localActions', display: shown('localActions'), data: actions ? `登録 ${actions.definitions.length}件・実行結果 ${actions.results.length}件` : '登録なし', authority: !localActions ? 'この環境では未提供' : actions?.enabled ? '有効・毎回本人のクリックで実行' : '停止', background: 'なし（自動triggerは未実装）', stop: localActions ? async () => runRowStop(() => stopConnection('localActions', connectionHost)) : null },
     { id: 'github', label: FEATURE_REGISTRY.achievements.label, feature: 'achievements', display: shown('achievements'), data: '証拠・公開記録はこの端末に保存', authority: !github ? 'この環境では未提供' : githubState ? `状態: ${githubState}` : '未確認（確認するとGitHubに接続します）', background: 'アプリ表示中に結果不明の公開だけ照合（新規送信なし）。状態確認はGitHubに接続します', stop: github ? async () => runRowStop(() => stopConnection('github', connectionHost)) : null, egress: github ? egressLine(egressPolicy, network, 'github') : undefined },

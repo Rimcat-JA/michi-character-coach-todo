@@ -1,0 +1,77 @@
+{
+  "deadline": [
+    {
+      "title": "週次報告書",
+      "dueDate": "2026-10-02",
+      "scheduledDate": "2026-10-01",
+      "factual": "期限が近いタスク: 週次報告書（期限 2026-10-02）",
+      "digest": "5ae4fa96756a9fd933c2cc777b442411ae91a21d747cddf0fb168d12af3a9725"
+    },
+    {
+      "title": "請求書（10月分）",
+      "dueDate": "2026-10-31",
+      "scheduledDate": null,
+      "factual": "期限が近いタスク: 請求書（10月分）（期限 2026-10-31）",
+      "digest": "4b6749b2a70ce62e809ccfedf0068ef8f74ca7fe4218c40508b63cd944339da9"
+    }
+  ],
+  "calendar": [
+    {
+      "title": "定例会議の準備",
+      "from": "2026-10-12",
+      "to": "2026-10-13",
+      "factual": "公式カレンダーの変更で予定日を変更: 定例会議の準備 2026-10-12→2026-10-13"
+    },
+    {
+      "title": "提出",
+      "from": null,
+      "to": "2026-10-05",
+      "factual": "公式カレンダーの変更で予定日を変更: 提出 未設定→2026-10-05"
+    }
+  ],
+  "replan": [
+    {
+      "day": "2026-10-01",
+      "tasks": [
+        {
+          "status": "open",
+          "deletedAt": null,
+          "scheduledDate": "2026-09-30"
+        },
+        {
+          "status": "open",
+          "deletedAt": null,
+          "scheduledDate": "2026-09-29",
+          "backburner": true
+        },
+        {
+          "status": "completed",
+          "deletedAt": null,
+          "scheduledDate": "2026-09-28"
+        },
+        {
+          "status": "open",
+          "deletedAt": "2026-09-30T00:00:00.000Z",
+          "scheduledDate": "2026-09-28"
+        },
+        {
+          "status": "open",
+          "deletedAt": null,
+          "scheduledDate": "2026-10-01"
+        },
+        {
+          "status": "open",
+          "deletedAt": null,
+          "scheduledDate": null
+        },
+        {
+          "status": "open",
+          "deletedAt": null,
+          "scheduledDate": "2026-09-01"
+        }
+      ],
+      "count": 2,
+      "factual": "予定日を過ぎた未完了が2件あります"
+    }
+  ]
+}

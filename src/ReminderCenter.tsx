@@ -1,12 +1,14 @@
 import { useState } from 'react'
 import { taskDueTime, type ReminderRule, type Settings, type SmartList, type Task } from './domain'
 import { createReminder, deadlineReminderAt, markReminderRead, setReminderPolicy, stopReminder } from './reminders'
+import { querySmartList } from './smart-lists'
+import { NotificationActions } from './CoachInboxView'
 
-type Props = { tasks: Task[]; lists: SmartList[]; settings: Settings; run: (fn: () => Promise<unknown>, success?: string) => Promise<boolean>; mode: 'today' | 'settings' }
+type Props = { tasks: Task[]; lists: SmartList[]; settings: Settings; run: (fn: () => Promise<unknown>, success?: string) => Promise<boolean>; mode: 'today' | 'settings'; onEdit?: (task: Task) => void }
 const reminderLabel = (kind: ReminderRule['kind']) => kind === 'bug-me' ? 'Bug Me' : kind === 'smart-daily' ? 'Smart List毎日' : kind === 'review' ? '見直し日' : '1回'
 const reservationTime = (rule: ReminderRule) => rule.kind === 'review' && !rule.reviewDate ? '見直し日未設定（通知を待機）' : rule.kind === 'review' && rule.sentCount ? `${rule.reviewDate} 通知済み（次の見直し日を待機）` : `次回 ${new Date(rule.nextAt).toLocaleString('ja-JP')}`
 
-export default function ReminderCenter({ tasks, lists, settings, run, mode }: Props) {
+export default function ReminderCenter({ tasks, lists, settings, run, mode, onEdit }: Props) {
   const [taskId, setTaskId] = useState('')
   const [listId, setListId] = useState('')
   const [when, setWhen] = useState(() => { const date = new Date(Date.now() + 3600000); return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}T${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}` })
@@ -20,7 +22,13 @@ export default function ReminderCenter({ tasks, lists, settings, run, mode }: Pr
   const selectedTask = availableTasks.find(task => task.id === taskId)
   const channels: ('in-app' | 'os')[] = useOS && settings.notifications ? ['in-app', 'os'] : ['in-app']
 
-  if (mode === 'today') return unread.length ? <section className="card reminder-center"><h2>リマインダー {unread.length}件</h2><div className="reminder-items">{unread.slice(-10).reverse().map(event => <div key={event.id} className="setting-line"><div><strong>{event.title}</strong><small>{new Date(event.at).toLocaleString('ja-JP')} · {reminderLabel(event.kind)}</small></div><button className="secondary-button" onClick={() => run(() => markReminderRead(event.id), '確認しました')}>確認</button></div>)}</div></section> : null
+  // A reply binds to the notification's own task; a Smart List notification lets the person choose one of its tasks.
+  const replyTarget = (event: (typeof unread)[number]) => {
+    const intent = settings.notificationState?.intents.find(item => item.id === event.id), list = event.kind === 'smart-daily' ? lists.find(item => item.id === event.targetId && item.ownerId === settings.profileId) : undefined
+    const ids = list ? querySmartList(list, tasks, settings.profileId).filter(task => task.status === 'open' && !task.deletedAt).map(task => task.id) : [event.targetId]
+    return ids.length ? { id: event.id, title: event.title, taskIds: ids, revisions: Object.fromEntries(ids.map(id => [id, list ? tasks.find(task => task.id === id)?.revision ?? 0 : event.reviewRevision ?? intent?.target.revision ?? tasks.find(task => task.id === id)?.revision ?? 0])) } : null
+  }
+  if (mode === 'today') return unread.length ? <section className="card reminder-center"><h2>リマインダー {unread.length}件</h2><div className="reminder-items">{unread.slice(-10).reverse().map(event => <div key={event.id} className="setting-line"><div><strong>{event.title}</strong><small>{new Date(event.at).toLocaleString('ja-JP')} · {reminderLabel(event.kind)}</small><NotificationActions settings={settings} tasks={tasks} run={run} onEdit={onEdit} targetId={event.targetId} muteLabel={event.kind === 'smart-daily' ? 'このSmart Listは通知しない' : 'このタスクは通知しない'} notification={replyTarget(event)} extra={<button className="secondary-button" onClick={() => run(() => markReminderRead(event.id), '確認しました')}>確認</button>} /></div></div>)}</div></section> : null
 
   return <section className="card setting-section reminder-center"><div className="setting-heading"><div><h2>リマインダーと反復催促</h2><p>アプリを開いている間に判定します。終了中の予約通知は次回起動時に判定します。</p></div></div>
     <div className="form-grid">

@@ -61,7 +61,7 @@ export async function setAutomationPolicyFromUI(context: ChangeContext, event: E
 }
 export type ReduceResult = { stops: AutomationStops; errors: unknown[] }
 /** Reduce-only: fixed buttons and the deterministic coach command may call it without an LLM or approval. */
-export async function reduceAuthority(scope: StopScope | 'all', origin: 'button' | 'coach-command' | 'connections'): Promise<ReduceResult> {
+export async function reduceAuthority(scope: StopScope | 'all', origin: 'button' | 'coach-command' | 'connections' | 'tray'): Promise<ReduceResult> {
   if (!['aiProcessing', 'aiChanges', 'notifications', 'routines', 'all'].includes(scope)) throw new Error('停止する範囲を確認してください')
   const all = scope === 'all', authority = all || scope === 'aiProcessing' || scope === 'aiChanges', at = new Date().toISOString()
   const settings = await db.transaction('rw', db.settings, db.audits, async () => {
@@ -121,7 +121,7 @@ export async function resumeAuthorityFromUI(context: ChangeContext, event: Event
 /** The coach command path never calls a model and can only reduce authority. */
 export async function runCoachAuthorityCommand(command: CoachAuthorityCommand): Promise<string> {
   if (command.kind === 'escalation') return '権限を増やす・再開する操作はコーチからは実行しません。設定 > 自動化（S20）で本人が内容を確認して保存してください。'
-  if (command.kind === 'undo-latest') return '直前の代理変更の取り消し案を表示します。本人の確認ボタンで適用するまでタスクは変わりません。'
+  if (command.kind === 'undo-latest') return '直前のコーチ経由・代理の変更の取り消し案を表示します。本人の確認ボタンで適用するまでタスクは変わりません。'
   const result = await reduceAuthority(command.scope, 'coach-command')
   const label = command.scope === 'all' ? 'AI処理・AIによる変更・通知・ルーティン生成（緊急停止）' : STOP_LABELS[command.scope]
   return `${label}を停止しました。再開は 設定 > 自動化 で本人が確認して行います。外部へ送信済みの依頼は取り消せない場合があります。${result.errors.length ? ' 一部の接続の停止を確認できませんでした。接続状態を確認してください。' : ''}`
