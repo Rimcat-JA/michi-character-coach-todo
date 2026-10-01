@@ -10,6 +10,7 @@ import { loadCalendarRulesState } from './calendar-rules-save'
 import { validateRoutineAssistCandidate, validateRoutineAssistSelection, validateRoutineInstructionPeriod, type RoutineAssistCandidate, type RoutineAssistInput } from './routine-assist'
 import { applyRoutineAssistConfigurationFromUI, prepareSourceRoutineConfiguration, type PreparedRoutineAssistance, type RoutineSourceGuard } from './routine-assist-save'
 import { verifiedRecurrenceTrigger } from './detection-recurrence-pattern'
+import { detectionProvenanceNotes, quoteDigest } from './task-source-evidence'
 
 export type DetectionSourceGuard = {sourceId:string;sourceRevision:number;snapshotRevision:number;permissionRevision:number;sha256:string}
 export type DetectionIdentityOptions = {
@@ -30,7 +31,8 @@ export type DetectionTransport = {
   detect:(payload:{model:string;request:DetectionRequest})=>Promise<string>
   verify:(payload:{model:string;request:DetectionRequest;change:DetectionChange})=>Promise<string>
 }
-export type PreparedDetectionCreate = {runId:string;candidateId:string;sourceDigest:string;assisted:PreparedAssistedTasks;digest:string}
+export type DetectionEvidenceDraft = {sourceId:string;snapshotRevision:number;spanId:string;quote:string;quoteSha256:string;supports:string[]}
+export type PreparedDetectionCreate = {runId:string;candidateId:string;sourceDigest:string;assisted:PreparedAssistedTasks;evidence:DetectionEvidenceDraft[];digest:string}
 export type DetectionCreationReceipt = {runId:string;candidateId:string;taskIds:string[];digest:string;appliedAt:string}
 const preparedRegistry=new Map<string,PreparedDetection>(),runRegistry=new Map<string,DetectionRun>(),creationRegistry=new Map<string,PreparedDetectionCreate>()
 const recurrenceRegistry=new Map<string,{run:DetectionRun;candidateId:string;prepared:PreparedRoutineAssistance}>()
@@ -167,9 +169,12 @@ export async function prepareDetectionCreate(run:DetectionRun,candidateId:string
   const input=newTaskInput(),evidence=candidate.change.evidence
   input.title=candidate.change.title!
   input.dueDate=candidate.change.change_fields.includes('due')&&candidate.change.due.kind==='date'?candidate.change.due.value:null
-  input.notes=`資料から検出し本人が確認する候補。検出=${run.detectorModel} / 検証=${run.verifierModel}（同じモデル、独立評価未通過）\n根拠: ${candidate.change.basis} / ${candidate.change.obligation_state}\n${evidence.map(reference=>`[${reference.source_id} 内容版${reference.revision} ${reference.span_id}] ${reference.quote}`).join('\n')}${candidate.change.due.raw?`\n期限の原文: ${candidate.change.due.raw}`:''}`
+  // Third-party quotes go to taskSourceEvidence (erased with the source), never into the task notes.
+  input.notes=detectionProvenanceNotes(run.detectorModel,run.verifierModel,candidate.change.basis,candidate.change.obligation_state,run.id)
+  if(evidence.some(reference=>reference.source_id!==run.source.sourceId||reference.revision!==run.source.snapshotRevision))throw new Error('候補の引用が検出した資料の版と一致しません')
+  const evidenceRows=await Promise.all(evidence.map(async reference=>({sourceId:reference.source_id,snapshotRevision:reference.revision,spanId:reference.span_id,quote:reference.quote,quoteSha256:await quoteDigest(reference.quote),supports:[...reference.supports]})))
   const assisted=await prepareAssistedTasks([{input,notices:[],source:evidence.map(reference=>reference.quote).join('\n').slice(0,2000)}],'ai')
-  const payload={runId:run.id,candidateId,sourceDigest:run.digest,assisted}
+  const payload={runId:run.id,candidateId,sourceDigest:run.digest,assisted,evidence:evidenceRows}
   const prepared=freeze({...payload,digest:await contentDigest(payload)})
   creationRegistry.set(assisted.id,prepared)
   return prepared
@@ -180,13 +185,14 @@ export async function applyDetectionCreateFromUI(run:DetectionRun,prepared:Prepa
   if(creationRegistry.get(prepared.assisted.id)!==prepared||prepared.runId!==run.id||prepared.sourceDigest!==run.digest||prepared.digest!==confirmedDigest)throw new Error('確認した検出候補の内容が変わりました')
   const {digest,...payload}=prepared
   if(digest!==await contentDigest(payload))throw new Error('確認した検出候補の内容が変わりました')
-  const all=[db.tasks,db.assessments,db.commands,db.audits,db.containers,db.settings,db.labelGroups,db.labelDefinitions,db.contextSources,db.contextSnapshots,db.sourceArtifacts]
+  const all=[db.tasks,db.assessments,db.commands,db.audits,db.containers,db.settings,db.labelGroups,db.labelDefinitions,db.contextSources,db.contextSnapshots,db.sourceArtifacts,db.taskSourceEvidence]
   return db.transaction('rw',all,async()=>{
     await assertCurrent(run,run.detectorModel)
     if(!await db.sourceArtifacts.get(`detection:${run.id}`))throw new Error('候補が破棄されました。もう一度検出してください')
     const existing=await db.commands.get(`assist:${prepared.assisted.id}`)
     if(!existing&&(await db.tasks.toArray()).some(task=>!task.deletedAt&&task.title.normalize('NFC').trim()===prepared.assisted.inputs[0].title.normalize('NFC').trim()))throw new Error('同じ作業が既に登録されています。既存タスクを確認してください')
-    const ids=await applyAssistedTasks(prepared.assisted,prepared.assisted.digest),auditAt=new Date().toISOString(),auditId=`detection-approval:${prepared.assisted.id}`
+    const ids=await applyAssistedTasks(prepared.assisted,prepared.assisted.digest),auditAt=new Date().toISOString(),auditId=`detection-approval:${prepared.assisted.id}`,owner=await settings()
+    for(const [index,row] of prepared.evidence.entries())if(ids[0]&&!await db.taskSourceEvidence.get(`detection:${prepared.assisted.id}:${index}`))await db.taskSourceEvidence.add({id:`detection:${prepared.assisted.id}:${index}`,ownerId:owner.profileId,datasetId:owner.datasetId,taskId:ids[0],sourceId:row.sourceId,snapshotRevision:row.snapshotRevision,permissionRevision:run.source.permissionRevision,spanId:row.spanId,quote:row.quote,quoteSha256:row.quoteSha256,supports:[...row.supports],runId:run.id,candidateId:prepared.candidateId,createdAt:auditAt})
     if(!await db.audits.get(auditId))await db.audits.add({id:auditId,taskId:ids[0]??null,operation:'detection.approved',at:auditAt,detail:JSON.stringify({runId:run.id,candidateId:prepared.candidateId,digest:confirmedDigest,source:run.source,detectorModel:run.detectorModel,verifierModel:run.verifierModel,independentModelHoldout:false,approvedBy:run.ownerId,policyEpoch:run.policyEpoch,sourcePermissionRevision:run.sourcePermissionRevision,taskIds:ids})})
     return {runId:run.id,candidateId:prepared.candidateId,taskIds:ids,digest:confirmedDigest,appliedAt:auditAt}
   })

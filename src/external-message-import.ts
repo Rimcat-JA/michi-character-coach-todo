@@ -4,6 +4,7 @@ import { contentDigest } from './canonical'
 import { changePolicyFor } from './change-set'
 import { validateDate } from './domain'
 import { defaultSourcePermissions, importLocalSource, sourceSpans } from './source-library'
+import { defaultSourceRetention } from './retention-defaults'
 
 export type ExternalImportProvider = 'line' | 'discord'
 export type ImportedMessageSpan = { id: string; index: number; start: number; end: number; text: string; kind: 'body' | 'quoted' | 'uncertain' }
@@ -204,8 +205,10 @@ export async function confirmImportedSpeakerFromUI(value: PreparedExternalMessag
   prepared.get(value)!.set(actorKey, new Date().toISOString())
 }
 export function confirmedImportedSpeakers(value: PreparedExternalMessageImport): string[] { return [...(prepared.get(value)?.keys() ?? [])] }
-export async function importSelectedExternalMessagesFromUI(value: PreparedExternalMessageImport, selectedIds: string[], event: Event): Promise<ExternalImportResult> {
+/** retentionUntil omitted = 90-day default for imported conversations (design 23.2); null = owner chose no expiry. */
+export async function importSelectedExternalMessagesFromUI(value: PreparedExternalMessageImport, selectedIds: string[], event: Event, retentionUntil?: string | null): Promise<ExternalImportResult> {
   trustedClick(event); await assertPrepared(value)
+  const retention = retentionUntil === undefined ? defaultSourceRetention(value.provider) : retentionUntil
   if (!Array.isArray(selectedIds) || !selectedIds.length || selectedIds.length > maxSelected || new Set(selectedIds).size !== selectedIds.length || selectedIds.some(id => !value.messages.some(message => message.id === id))) throw new Error('プレビュー内の発言を1〜200件選択してください')
   const confirmed = prepared.get(value)!, selected = value.messages.filter(message => selectedIds.includes(message.id))
   const result = await db.transaction('rw', db.contextSources, db.contextSnapshots, db.commands, db.settings, async () => {
@@ -236,7 +239,7 @@ export async function importSelectedExternalMessagesFromUI(value: PreparedExtern
       const envelope = { format: 'michi-selected-external-message', version: 1, provider: value.provider, originalFile: { filename: value.filename, sha256: value.fileSha256, fullFileStored: false }, position: { start: message.rawStart, end: message.rawEnd, jsonPointer: message.pointer, lineFrom: message.lineFrom, lineTo: message.lineTo }, externalMessageId: message.externalMessageId, conversationExternalId: message.conversationExternalId, timezone: value.timezone, sentAt: message.sentAt, localDate: message.localDate, localTime: message.localTime, editedAt: message.editedAt, dateHeader: message.dateHeader, author: { key: message.actorKey, displayName: message.authorLabel, identity: confirmedAt ? 'owner-confirmed-by-person' : 'unverified', confirmedOwnerId: confirmedAt ? value.ownerId : null, confirmedAt }, messageKind: message.kind, rawExcerpt: message.rawExcerpt, normalizedBody: message.body, bodySha256: message.bodySha256, bodySpans: message.spans, referencedQuote: message.referencedQuote, warnings: message.warnings, coverage: { fromDate: value.fromDate, toDate: value.toDate, complete: false, method: 'selected-file-import' } }
       const text = JSON.stringify(envelope, null, 2)
       if (text.length > 200000) throw new Error('1発言の原文・引用情報が保存上限を超えます。資料を分けてください')
-      const sourceId = await importLocalSource({ title: `${value.provider.toUpperCase()} ${value.conversation} ${message.localDate} ${message.localTime} ${message.id.slice(0, 12)}`.slice(0, 200), provider: value.provider, externalId, conversation: value.conversation, author: `${confirmedAt ? '本人が明示確認した話者' : '話者未確認'}: ${message.authorLabel ?? '話者情報なし'}`.slice(0, 200), sourceUrl: null, date: message.localDate, timezone: value.timezone, fromDate: value.fromDate, toDate: value.toDate, text, permissions: defaultSourcePermissions(), allowedModels: [], retentionUntil: null })
+      const sourceId = await importLocalSource({ title: `${value.provider.toUpperCase()} ${value.conversation} ${message.localDate} ${message.localTime} ${message.id.slice(0, 12)}`.slice(0, 200), provider: value.provider, externalId, conversation: value.conversation, author: `${confirmedAt ? '本人が明示確認した話者' : '話者未確認'}: ${message.authorLabel ?? '話者情報なし'}`.slice(0, 200), sourceUrl: null, date: message.localDate, timezone: value.timezone, fromDate: value.fromDate, toDate: value.toDate, text, permissions: defaultSourcePermissions(), allowedModels: [], retentionUntil: retention })
       const imported: ExternalImportReceipt = { version: 1, ownerId: value.ownerId, datasetId: value.datasetId, provider: value.provider, fileSha256: value.fileSha256, messageDigest: message.id, sourceId }
       await db.commands.add({ key: receiptKey, hash: await Dexie.waitFor(contentDigest(imported)), resultId: JSON.stringify(imported), at: new Date().toISOString() })
       result.sourceIds.push(sourceId); result.created++

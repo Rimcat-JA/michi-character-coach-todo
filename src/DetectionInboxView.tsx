@@ -91,7 +91,7 @@ function DetectionRunCard({run,source,settings,tasks,onEdit,onCreated,onDiscard,
       {run.candidates.length===0&&<p>この取得範囲から登録候補は検出されませんでした。未取得範囲の義務の有無は不明です。</p>}
       {run.ignored.length>0&&<details><summary>除外した記載 {run.ignored.length}件</summary>{run.ignored.map((item,index)=><p key={index}>{item.source_id} · {item.reason}</p>)}</details>}
       {prepared&&sessionLive&&<div className="card setting-section">
-        <h4>本人がこの内容を登録</h4><p>作業：{prepared.assisted.inputs[0].title}</p><p>本当の期限：{prepared.assisted.inputs[0].dueDate??'未設定'} / 予定日：未設定 / 必要ポイント：未評価</p>
+        <h4>本人がこの内容を登録</h4><p>作業：{prepared.assisted.inputs[0].title}</p><p>本当の期限：{prepared.assisted.inputs[0].dueDate??'未設定'} / 予定日：未設定 / 必要ポイント：未評価</p><p className="muted">資料の引用{prepared.evidence.length}件はメモに複写せず、タスクの「資料の根拠」に保存します。資料の削除・期限切れ・保存/索引許可の取消で引用も消去し、外部AIへは資料の許可があるコーチ会話だけで送ります。</p>
         <label><input type="checkbox" aria-label="検出候補の根拠と本人担当を承認" checked={checked} disabled={busy} onChange={event=>setChecked(event.target.checked)}/> 行為・本人担当・現在も必要であること・原文の根拠・期限の意味を確認し、この候補の登録を承認する</label>
         <div className="export-buttons"><button type="button" className="primary-button" disabled={busy||!checked} onClick={event=>void apply(event.nativeEvent)}>確認したこの候補を登録</button><button type="button" className="text-button" disabled={busy} onClick={()=>{setPrepared(null);setChecked(false)}}>登録確認を戻す</button></div>
       </div>}

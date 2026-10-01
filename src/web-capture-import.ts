@@ -3,6 +3,7 @@ import { canonicalJSON, contentDigest } from './canonical'
 import { changePolicyFor } from './change-set'
 import { defaultSourcePermissions, importLocalSource, normalizeSourceText, sourceDb } from './source-library'
 import type { SourceImport, SourcePermissions } from './source-library'
+import { defaultSourceRetention } from './retention-defaults'
 
 export const MAX_EMAIL_BYTES = 100 * 1024
 export const MAX_CAPTURE_TEXT = 50000
@@ -23,7 +24,7 @@ export type CaptureImportPreview = {
   title: string; author: string | null; messageId: string | null; sourceUrl: string | null
   date: string; timezone: string; quote: string; start: number; end: number
   coordinate: 'document-utf16' | 'selected-fragment-utf16' | 'decoded-email-utf16'
-  positionVerified: boolean; digest: string
+  positionVerified: boolean; retentionUntil: string | null; digest: string
 }
 export type CaptureImportReceipt = { sourceId: string; sourceRevision: number; provenanceId: string; selectedSha256: string; duplicate: boolean; permissions: SourcePermissions }
 type PreparedRecord = { input: SourceImport; provenance: Record<string, unknown>; artifactId: string; selectedSha256: string; previewPayload: Omit<CaptureImportPreview, 'digest'> }
@@ -225,28 +226,32 @@ export async function parseLocalEmailFile(input: Uint8Array | ArrayBuffer, filen
   freeze(email); parsedEmails.add(email); return email
 }
 
-async function prepare(input: SourceImport, provenance: Record<string, unknown>, fields: Pick<CaptureImportPreview, 'kind' | 'messageId' | 'start' | 'end' | 'coordinate' | 'positionVerified'>): Promise<CaptureImportPreview> {
+async function prepare(input: SourceImport, provenance: Record<string, unknown>, fields: Pick<CaptureImportPreview, 'kind' | 'messageId' | 'start' | 'end' | 'coordinate' | 'positionVerified'>, retentionUntil: string | null | undefined): Promise<CaptureImportPreview> {
+  // Web and mail quotes are third-party conversation text: 90 days unless the owner chose otherwise.
+  if (retentionUntil === undefined) retentionUntil = defaultSourceRetention(input.provider)
+  if (retentionUntil !== null && (typeof retentionUntil !== 'string' || !Number.isFinite(Date.parse(retentionUntil)) || new Date(retentionUntil).toISOString() !== retentionUntil || Date.parse(retentionUntil) <= Date.now())) fail('保持期限は未来の日時にしてください。')
+  input = { ...input, retentionUntil }
   const settings = await sourceDb.settings.get('main')
   if (!settings) fail('本人の設定がありません。')
   const policy = changePolicyFor(settings), selectedSha256 = await stringHash(normalizeSourceText(input.text))
-  const previewPayload: Omit<CaptureImportPreview, 'digest'> = { version: 1, ...fields, ownerId: settings.profileId, datasetId: settings.datasetId, policyEpoch: policy.epoch, sourcePermissionRevision: policy.sourcePermissionRevision, expiresAt: new Date(Date.now() + 86400000).toISOString(), title: input.title, author: input.author, sourceUrl: input.sourceUrl, date: input.date, timezone: input.timezone!, quote: input.text }
+  const previewPayload: Omit<CaptureImportPreview, 'digest'> = { version: 1, ...fields, ownerId: settings.profileId, datasetId: settings.datasetId, policyEpoch: policy.epoch, sourcePermissionRevision: policy.sourcePermissionRevision, expiresAt: new Date(Date.now() + 86400000).toISOString(), title: input.title, author: input.author, sourceUrl: input.sourceUrl, date: input.date, timezone: input.timezone!, quote: input.text, retentionUntil }
   const artifactId = `capture:${await contentDigest({ ownerId: settings.profileId, datasetId: settings.datasetId, provenance, selectedSha256 })}`
   if (canonicalJSON(provenance).length > 195000) fail('元データと引用の保存サイズが上限を超えています。')
   const digest = await contentDigest({ preview: previewPayload, input, provenance, artifactId, selectedSha256 }), preview = freeze({ ...previewPayload, digest })
   prepared.set(preview, { input: freeze(input), provenance: freeze(provenance), artifactId, selectedSha256, previewPayload: freeze(previewPayload) })
   return preview
 }
-export async function prepareWebCaptureImport(value: unknown): Promise<CaptureImportPreview> {
+export async function prepareWebCaptureImport(value: unknown, retentionUntil?: string | null): Promise<CaptureImportPreview> {
   const capsule = parseWebCaptureCapsule(value), date = calendarDate(capsule.capturedAt, capsule.timezone), externalId = `web:${await contentDigest({ url: capsule.url, quote: normalizeSourceText(capsule.selection.quote), selection: { start: capsule.selection.start, end: capsule.selection.end, coordinate: capsule.selection.coordinate } })}`
-  return prepare({ title: capsule.title, provider: 'other', externalId, conversation: '本人が選んだWeb引用', author: null, sourceUrl: capsule.url, date, timezone: capsule.timezone, text: capsule.selection.quote, fromDate: date, toDate: date, permissions: defaultSourcePermissions(), allowedModels: [], retentionUntil: null }, { version: 1, kind: 'web-selection', capsule, pageFetched: false, positionVerified: false, coverageComplete: false }, { kind: 'web-selection', messageId: null, ...capsule.selection, positionVerified: false })
+  return prepare({ title: capsule.title, provider: 'other', externalId, conversation: '本人が選んだWeb引用', author: null, sourceUrl: capsule.url, date, timezone: capsule.timezone, text: capsule.selection.quote, fromDate: date, toDate: date, permissions: defaultSourcePermissions(), allowedModels: [], retentionUntil: null }, { version: 1, kind: 'web-selection', capsule, pageFetched: false, positionVerified: false, coverageComplete: false }, { kind: 'web-selection', messageId: null, ...capsule.selection, positionVerified: false }, retentionUntil)
 }
-export async function prepareEmailCaptureImport(email: ParsedLocalEmail, start: number, end: number): Promise<CaptureImportPreview> {
+export async function prepareEmailCaptureImport(email: ParsedLocalEmail, start: number, end: number, retentionUntil?: string | null): Promise<CaptureImportPreview> {
   if (!parsedEmails.has(email)) fail('この端末で解析したメールを選択してください。')
   const bounds = range(start, end, email.text.length)
   const splitSurrogate = (position: number) => position > 0 && /[\ud800-\udbff]/.test(email.text[position - 1]) && /[\udc00-\udfff]/.test(email.text[position] ?? '')
   if (splitSurrogate(start) || splitSurrogate(end)) fail('引用範囲が文字の途中で分かれています。')
   const quote = text(email.text.slice(start, end), MAX_CAPTURE_TEXT, true), date = email.date.localDate, externalId = `eml:${await contentDigest(email.messageId ?? email.rawSha256)}`
-  return prepare({ title: email.subject, provider: 'other', externalId, conversation: '本人が選んだローカルメール', author: email.sender, sourceUrl: null, date, timezone: email.date.timezone, text: quote, fromDate: date, toDate: date, permissions: defaultSourcePermissions(), allowedModels: [], retentionUntil: null }, { version: 1, kind: 'email-file', filename: email.filename, messageId: email.messageId, sender: email.sender, senderAuthenticated: false, date: email.date, rawBase64: email.rawBase64, rawSha256: email.rawSha256, textSha256: email.textSha256, decodedTextLength: email.text.length, selection: { quote, ...bounds, coordinate: 'decoded-email-utf16' }, ignoredHtmlParts: email.ignoredHtmlParts, attachmentParts: email.attachmentParts, coverageComplete: false }, { kind: 'email-file', messageId: email.messageId, ...bounds, coordinate: 'decoded-email-utf16', positionVerified: true })
+  return prepare({ title: email.subject, provider: 'other', externalId, conversation: '本人が選んだローカルメール', author: email.sender, sourceUrl: null, date, timezone: email.date.timezone, text: quote, fromDate: date, toDate: date, permissions: defaultSourcePermissions(), allowedModels: [], retentionUntil: null }, { version: 1, kind: 'email-file', filename: email.filename, messageId: email.messageId, sender: email.sender, senderAuthenticated: false, date: email.date, rawBase64: email.rawBase64, rawSha256: email.rawSha256, textSha256: email.textSha256, decodedTextLength: email.text.length, selection: { quote, ...bounds, coordinate: 'decoded-email-utf16' }, ignoredHtmlParts: email.ignoredHtmlParts, attachmentParts: email.attachmentParts, coverageComplete: false }, { kind: 'email-file', messageId: email.messageId, ...bounds, coordinate: 'decoded-email-utf16', positionVerified: true }, retentionUntil)
 }
 
 function nativeClick(event: Event) {

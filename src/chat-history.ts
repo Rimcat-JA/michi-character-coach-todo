@@ -6,6 +6,8 @@ import { uid, validateDate, type Settings } from './domain'
 import { selectedGoalContext, selectedTaskContext } from './ai'
 import { memoryForSelectedChat, purgeExpiredMemories } from './coach-memory'
 import { purgeExpiredSources } from './source-library'
+import { loadTaskEgress, recordEgressAudit, type TaskEgress } from './egress-policy'
+import { defaultCoachConversationRetention } from './retention-defaults'
 
 export type ChatSourceRef = { kind: 'task' | 'goal' | 'goal-checkin' | 'library' | 'memory'; id: string; revision: number; digest: string | null; permissionRevision: number | null }
 export type CoachConversation = { id: string; ownerId: string; title: string; timezone: string; revision: number; draft: string; draftRevision: number; pendingMessageId: string | null; createdAt: string; updatedAt: string; deletedAt: string | null; retentionUntil?: string | null }
@@ -16,7 +18,7 @@ export type CoachTurnInput = { text: string; mode: 'local' | 'ai'; taskId?: stri
 const textLimit = 10000
 const activeTurns = new Map<string, string>()
 export function clearCoachTurnAuthority(): void { activeTurns.clear() }
-const tables = () => [db.coachConversations, db.coachMessages, db.settings, db.tasks, db.goals, db.goalCheckIns, db.dayNotes, db.reviewRecords, db.coachMemories, db.memoryTombstones, db.contextSources, db.contextSnapshots, db.sourceSummaries]
+const tables = () => [db.coachConversations, db.coachMessages, db.settings, db.tasks, db.goals, db.goalCheckIns, db.dayNotes, db.reviewRecords, db.coachMemories, db.memoryTombstones, db.contextSources, db.contextSnapshots, db.sourceSummaries, db.taskSourceEvidence, db.audits]
 async function settings() { const row = await db.settings.get('main'); if (!row?.profileId.trim() || !row.datasetId.trim()) throw new Error('本人の設定がありません'); return row }
 function text(value: unknown, allowEmpty = false): asserts value is string { if (typeof value !== 'string' || value.length > textLimit || !allowEmpty && !value.trim()) throw new Error('会話の本文は1〜10000文字で指定してください') }
 function revision(value: number) { if (!Number.isSafeInteger(value) || value < 1) throw new Error('会話の版を確認してください') }
@@ -26,13 +28,15 @@ async function conversation(id: string, ownerId: string) { const row = await db.
 function modelId(model: unknown): asserts model is string { if (typeof model !== 'string' || !/^[\w~./:-]{3,120}$/.test(model)) throw new Error('AIモデルIDを確認してください') }
 async function digest(value: string) { return [...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value)))].map(byte => byte.toString(16).padStart(2, '0')).join('') }
 
-export async function createCoachConversation(title = 'コーチとの会話', timezone = Intl.DateTimeFormat().resolvedOptions().timeZone): Promise<string> {
+/** retentionUntil omitted = design default of 180 days; null = the owner explicitly chose no expiry. */
+export async function createCoachConversation(title = 'コーチとの会話', timezone = Intl.DateTimeFormat().resolvedOptions().timeZone, retentionUntil: string | null = defaultCoachConversationRetention()): Promise<string> {
   if (typeof title !== 'string' || !title.trim() || title.length > 200 || typeof timezone !== 'string' || timezone.length > 100) throw new Error('会話名とtimezoneを確認してください')
+  if (retentionUntil !== null && (typeof retentionUntil !== 'string' || !Number.isFinite(Date.parse(retentionUntil)) || new Date(retentionUntil).toISOString() !== retentionUntil || Date.parse(retentionUntil) <= Date.now())) throw new Error('会話の保持期限は未来の日時で指定してください')
   try { new Intl.DateTimeFormat('en-CA', { timeZone: timezone }) } catch { throw new Error('timezoneを確認してください') }
   return db.transaction('rw', db.coachConversations, db.settings, async () => {
     const current = await settings(), id = uid(), at = new Date().toISOString()
     if (await db.coachConversations.where('ownerId').equals(current.profileId).count() >= 10000) throw new Error('会話は10000件まで保存できます')
-    await db.coachConversations.add({ id, ownerId: current.profileId, title: title.trim(), timezone, revision: 1, draft: '', draftRevision: 1, pendingMessageId: null, retentionUntil: null, createdAt: at, updatedAt: at, deletedAt: null })
+    await db.coachConversations.add({ id, ownerId: current.profileId, title: title.trim(), timezone, revision: 1, draft: '', draftRevision: 1, pendingMessageId: null, retentionUntil, createdAt: at, updatedAt: at, deletedAt: null })
     return id
   })
 }
@@ -49,13 +53,17 @@ export async function saveCoachDraft(id: string, expectedDraftRevision: number, 
   })
 }
 
-async function selectedContext(input: CoachTurnInput, current: Settings): Promise<{ refs: ChatSourceRef[]; context: string | null; checkInBodies: string[] }> {
+async function selectedContext(input: CoachTurnInput, current: Settings): Promise<{ refs: ChatSourceRef[]; context: string | null; checkInBodies: string[]; taskEgress: TaskEgress | null }> {
   const refs: ChatSourceRef[] = [], parts: string[] = [], checkInBodies: string[] = []
+  let taskEgress: TaskEgress | null = null
   if (input.taskId) {
     const task = await db.tasks.get(input.taskId)
     if (!task || task.deletedAt) throw new Error('選択したタスクがありません')
     refs.push({ kind: 'task', id: task.id, revision: task.revision, digest: null, permissionRevision: null })
-    parts.push(selectedTaskContext(task)!)
+    // Quotes behind the task ride along only with every source's index+aiEgress+model consent; refs bind them to the reply.
+    taskEgress = await loadTaskEgress(task, { kind: 'ai-model', route: 'coach-chat', model: input.mode === 'ai' ? current.aiModel ?? null : null })
+    for (const ref of taskEgress.refs) refs.push({ kind: 'library', id: ref.sourceId, revision: ref.snapshotRevision, digest: ref.sha256, permissionRevision: ref.permissionRevision })
+    parts.push(selectedTaskContext({ ...task, notes: taskEgress.notes }, taskEgress.evidence)!)
   }
   if (input.goalId) {
     const goal = await db.goals.get(input.goalId)
@@ -82,7 +90,8 @@ async function selectedContext(input: CoachTurnInput, current: Settings): Promis
     refs.push({ kind: 'memory', id, revision: memory.revision, digest, permissionRevision: null })
     parts.push(`本人が選んだ記憶 (${memory.kind === 'explicit' ? '本人が明示したメモ' : '推測・未確認、事実として断定しない'}): ${memory.text}`)
   }
-  return { refs, context: parts.join('\n\n').slice(0, 6000) || null, checkInBodies }
+  const unique = refs.filter((ref, index) => refs.findIndex(other => other.kind === ref.kind && other.id === ref.id) === index)
+  return { refs: unique, context: parts.join('\n\n').slice(0, 6000) || null, checkInBodies, taskEgress }
 }
 function sameRefs(left: ChatSourceRef[], right: ChatSourceRef[]) { return JSON.stringify(left) === JSON.stringify(right) }
 function validateSelections(input: Omit<CoachTurnInput, 'text'>) {
@@ -94,11 +103,11 @@ async function preparedContext(input: CoachTurnInput, current: Settings) {
   return prepared
 }
 async function contextDigest(prepared: Awaited<ReturnType<typeof preparedContext>>, current: Settings) { return Dexie.waitFor(digest(JSON.stringify([prepared.context, prepared.refs, current.profileId, current.datasetId, changePolicyFor(current).epoch, current.aiModel ?? null]))) }
-export async function previewCoachTurnContext(input: Omit<CoachTurnInput, 'text'>): Promise<{ context: string | null; sources: ChatSourceRef[]; digest: string }> {
+export async function previewCoachTurnContext(input: Omit<CoachTurnInput, 'text'>): Promise<{ context: string | null; sources: ChatSourceRef[]; digest: string; withheldQuotes: number; notesWithheld: boolean }> {
   validateSelections(input)
   const current = await settings(); if (input.mode === 'ai') { if (!current.aiEnabled) throw new Error('AIは停止中です'); modelId(current.aiModel) }
   const prepared = await preparedContext({ ...input, text: '' }, current)
-  return { context: prepared.context, sources: prepared.refs, digest: await contextDigest(prepared, current) }
+  return { context: prepared.context, sources: prepared.refs, digest: await contextDigest(prepared, current), withheldQuotes: prepared.taskEgress?.withheldQuotes ?? 0, notesWithheld: prepared.taskEgress?.notesWithheld ?? false }
 }
 
 export async function beginCoachTurn(id: string, expectedRevision: number, input: CoachTurnInput): Promise<CoachTurn> {
@@ -124,6 +133,7 @@ export async function beginCoachTurn(id: string, expectedRevision: number, input
     // Clear only the submitted draft. A newer/different draft remains available.
     const clearDraft = row.draft === input.text
     await db.coachConversations.put({ ...row, revision: nextRevision(row.revision), ...(clearDraft ? { draft: '', draftRevision: nextRevision(row.draftRevision) } : {}), pendingMessageId: userMessageId, updatedAt: at })
+    if (input.mode === 'ai' && fresh.taskEgress && input.taskId) await recordEgressAudit({ kind: 'ai-model', route: 'coach-chat', model: current.aiModel ?? null }, [{ taskId: input.taskId, egress: fresh.taskEgress }])
     return { conversationId: id, userMessageId, ownerId: current.profileId, datasetId: current.datasetId, mode: input.mode, model: input.mode === 'ai' ? current.aiModel! : null, policyEpoch: policy.epoch, sourcePermissionRevision: policy.sourcePermissionRevision, selectedSources: prepared.refs, selectedContext: prepared.context }
   })
   activeTurns.set(turn.userMessageId, JSON.stringify(turn))
@@ -192,16 +202,18 @@ export async function deleteCoachConversation(id: string, expectedRevision: numb
 }
 
 // Called inside the source library's transaction, which includes both chat tables.
-export async function purgeChatSourceResponses(sourceId: string, ownerId: string): Promise<void> {
+export async function purgeChatSourceResponses(sourceId: string, ownerId: string): Promise<number> {
   const messages = await db.coachMessages.where('ownerId').equals(ownerId).toArray(), affected = new Set<string>()
+  let removed = 0
   const sourceMemoryIds = new Set((await db.coachMemories.where('ownerId').equals(ownerId).toArray()).filter(memory => memory.sources.some(ref => ref.kind === 'library' && ref.refId === sourceId || ref.kind === 'derived-summary' && ref.refId === `library:${sourceId}`)).map(memory => memory.id))
   for (const message of messages) if (message.selectedSources.some(ref => ref.kind === 'library' && ref.id === sourceId || ref.kind === 'memory' && sourceMemoryIds.has(ref.id))) {
     const row = await db.coachConversations.get(message.conversationId)
     if (!row || row.ownerId !== ownerId || row.deletedAt) continue
-    if (message.role === 'assistant') { await db.coachMessages.delete(message.id); affected.add(row.id) }
+    if (message.role === 'assistant') { await db.coachMessages.delete(message.id); affected.add(row.id); removed++ }
     if (row.pendingMessageId === message.id) { await db.coachConversations.put({ ...row, pendingMessageId: null }); activeTurns.delete(message.id); affected.add(row.id) }
   }
   for (const id of affected) { const row = (await db.coachConversations.get(id))!; await db.coachConversations.put({ ...row, revision: nextRevision(row.revision), updatedAt: timestamp(row.updatedAt) }) }
+  return removed
 }
 
 export async function purgeChatMemoryResponses(memoryId: string, ownerId: string): Promise<void> {

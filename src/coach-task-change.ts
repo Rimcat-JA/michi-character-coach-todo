@@ -1,6 +1,8 @@
 import { addDays, validateDate, type ScoreMode, type Task } from './domain'
 import { prepareTaskChanges, type ChangeContext, type PreparedChangeSet, type TaskChangePatch } from './change-set'
 import type { VerifiedTaskInstruction } from './task-user-instruction'
+import { db } from './db'
+import { loadTaskEgress, recordEgressAudit, type TaskEgress } from './egress-policy'
 
 export type CoachTaskSnapshot = Pick<Task,'id'|'title'|'notes'|'scheduledDate'|'dueDate'|'revision'> & { scoreMode?:ScoreMode; manualPoints?:number|null }
 export type CoachTaskProposal = { targetId:string; targetRevision:number; patch:TaskChangePatch; reason:string }
@@ -64,6 +66,14 @@ export function createCoachTaskRequest(task:CoachTaskSnapshot|undefined,instruct
   try{new Intl.DateTimeFormat('en',{timeZone:timezone}).format()}catch{throw new Error('会話のタイムゾーンが不正です')}
   if(notesRequested(instruction)&&task!.notes.length>6000)throw new Error('長いメモの変更は、原文を保てるタスク編集画面で行ってください')
   return {model,message:`会話の基準日: ${referenceDate}\nタイムゾーン: ${timezone}\n本人の相談文（対象は添付した一つのタスクだけ）:\n${instruction}`,task:{id:task!.id,title:task!.title,notes:notesRequested(instruction)?task!.notes:'',scheduledDate:task!.scheduledDate,dueDate:task!.dueDate,revision:task!.revision,scoreMode:pointsRequested(instruction)?task!.scoreMode??'unset':'unset',manualPoints:pointsRequested(instruction)?task!.manualPoints??null:null}}
+}
+/** The AI payload gets egress-filtered notes: source quotes stay home because a notes patch would copy them back. */
+export async function prepareCoachTaskRequest(task:Task,instruction:string,model:string,referenceDate:string,timezone:string):Promise<{request:CoachTaskChangeRequest;egress:TaskEgress}>{
+  const destination={kind:'ai-model' as const,route:'coach-task-change' as const,model},egress=await loadTaskEgress(task,destination)
+  if(egress.notesWithheld&&notesRequested(instruction))throw new Error('このメモには資料由来の可能性がある旧形式の引用が残っているためAIへ送りません。メモの変更はタスク編集画面で本人が行ってください')
+  const request=createCoachTaskRequest({id:task.id,title:task.title,notes:egress.notes,scheduledDate:task.scheduledDate,dueDate:task.dueDate,revision:task.revision,scoreMode:task.score.mode,manualPoints:task.score.mode==='manual'||task.score.mode==='allocated'?task.score.manualPoints:null},instruction,model,referenceDate,timezone)
+  await db.transaction('rw',db.audits,()=>recordEgressAudit(destination,[{taskId:task.id,egress:request.task.notes?egress:{...egress,notes:'',withheldQuotes:0,notesWithheld:false}}]))
+  return {request,egress}
 }
 export function parseCoachTaskChange(answer:string,task:CoachTaskSnapshot|undefined,instruction:string,referenceDate:string):CoachTaskProposal{
   checkSelection(task)

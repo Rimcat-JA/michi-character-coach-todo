@@ -1,12 +1,15 @@
 import { useState } from 'react'
 import { calculateScore, type ScoreInput, type Settings } from './domain'
+import { db } from './db'
+import { egressNotice, recordEgressAudit, type OwnerNotesEgress } from './egress-policy'
 import { acceptScoreCandidate, parseScoreCandidate, scoreAttributeKeys, scoreReferencePreview, type ScoreAcceptanceProvenance, type ScoreAttributeKey, type ScoreAttributeValues, type ScoreCandidate } from './score-assist'
 
 const labels: Record<ScoreAttributeKey, string> = { minutes: '作業時間（分）', travelMinutes: '移動時間（分）', difficulty: '難易度（0〜4）', uncertainty: '不確実性（0〜3）', coordination: '対人調整（0〜3）', physical: '身体負荷（0〜3）', outing: '独立した外出' }
 type Proposal = { candidate: ScoreCandidate; edited: ScoreAttributeValues; selected: ScoreAttributeKey[]; scoreSnapshot: string; sourceText: string; model: string }
 
-export default function ScoreAssistView({ score, onAccepted, onProvenance, settings, selectedText }: {
-  score: ScoreInput; onAccepted: (score: ScoreInput) => void; onProvenance?: (provenance: ScoreAcceptanceProvenance) => void; settings: Settings; selectedText: string
+/** selectedText must already be egress-filtered by the caller (ownerNotesForEgress); egress only describes what was withheld. */
+export default function ScoreAssistView({ score, onAccepted, onProvenance, settings, selectedText, taskId = null, egress = null }: {
+  score: ScoreInput; onAccepted: (score: ScoreInput) => void; onProvenance?: (provenance: ScoreAcceptanceProvenance) => void; settings: Settings; selectedText: string; taskId?: string | null; egress?: OwnerNotesEgress | null
 }) {
   const [proposal, setProposal] = useState<Proposal | null>(null)
   const [busy, setBusy] = useState(false)
@@ -31,6 +34,7 @@ export default function ScoreAssistView({ score, onAccepted, onProvenance, setti
     const snapshot = JSON.stringify(score)
     setBusy(true); setNotice(''); setProposal(null)
     try {
+      await db.transaction('rw', db.audits, () => recordEgressAudit({ kind: 'ai-model', route: 'score-assist', model }, [{ taskId, egress: egress ?? { notes: '', withheldQuotes: 0, notesWithheld: false } }]))
       const answer = await window.michiAI!.assessScore({ model, text: sourceText })
       const candidate = parseScoreCandidate(sourceText, answer)
       setProposal({ candidate, edited: { ...candidate.values }, selected: scoreAttributeKeys.filter(field => score[field] === null && candidate.values[field] !== null), scoreSnapshot: snapshot, sourceText, model })
@@ -57,7 +61,8 @@ export default function ScoreAssistView({ score, onAccepted, onProvenance, setti
   } catch { /* The parent editor can temporarily contain incomplete numeric input. */ }
   return <section className="card score-assist">
     <h3>AIで負荷属性を見積もる</h3>
-    <p className="muted">このタスクの選択本文だけをOpenRouterへ送ります。候補の点数は端末内の式 v1で計算し、採用した属性と根拠を保存時に記録します。</p>
+    <p className="muted">このタスクの選択本文だけをOpenRouterへ送ります。候補の点数は端末内の式 v1で計算し、採用した属性と根拠を保存時に記録します。資料から検出したタスクの引用（資料の根拠）は送りません。</p>
+    {egress && egressNotice(egress) && <p role="note">{egressNotice(egress)}</p>}
     <details><summary>見積もりに使う選択本文</summary><p style={{ whiteSpace: 'pre-wrap' }}>{selectedText || '本文がありません'}</p></details>
     <p>現在の必要ポイント：{currentLabel}</p>
     {!available && <p className="muted">AIは停止中、またはこの環境では利用できません。属性は通常の編集欄から入力できます。</p>}

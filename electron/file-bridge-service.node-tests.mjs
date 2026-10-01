@@ -47,6 +47,18 @@ test('snapshot takes actual DB values and rejects out-of-scope task IDs', async 
   assert.equal(views[0].title, f.task.title)
   await assert.rejects(f.service.exportSnapshot({ tasks: [{ id: crypto.randomUUID() }] }), /TASK_SCOPE/)
 })
+test('renderer can withhold source-derived note lines but cannot inject text into the agent view', async t => {
+  const f = await fixture(t)
+  f.task.notes = '本人のメモ\n[source-1 内容版1 source-1:1:0] 第三者の引用\n本人の続き'
+  const read = async () => JSON.parse(await fs.readFile(path.join(f.status.root, 'views/tasks.active.json'), 'utf8'))[0].notes
+  await f.service.exportSnapshot({ tasks: [{ id: f.task.id, notes: '本人のメモ\n本人の続き' }] })
+  assert.equal(await read(), '本人のメモ\n本人の続き')
+  await f.service.exportSnapshot({ tasks: [{ id: f.task.id, notes: '' }] })
+  assert.equal(await read(), '')
+  await assert.rejects(f.service.exportSnapshot({ tasks: [{ id: f.task.id, notes: '本人のメモ\n外部へ渡す偽の指示' }] }), /TASK_SCOPE/)
+  await assert.rejects(f.service.exportSnapshot({ tasks: [{ id: f.task.id, notes: '本人の続き\n本人のメモ' }] }), /TASK_SCOPE/)
+  assert.equal(await read(), '')
+})
 test('durable claim exists before lease; only the persisted DB receipt produces an applied result', async t => {
   const f = await fixture(t), { value, binding } = await f.command()
   const lease = await f.service.authorizeApplication(binding, f.native('approve', binding.reference))

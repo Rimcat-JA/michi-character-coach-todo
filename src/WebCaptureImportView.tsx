@@ -1,6 +1,8 @@
 import { useState } from 'react'
 import type { Settings } from './domain'
 import { changePolicyFor } from './change-set'
+import RetentionChoice from './RetentionChoice'
+import { defaultSourceRetention, retentionDefaults, retentionDraft, retentionValue } from './retention-defaults'
 import { MAX_EMAIL_BYTES, makeWebCaptureCapsule, parseLocalEmailFile, prepareEmailCaptureImport, prepareWebCaptureImport, saveCaptureImportFromUI } from './web-capture-import'
 import type { CaptureImportPreview, CaptureImportReceipt, ParsedLocalEmail } from './web-capture-import'
 
@@ -17,13 +19,14 @@ function CapturePanel({ settings, onImported }: Props) {
   const [receipt, setReceipt] = useState<CaptureImportReceipt | null>(null)
   const [busy, setBusy] = useState(false)
   const [notice, setNotice] = useState('')
+  const [retention, setRetention] = useState(() => retentionDraft(defaultSourceRetention('other')))
   const policy = changePolicyFor(settings)
   const stale = !!preview && (preview.ownerId !== settings.profileId || preview.datasetId !== settings.datasetId || preview.policyEpoch !== policy.epoch || preview.sourcePermissionRevision !== policy.sourcePermissionRevision)
   function changed() { setPreview(null); setReceipt(null); setNotice('') }
   function field(name: keyof typeof form, value: string) { setForm(previous => ({ ...previous, [name]: value })); changed() }
   async function run(work: () => Promise<void>) { setBusy(true); setNotice(''); try { await work() } catch (error) { setNotice(error instanceof Error ? error.message : '取込を確認できませんでした。') } finally { setBusy(false) } }
   async function check() {
-    const result = mode === 'email' ? await prepareEmailCaptureImport(email!, selection.start, selection.end) : await prepareWebCaptureImport(mode === 'capsule' ? form.capsule : makeWebCaptureCapsule(form))
+    const retentionUntil = retentionValue(retention), result = mode === 'email' ? await prepareEmailCaptureImport(email!, selection.start, selection.end, retentionUntil) : await prepareWebCaptureImport(mode === 'capsule' ? form.capsule : makeWebCaptureCapsule(form), retentionUntil)
     setPreview(result); setReceipt(null); setNotice('引用と出典を確認してください。まだ保存していません。')
   }
   return <section className="panel" aria-label="選んだWeb引用とローカルメールの取込">
@@ -53,8 +56,9 @@ function CapturePanel({ settings, onImported }: Props) {
         <p className="muted">元ファイルのSHA-256：{email.rawSha256}</p>
       </article> : null}
     </div> : null}
+    <RetentionChoice label="保存する引用の保持期限" value={retention} onChange={next => { setRetention(next); changed() }} disabled={busy} defaultNote={`Web・メールの引用は第三者の会話として扱い、既定は取込から${retentionDefaults.importedConversationDays}日です。長期保存は本人が明示的に選んでください。`} />
     <button type="button" className="secondary-button" disabled={busy || mode === 'email' && (!email || selection.end <= selection.start)} onClick={() => void run(check)}>保存する引用を確認</button>
-    {preview ? <article aria-label="保存する引用の確認"><h4>今回保存する資料</h4><p>{preview.title}<br/>{preview.sourceUrl ?? preview.author}<br/>{preview.date} / {preview.timezone}</p><pre style={{whiteSpace:'pre-wrap',overflowWrap:'anywhere'}}>{preview.quote}</pre><p>文字範囲：{preview.start}〜{preview.end} / {preview.positionVerified ? '解析したローカル本文と一致' : '貼り付けられた引用。元ページの位置は未検証'}</p><p className="muted">取得範囲は選択した引用だけです。全履歴・全会話を取得した扱いにはしません。確認内容 {preview.digest.slice(0,12)}</p>
+    {preview ? <article aria-label="保存する引用の確認"><h4>今回保存する資料</h4><p>{preview.title}<br/>{preview.sourceUrl ?? preview.author}<br/>{preview.date} / {preview.timezone}</p><p>保持期限：{preview.retentionUntil ? new Date(preview.retentionUntil).toLocaleString('ja-JP') : '期限なし（長期保存・本人が選択）'}</p><pre style={{whiteSpace:'pre-wrap',overflowWrap:'anywhere'}}>{preview.quote}</pre><p>文字範囲：{preview.start}〜{preview.end} / {preview.positionVerified ? '解析したローカル本文と一致' : '貼り付けられた引用。元ページの位置は未検証'}</p><p className="muted">取得範囲は選択した引用だけです。全履歴・全会話を取得した扱いにはしません。確認内容 {preview.digest.slice(0,12)}</p>
       {!receipt ? <button type="button" className="primary-button" disabled={busy || stale} onClick={event => { const native = event.nativeEvent; void run(async () => { const saved = await saveCaptureImportFromUI(preview,native); setReceipt(saved); setNotice(saved.duplicate ? '同じ引用の資料を確認しました。' : '確認した引用を資料に保存しました。'); onImported?.(saved) }) }}>この引用と元データを資料に保存</button> : null}
       {stale && !receipt ? <p role="alert">権限が変わったため、引用をもう一度確認してください。</p> : null}
     </article> : null}
