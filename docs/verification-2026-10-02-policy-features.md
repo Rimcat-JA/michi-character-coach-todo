@@ -61,7 +61,7 @@
 
 ## 確認コマンド
 
-worktree `C:\toodoapp\wt\C-policy` で、`npx tsc -b`、`npm run lint`（警告0）、`npx vitest run`（108ファイル1,112件）、`npm run test:electron`（134件）、`npm run check:electron`（21ファイル）、`npm run build` がすべて成功しました。
+worktree `C:\toodoapp\wt\C-policy` で、`npx tsc -b`、`npm run lint`（警告0）、`npx vitest run`（113ファイル1,163件）、`npm run test:electron`（135件）、`npm run check:electron`（21ファイル）、`npm run build` がすべて成功しました。
 
 ## Windows画面
 

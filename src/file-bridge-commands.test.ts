@@ -200,6 +200,14 @@ describe('N09 owner-delegated automatic application for file/MCP entries',()=>{
     await manual.controller.applyFromUI(manualPrepared,click())
     expect((await db.tasks.get(manual.taskId))?.revision).toBe(2)
   })
+  it('never auto-applies a notes change to notes whose source-derived lines were withheld from the export',async()=>{
+    await enableA2()
+    const f=await fixture('task.update',{auto:true}),legacy='本人が書き足した行\n[source-1 内容版1 span-1] 第三者の発言'
+    await db.tasks.update(f.taskId,{notes:legacy})
+    const prepared=await f.controller.prepare(f.reference)
+    await expect(f.controller.applyAutomatically(prepared)).rejects.toMatchObject({code:'APPROVAL_REQUIRED',message:expect.stringContaining('伏せたメモ')})
+    expect(f.gateway.authorizeAutomaticApplication).not.toHaveBeenCalled();expect((await db.tasks.get(f.taskId))?.notes).toBe(legacy)
+  })
   it('emergency stop turns a queued inbox entry into AUTHORITY_CHANGED for both approval and automatic paths',async()=>{
     await enableA2()
     const f=await fixture('task.update',{auto:true}),prepared=await f.controller.prepare(f.reference)

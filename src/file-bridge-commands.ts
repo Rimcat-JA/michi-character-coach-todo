@@ -7,7 +7,7 @@ import { applyChangeSet, approveChangeSetFromUI, autoChangeCountsToday, changePo
 import { operationMode, ruleFor } from './automation-policy'
 import { applyAssistedTasks, prepareAssistedTasks, type PreparedAssistedTasks } from './task-assist'
 import { assertFileBridgeInboxEntry, assertFileBridgeLease, assertFileBridgeResult, assertFileBridgeStatus, fileBridgeDigest, fileBridgeTimestamp, rejectFileBridge } from './file-bridge-contract'
-import { loadTaskEgress, recordEgressAudit } from './egress-policy'
+import { loadTaskEgress, ownerNotesForEgress, recordEgressAudit } from './egress-policy'
 import { fileBridgeReceiptKey, fileBridgeScopeKey, type FileBridgeApplicationBinding, type FileBridgeApplicationReceipt, type FileBridgeConfigure, type FileBridgeGateway, type FileBridgeInboxEntry, type FileBridgeLease, type FileBridgeRegistration, type FileBridgeResult, type FileBridgeStatus } from './file-bridge-types'
 
 type PendingEntry = Extract<FileBridgeInboxEntry,{state:'awaiting_approval'}>
@@ -222,6 +222,9 @@ export function createFileBridgeController(gateway:FileBridgeGateway) {
       if(!prepared.changeSet||reg.client.grant.mutation_mode!=='auto_within_bounds'||!gateway.authorizeAutomaticApplication)rejectFileBridge('AUTOMATION_NOT_GRANTED','この接続には範囲内の自動適用が委任されていません。')
       const decision=decideChangePolicy(prepared.changeSet,current,{autoCountToday:await autoChangeCountsToday()})
       if(decision.status!=='auto')rejectFileBridge('APPROVAL_REQUIRED',decision.reason)
+      // The agent saw these notes with source-quote lines withheld, so its replacement would drop them unseen.
+      const command=prepared.entry.prepared.command,target=command.target_id?await db.tasks.get(command.target_id):undefined
+      if(target&&Object.hasOwn(command.payload,'notes')&&ownerNotesForEgress(target.notes).notes!==target.notes)rejectFileBridge('APPROVAL_REQUIRED','資料由来の行を伏せたメモへの変更は、本人が確認して適用してください。')
       const prior=await priorOutcome(prepared);if(prior)return prior
       return commit(prepared,null,await gateway.authorizeAutomaticApplication(binding(prepared)),true)
     },
