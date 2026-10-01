@@ -35,7 +35,7 @@ type Envelope = { format: 'coachbundle-encrypted'; version: 1; kdf: 'PBKDF2-SHA2
 const bytes = (s: string) => new TextEncoder().encode(s)
 const b64 = (a: Uint8Array) => btoa(Array.from(a, x => String.fromCharCode(x)).join(''))
 const fromB64 = (s: string) => Uint8Array.from(atob(s), c => c.charCodeAt(0))
-function download(content: BlobPart, name: string, type: string) {
+export function download(content: BlobPart, name: string, type: string) {
   const url = URL.createObjectURL(new Blob([content], { type }))
   const anchor = document.createElement('a')
   anchor.href = url; anchor.download = name; anchor.click()

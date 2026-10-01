@@ -36,4 +36,8 @@ export function customPanelTasks(listId: string | null, tasks: Task[], lists: Sm
   return list ? querySmartList(list, open, ownerId) : []
 }
 
-export function dashboardSyncLabel() { return { value: '端末内', detail: '最終同期: なし（単独モード）' } }
+/** File handoff is a manual review, never automatic sync: the card never claims 同期済み. */
+export function dashboardSyncLabel(lastHandoffAt: string | null = null, mode: 'active' | 'frozen' | 'read_only' = 'active') {
+  const value = mode === 'frozen' ? '移行のため凍結中' : mode === 'read_only' ? '移行済み（読み取り専用）' : '端末内'
+  return { value, detail: lastHandoffAt ? `最終引継ぎ: ${new Date(lastHandoffAt).toLocaleString('ja-JP')}（手動の引継ぎ確認）` : '最終引継ぎ: なし（単独モード）' }
+}

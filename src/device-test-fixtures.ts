@@ -11,7 +11,7 @@ import type { Snapshot } from './backup-validation'
  * This is emulation on one machine, not a second real device or a smartphone.
  */
 const factories = new Map<string, IDBFactory>()
-export async function useDevice(name: string) {
+export async function switchDevice(name: string) {
   db.close()
   const factory = factories.get(name) ?? new IDBFactory()
   factories.set(name, factory)

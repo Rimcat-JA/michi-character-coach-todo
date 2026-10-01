@@ -6,10 +6,10 @@ import { captureSnapshot } from './backup'
 import { adoptDetectedTask, enableSyntheticAI, secretQuote } from './source-quote-fixtures'
 import { maskSourceReferences, projectTask, resolveSharedSourceLink, SHARE_MASKED_SOURCE, validateProjection, validateShareNote } from './share-projection'
 import { checkShareNote, previewSharePayload } from './share-grants'
-import { humanClick, inputOf, resetDevices, useDevice } from './device-test-fixtures'
+import { humanClick, inputOf, resetDevices, switchDevice } from './device-test-fixtures'
 import { ensureShareIdentity } from './share-identity'
 
-beforeEach(async () => { resetDevices(); vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(new Date('2026-10-01T03:00:00.000Z')); await useDevice('owner-A') })
+beforeEach(async () => { resetDevices(); vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(new Date('2026-10-01T03:00:00.000Z')); await switchDevice('owner-A') })
 afterEach(() => { vi.restoreAllMocks(); vi.useRealTimers() })
 
 describe('I06 共有用の投影（17.4: 共有用本文と個人のsource refを分離）', () => {

@@ -14,7 +14,7 @@ import type { GitHubAchievementsGateway } from './github-publish-types'
 import { acceptMoveBundle, cancelMove, completeMoveOnSender, currentDatasetMode, exportFork, forkSnapshot, moveCompletionCode, startMove } from './dataset-mode'
 import { replaceWithHandoff } from './handoff'
 import { validateHandoffManifest } from './handoff-manifest'
-import { counts, exportFile, humanClick, inputOf, manualTask, PASSWORD, readBundle, resetDevices, useDevice } from './device-test-fixtures'
+import { counts, exportFile, humanClick, inputOf, manualTask, PASSWORD, readBundle, resetDevices, switchDevice } from './device-test-fixtures'
 
 beforeEach(() => resetDevices())
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.useRealTimers() })
@@ -24,7 +24,7 @@ async function move(files: string[] = []) { await startMove(PASSWORD, humanClick
 
 describe('I05 移行中の凍結（DATASET_FROZEN）', () => {
   it('凍結中はタスク作成・編集・完了・承認済みChangeSetの適用がすべて失敗し、部分的な書込みも残らない', async () => {
-    await useDevice('A')
+    await switchDevice('A')
     const id = await manualTask('移行前のタスク', 25), context = await owner()
     const prepared = await prepareTaskChanges([{ taskId: id, expectedRevision: 1, patch: { scheduledDate: '2026-10-20' } }], context)
     const approval = await approveChangeSetFromUI(prepared, context, humanClick())
@@ -39,7 +39,7 @@ describe('I05 移行中の凍結（DATASET_FROZEN）', () => {
   })
 
   it('凍結中でも記録系（書き出し・引継ぎ記録・保持期限の整理・設定の最終書出日時）は動く', async () => {
-    await useDevice('A')
+    await switchDevice('A')
     await manualTask('記録系', 10)
     await move()
     await expect(purgeExpiredCalendarOriginals()).resolves.toBeUndefined()
@@ -51,7 +51,7 @@ describe('I05 移行中の凍結（DATASET_FROZEN）', () => {
   })
 
   it('完了コード前の取消で送出側は再開でき、誤ったコードは拒否されて凍結のまま', async () => {
-    await useDevice('A')
+    await switchDevice('A')
     await manualTask('取消の対象', 10)
     await move()
     await expect(cancelMove(new Event('click'))).rejects.toThrow('本人確認')
@@ -64,10 +64,10 @@ describe('I05 移行中の凍結（DATASET_FROZEN）', () => {
   })
 
   it('A→Bの移行: Bは検証後に有効、Aは完了コードで読み取り専用になり完了操作は日本語で失敗する', async () => {
-    await useDevice('A')
+    await switchDevice('A')
     const id = await manualTask('移行するタスク', 25)
     const [text] = await move(), moveId = (await db.localDevice.get('main'))!.pendingMove!.moveId
-    await useDevice('B')
+    await switchDevice('B')
     await manualTask('Bの古いデータ', 1)
     const snapshot = await readBundle(text)
     expect(snapshot.handoff).toMatchObject({ kind: 'move', move_id: moveId })
@@ -77,7 +77,7 @@ describe('I05 移行中の凍結（DATASET_FROZEN）', () => {
     expect(await currentDatasetMode()).toBe('active'); expect((await db.settings.get('main'))!.lineage).toMatchObject({ moveId })
     await completeTask(id, 1)
     expect((await db.handoffHeads.get(`import:${snapshot.handoff!.bundle_id}`))!.moveCode).toBe(code)
-    await useDevice('A')
+    await switchDevice('A')
     await completeMoveOnSender(code.toLowerCase(), humanClick())
     expect(await currentDatasetMode()).toBe('read_only')
     await expect(completeTask(id, 1)).rejects.toThrow('読み取り専用')
@@ -88,7 +88,7 @@ describe('I05 移行中の凍結（DATASET_FROZEN）', () => {
 describe('I05 fork（別dataset_idの独立コピー）', () => {
   it('新しいdataset_idと系譜を持ち、取り込んでもGitHub投稿・通知の試行は0件', async () => {
     vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(new Date('2026-10-01T03:00:00.000Z'))
-    await useDevice('A')
+    await switchDevice('A')
     const taskId = await manualTask('forkするタスク', 20), source = (await db.settings.get('main'))!, at = new Date().toISOString()
     const gateway = { status: vi.fn(async () => structuredClone(achievementTestGateway)), publish: vi.fn(), recordReceipt: vi.fn(), reconcile: vi.fn(), configure: vi.fn(), inspectConfiguration: vi.fn() } as unknown as GitHubAchievementsGateway
     await saveAchievementPolicyFromUI({ threshold: 10, allowedCategoryIds: [], allowedEvidenceKinds: ['user_statement'], requireAttachment: false, enabled: true }, humanClick(), gateway)
@@ -100,7 +100,7 @@ describe('I05 fork（別dataset_idの独立コピー）', () => {
     const files: string[] = []
     const { datasetId } = await exportFork(PASSWORD, humanClick(), content => { files.push(content) })
     expect(datasetId).not.toBe(source.datasetId); expect(await currentDatasetMode()).toBe('active'); expect((await db.settings.get('main'))!.datasetId).toBe(source.datasetId)
-    await useDevice('B')
+    await switchDevice('B')
     const fetchSpy = vi.fn(); vi.stubGlobal('fetch', fetchSpy)
     const fork = await readBundle(files[0])
     expect(fork.handoff).toMatchObject({ kind: 'fork', dataset_id: datasetId, parent_dataset_id: source.datasetId, base_bundle_id: null })
@@ -118,7 +118,7 @@ describe('I05 fork（別dataset_idの独立コピー）', () => {
   })
 
   it('検証器: forkと系譜は往復でき、不正な系譜・移行情報は拒否する', async () => {
-    await useDevice('A')
+    await switchDevice('A')
     await manualTask('検証', 5)
     const snapshot = await captureSnapshot(), fork = forkSnapshot(snapshot, 'fork-dataset-id', new Date().toISOString())
     expect(() => validateSnapshot(JSON.parse(JSON.stringify(fork)))).not.toThrow()

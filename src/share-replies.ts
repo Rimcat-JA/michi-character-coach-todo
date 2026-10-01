@@ -1,6 +1,6 @@
 import { db } from './db'
 import { today, uid, validateDate } from './domain'
-import { prepareTaskChanges, type ChangeContext, type PreparedChangeSet, type TaskChangePatch } from './change-set'
+import { prepareTaskChanges, type ChangeContext, type ChangeReceipt, type PreparedChangeSet, type TaskChangePatch } from './change-set'
 import { openShareEnvelope, sealShareEnvelope, ShareError } from './share-crypto'
 import { trustedShareClick } from './share-identity'
 import { confirmTaskInstructionFromUI } from './task-user-instruction'
@@ -100,9 +100,15 @@ export async function prepareShareProposal(proposalId: string, event: Event): Pr
   const prepared = await prepareTaskChanges(requests, context, reason, instruction)
   return { prepared, context, proposal }
 }
-export async function settleShareProposal(proposalId: string, state: 'applied' | 'dismissed', event: Event): Promise<void> {
+export async function dismissShareProposal(proposalId: string, event: Event): Promise<void> {
   trustedShareClick(event)
   const proposal = await db.shareProposals.get(proposalId)
   if (!proposal || proposal.state !== 'pending') throw new ShareError('確認待ちの提案がありません')
-  await db.shareProposals.update(proposalId, { state })
+  await db.shareProposals.update(proposalId, { state: 'dismissed' })
+}
+/** Marked applied only from the receipt of the approved ChangeSet that changed this proposal's task. */
+export async function markShareProposalApplied(proposalId: string, receipt: ChangeReceipt): Promise<void> {
+  const proposal = await db.shareProposals.get(proposalId)
+  if (!proposal || proposal.state !== 'pending' || !receipt.taskIds.includes(proposal.taskId)) throw new ShareError('確認待ちの提案がありません')
+  await db.shareProposals.update(proposalId, { state: 'applied' })
 }

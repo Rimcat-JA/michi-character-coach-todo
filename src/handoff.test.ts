@@ -6,21 +6,21 @@ import { captureSnapshot, inspectBackup, restoreBackup } from './backup'
 import { validateSnapshot, type Snapshot } from './backup-validation'
 import { adoptHandoffFields, adoptHandoffTask, compareHandoff, inspectHandoff, keepLocalForHandoff, lastHandoffAt, replaceAfterExport, replaceWithHandoff } from './handoff'
 import { computeHeads, computeRowIds } from './handoff-heads'
-import { counts, exportFile, humanClick, manualTask, PASSWORD, resetDevices, setManualPoints, useDevice } from './device-test-fixtures'
+import { counts, exportFile, humanClick, manualTask, PASSWORD, resetDevices, setManualPoints, switchDevice } from './device-test-fixtures'
 
 beforeEach(() => resetDevices())
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals() })
 
 /** A (PC role) creates 25pt, B (second profile, emulation) takes it over, then both edit: B 30pt, A 40pt. */
 async function divergedScenario() {
-  await useDevice('A')
+  await switchDevice('A')
   const id = await manualTask('資料作成', 25)
   const first = await exportFile()
-  await useDevice('B')
+  await switchDevice('B')
   await replaceWithHandoff(first.snapshot, { confirmDifferentDataset: true })
   await setManualPoints(id, 30)
   const second = await exportFile()
-  await useDevice('A')
+  await switchDevice('A')
   await setManualPoints(id, 40)
   return { id, first, second }
 }
@@ -63,19 +63,19 @@ describe('I05 手動の引継ぎ確認（端末間の競合検知）', () => {
   })
 
   it('書き出し後にこの端末だけで編集した場合はlocal_only、相手だけの変更はincoming_onlyとして置き換えられる', async () => {
-    await useDevice('A')
+    await switchDevice('A')
     const id = await manualTask('週次報告', 25)
     const first = await exportFile()
-    await useDevice('B')
+    await switchDevice('B')
     await replaceWithHandoff(first.snapshot, { confirmDifferentDataset: true })
     const unchanged = await exportFile()
-    await useDevice('A')
+    await switchDevice('A')
     await setManualPoints(id, 40)
     const preview = await inspectHandoff(unchanged.snapshot)
     expect(preview.comparison.tasks.find(row => row.taskId === id)!.state).toBe('local_only'); expect(preview.comparison.blocking).toBe(true)
     // Reverse direction: A's new file on B is only an incoming change, so B may replace directly.
     const fromA = await exportFile()
-    await useDevice('B')
+    await switchDevice('B')
     const reverse = await inspectHandoff(fromA.snapshot)
     expect(reverse.comparison.tasks.find(row => row.taskId === id)!.state).toBe('incoming_only'); expect(reverse.comparison.blocking).toBe(false)
     await replaceWithHandoff(fromA.snapshot)
@@ -83,7 +83,7 @@ describe('I05 手動の引継ぎ確認（端末間の競合検知）', () => {
   })
 
   it('引継ぎ情報のない旧形式のファイルは差分をすべて要確認にする', async () => {
-    await useDevice('A')
+    await switchDevice('A')
     const id = await manualTask('旧形式', 25)
     const legacy = await captureSnapshot()
     expect(legacy.handoff).toBeUndefined()
@@ -124,9 +124,9 @@ describe('I05 手動の引継ぎ確認（端末間の競合検知）', () => {
   })
 
   it('別データセットのファイルは明示確認なしでは置き換えない', async () => {
-    await useDevice('A'); await manualTask('Aのタスク', 25)
+    await switchDevice('A'); await manualTask('Aのタスク', 25)
     const fromA = await exportFile()
-    await useDevice('B'); const own = await manualTask('Bだけのタスク', 10)
+    await switchDevice('B'); const own = await manualTask('Bだけのタスク', 10)
     const preview = await inspectHandoff(fromA.snapshot)
     expect(preview.sameDataset).toBe(false); expect(preview.comparison.blocking).toBe(false)
     await expect(replaceWithHandoff(fromA.snapshot)).rejects.toThrow('別データセット')
@@ -137,12 +137,12 @@ describe('I05 手動の引継ぎ確認（端末間の競合検知）', () => {
   })
 
   it('取込ファイルだけにある未完了タスクは個別に取り込め、完了記録つきは要手動対応として拒否する', async () => {
-    await useDevice('A'); await manualTask('共通', 5)
+    await switchDevice('A'); await manualTask('共通', 5)
     const first = await exportFile()
-    await useDevice('B'); await replaceWithHandoff(first.snapshot, { confirmDifferentDataset: true })
+    await switchDevice('B'); await replaceWithHandoff(first.snapshot, { confirmDifferentDataset: true })
     const created = await manualTask('Bで追加', 15), finished = await manualTask('Bで完了', 20); await completeTask(finished, 1)
     const fromB = await exportFile()
-    await useDevice('A')
+    await switchDevice('A')
     const ledger = await db.ledger.count(), preview = await inspectHandoff(fromB.snapshot)
     expect(preview.comparison.tasks.find(row => row.taskId === created)!.state).toBe('created_incoming')
     await adoptHandoffTask(fromB.snapshot, created, humanClick())
@@ -152,7 +152,7 @@ describe('I05 手動の引継ぎ確認（端末間の競合検知）', () => {
   })
 
   it('比較は純粋関数で、ledgerなどこの端末だけの行があれば置き換えを止める', async () => {
-    await useDevice('A')
+    await switchDevice('A')
     const id = await manualTask('台帳', 10)
     await completeTask(id, 1)
     const local = await captureSnapshot(), incoming = structuredClone(local)
@@ -166,7 +166,7 @@ describe('I05 手動の引継ぎ確認（端末間の競合検知）', () => {
 
 describe('I05 端末固有の表はバックアップに入らず、復元でも消えない', () => {
   it('localDeviceとhandoffHeadsは書き出さず、復元後も残る。旧形式（引継ぎ情報なし）も復元できる', async () => {
-    await useDevice('A')
+    await switchDevice('A')
     await manualTask('端末固有', 25)
     const file = await exportFile(), device = (await db.localDevice.get('main'))!
     expect(Object.keys(file.snapshot)).not.toContain('localDevice'); expect(Object.keys(file.snapshot)).not.toContain('handoffHeads'); expect(Object.keys(file.snapshot)).not.toContain('datasetState')

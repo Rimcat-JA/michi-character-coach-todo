@@ -12,7 +12,9 @@ describe('ダッシュボードと分割画面', () => {
   it('ウィジェットの順序を保存し、端末単独の同期状態を偽らない', async () => {
     await saveDashboardWidgets(['sync', 'today'])
     expect((await db.settings.get('main'))?.dashboardWidgets).toEqual(['sync', 'today'])
-    expect(dashboardSyncLabel()).toEqual({ value: '端末内', detail: '最終同期: なし（単独モード）' })
+    expect(dashboardSyncLabel()).toEqual({ value: '端末内', detail: '最終引継ぎ: なし（単独モード）' })
+    const handed = dashboardSyncLabel('2026-10-02T03:00:00.000Z', 'read_only')
+    expect(handed.value).toBe('移行済み（読み取り専用）'); expect(handed.detail).toMatch(/^最終引継ぎ: .+（手動の引継ぎ確認）$/); expect(JSON.stringify(handed)).not.toMatch(/同期済|マージ/)
     await expect(saveDashboardWidgets(['today', 'today'])).rejects.toThrow('ダッシュボード')
   })
   it('両パネルは同じタスクIDを参照し、片側の編集が他方の件数と値へ反映する', async () => {
