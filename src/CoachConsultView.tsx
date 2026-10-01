@@ -50,6 +50,6 @@ export default function CoachConsultView({ settings, tasks, notification, initia
     {analysis?.kind === 'clarify' && chosen && <div role="note"><p>{analysis.message}</p><p className="muted">分ける場合は「調査と実装に分けて」のように作業名を書いてください。範囲を減らす場合はタスク編集で本人が内容とポイントを見直します。</p>{onEdit && <button className="text-button" onClick={() => onEdit(chosen)}>タスク編集を開く（範囲を見直す）</button>}</div>}
     {revisionChanged && chosen && <div role="alert"><p>通知の後に「{chosen.title}」が更新されました（版 {notification!.revisions[chosen.id]} → {chosen.revision}）。現在の値：予定 {chosen.scheduledDate ?? '未設定'} · 期限 {dueLabel(chosen)}。</p><button className="secondary-button" onClick={() => setReloaded(true)}>現在の値を確認して続ける</button></div>}
     {analysis?.kind === 'task' && chosen && !revisionChanged && <CoachTaskChangeView key={`${chosen.id}:${analysis.text}`} selectedTask={chosen} settings={settings} onEdit={onEdit} initialInstruction={analysis.text} onApplied={receipt => { setReloaded(true); setNotice(`変更を保存しました。確定したタスク：${receipt.taskIds.length}件。`) }} />}
-    {analysis?.kind === 'split' && chosen && !revisionChanged && <CoachSplitView key={`${chosen.id}:${chosen.revision}:${analysis.text}`} task={chosen} parts={analysis.parts} instruction={analysis.text} settings={settings} />}
+    {analysis?.kind === 'split' && chosen && !revisionChanged && <CoachSplitView key={`${chosen.id}:${analysis.text}`} task={chosen} parts={analysis.parts} instruction={analysis.text} settings={settings} />}
   </section>
 }
