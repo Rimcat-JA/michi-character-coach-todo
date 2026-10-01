@@ -1,6 +1,7 @@
 import { db } from './db'
 import { calculateScore, emptyScore, uid, type Assessment, type ChecklistItem, type Task } from './domain'
 import { ConflictError, newTaskInput } from './commands'
+import { synchronizeAllocationCompletion } from './allocation-completion'
 
 const now = () => new Date().toISOString()
 
@@ -27,7 +28,7 @@ export async function toggleChecklistItem(id: string, done: boolean): Promise<vo
 
 export async function convertChecklistItem(id: string, expectedParentRevision: number, points: number): Promise<string> {
   if (!Number.isInteger(points) || points < 0 || points > 100000) throw new Error('配分ポイントは0〜100000の整数で指定してください')
-  return db.transaction('rw', [db.tasks, db.assessments, db.checklistItems, db.audits, db.tripBundles], async () => {
+  return db.transaction('rw', [db.tasks, db.assessments, db.completions, db.checklistItems, db.audits, db.tripBundles], async () => {
     const item = await db.checklistItems.get(id)
     if (!item) throw new Error('チェック項目がありません')
     if (item.convertedTaskId) return item.convertedTaskId
@@ -48,6 +49,7 @@ export async function convertChecklistItem(id: string, expectedParentRevision: n
     await db.tasks.put({ ...parent, score: parentScore, effectivePoints: parentResult.effective, assessmentId: parentAssessmentId, revision: parent.revision + 1, updatedAt: at })
     await db.tasks.add(child)
     await db.assessments.bulkAdd(assessments)
+    await synchronizeAllocationCompletion(parent, parentAssessmentId, parentResult.effective!)
     await db.checklistItems.put({ ...item, convertedTaskId: childId, updatedAt: at })
     await db.audits.bulkAdd([
       { id: uid(), taskId: parent.id, operation: 'allocate_points', at, detail: `${points}ptを子タスクへ配分` },

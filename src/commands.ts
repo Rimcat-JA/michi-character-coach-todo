@@ -4,13 +4,14 @@ import { containerPath } from './containers'
 import { validateLabelsForOwner } from './labels'
 import { assertTripTaskScoreChangeAllowed, freezeTripBundle } from './trip-bundles'
 import { cancelCoachNotificationTarget } from './coach-notification-save'
+import { allocationAssessmentForFirstCompletion, pointsForRecompletion } from './allocation-completion'
 
 export class ConflictError extends Error { constructor() { super('別の画面で更新されました。再読み込みして差分を確認してください。') } }
 const now = () => new Date().toISOString()
 const tables = [db.tasks, db.assessments, db.completions, db.ledger, db.routines, db.sessions, db.commands, db.audits, db.containers, db.settings, db.labelGroups, db.labelDefinitions]
-async function receipt<T>(key: string, payload: unknown, run: () => Promise<T>, includeTrips = false): Promise<T> {
+async function receipt<T>(key: string, payload: unknown, run: () => Promise<T>, includeTrips = false, includeChecklist = false): Promise<T> {
   const hash = JSON.stringify(payload)
-  return db.transaction('rw', includeTrips ? [...tables, db.tripBundles] : tables, async () => {
+  return db.transaction('rw', [...tables, ...(includeTrips ? [db.tripBundles] : []), ...(includeChecklist ? [db.checklistItems] : [])], async () => {
     const prior = await db.commands.get(key)
     if (prior) {
       if (prior.hash !== hash) throw new Error('IDEMPOTENCY_MISMATCH')
@@ -137,23 +138,26 @@ export async function completeTask(id: string, expectedRevision: number, key: st
     if (task.revision !== expectedRevision) throw new ConflictError()
     if (task.status === 'completed') return id
     const at = now(), existing = await db.completions.where('taskId').equals(id).first()
+    const recompletion = existing ? await pointsForRecompletion(task, existing) : null
+    const firstAllocationAssessmentId = existing ? undefined : await allocationAssessmentForFirstCompletion(task)
+    const points = recompletion ? recompletion.points : task.effectivePoints
     for (const bundle of await db.tripBundles.toArray()) {
       if (bundle.members.some(member => member.taskId === id) && !bundle.frozenAt) await db.tripBundles.put(freezeTripBundle(bundle, id, at))
     }
     if (existing) {
-      const points = existing.lastConfirmedPoints !== undefined ? existing.lastConfirmedPoints : task.effectivePoints
-      await db.completions.put({ ...existing, currentAt: at, localDate: today(new Date(at)), timezone: Intl.DateTimeFormat().resolvedOptions().timeZone, netPoints: points, scoreState: points === null ? 'pending' : 'confirmed' })
+      await db.completions.put({ ...existing, ...(recompletion?.allocationAssessmentId ? { allocationAssessmentId: recompletion.allocationAssessmentId, lastConfirmedPoints: points } : {}), currentAt: at, localDate: today(new Date(at)), timezone: Intl.DateTimeFormat().resolvedOptions().timeZone, netPoints: points, scoreState: points === null ? 'pending' : 'confirmed' })
+      if (recompletion?.repaired) await db.audits.add({ id: uid(), taskId: id, operation: 'allocation_completion_repaired', at, detail: `旧版の取消済ポイントを配分後の親残額${points}ptへ合わせて再完了。過去の台帳は維持` })
       if (points !== null) await db.ledger.add({ id: uid(), completionId: existing.id, taskId: id, kind: 'restore', delta: points, at, reason: '完了を再確定' })
     } else {
-      const completionId = uid(), points = task.effectivePoints
-      await db.completions.add({ id: completionId, taskId: id, originalAt: at, currentAt: at, localDate: today(new Date(at)), timezone: Intl.DateTimeFormat().resolvedOptions().timeZone, originalPoints: points, netPoints: points, scoreState: points === null ? 'pending' : 'confirmed', title: task.title, project: task.project })
+      const completionId = uid()
+      await db.completions.add({ id: completionId, taskId: id, ...(firstAllocationAssessmentId ? { allocationAssessmentId: firstAllocationAssessmentId } : {}), originalAt: at, currentAt: at, localDate: today(new Date(at)), timezone: Intl.DateTimeFormat().resolvedOptions().timeZone, originalPoints: points, netPoints: points, scoreState: points === null ? 'pending' : 'confirmed', title: task.title, project: task.project })
       if (points !== null) await db.ledger.add({ id: uid(), completionId, taskId: id, kind: 'award', delta: points, at, reason: '完了' })
     }
     await db.tasks.put({ ...task, status: 'completed', revision: task.revision + 1, updatedAt: at })
     await cancelCoachNotificationTarget(id, at)
-    await db.audits.add({ id: uid(), taskId: id, operation: 'complete', at, detail: task.effectivePoints === null ? 'ポイント未設定で完了' : `${task.effectivePoints}ptで完了` })
+    await db.audits.add({ id: uid(), taskId: id, operation: 'complete', at, detail: points === null ? 'ポイント未設定で完了' : `${points}ptで完了` })
     return id
-  }, true)
+  }, true, true)
 }
 export async function undoCompletion(id: string, expectedRevision: number, key: string = uid()) {
   return receipt(key, { operation: 'undo', id, expectedRevision }, async () => {

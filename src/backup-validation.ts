@@ -205,6 +205,10 @@ export function validateSnapshot(input: unknown): asserts input is Snapshot {
     if (!taskIds.has(completion.taskId) || !timestamp(completion.originalAt) || !nullableString(completion.currentAt) || (completion.currentAt !== null && !timestamp(completion.currentAt)) || !points(completion.originalPoints) || !points(completion.netPoints) || (completion.lastConfirmedPoints !== undefined && !points(completion.lastConfirmedPoints)) || !['pending', 'confirmed'].includes(completion.scoreState) || typeof completion.title !== 'string' || typeof completion.project !== 'string') throw new Error('完了履歴が不正です')
     if (completion.localDate !== undefined) validateDate(completion.localDate, '完了日')
     if (completion.timezone !== undefined) { try { new Intl.DateTimeFormat('ja-JP', { timeZone: completion.timezone }) } catch { throw new Error('完了timezoneが不正です') } }
+    if (completion.allocationAssessmentId !== undefined) {
+      const assessment = filled(completion.allocationAssessmentId) ? assessmentById.get(completion.allocationAssessmentId) : undefined
+      if (!assessment || assessment.taskId !== completion.taskId || !record(assessment.score) || !['manual', 'allocated'].includes(assessment.score.mode as string) || completion.currentAt === null && completion.lastConfirmedPoints === undefined) throw new Error('完了履歴の配分評価参照が不正です')
+    }
     completionById.set(completion.id, completion)
   }
 
