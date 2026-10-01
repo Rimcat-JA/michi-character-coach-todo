@@ -70,10 +70,11 @@ export async function cancelMove(event: Event): Promise<void> {
 /** Move, step 3 (sender): the receiver's code archives this device as read-only. A wrong code changes nothing. */
 export async function completeMoveOnSender(code: string, event: Event): Promise<void> {
   trusted(event)
+  const expected = await db.localDevice.get('main').then(device => device?.pendingMove ? moveCompletionCode(device.pendingMove.moveId, device.pendingMove.secret).then(value => ({ moveId: device.pendingMove!.moveId, value })) : null)
+  if (expected && normalizeCode(code) !== normalizeCode(expected.value)) throw new Error('完了コードが一致しません。受入先に表示された8文字を入力してください')
   await db.transaction('rw', [db.settings, db.datasetState, db.localDevice, db.audits], async () => {
     const settings = await db.settings.get('main'), device = await db.localDevice.get('main'), pending = device?.pendingMove
-    if (!settings || !device || !pending || datasetModeOf(await db.datasetState.get('main')) !== 'frozen') throw new Error('完了待ちの移行がありません')
-    if (normalizeCode(code) !== normalizeCode(await moveCompletionCode(pending.moveId, pending.secret))) throw new Error('完了コードが一致しません。受入先に表示された8文字を入力してください')
+    if (!expected || !settings || !device || !pending || pending.moveId !== expected.moveId || datasetModeOf(await db.datasetState.get('main')) !== 'frozen') throw new Error('完了待ちの移行がありません')
     await db.datasetState.put(modeRow('read_only', pending.moveId))
     await db.settings.put({ ...settings, lineage: { ...(settings.lineage ?? emptyLineage()), moveId: pending.moveId } })
     await db.localDevice.put({ ...device, pendingMove: null })
