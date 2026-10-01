@@ -1,6 +1,7 @@
 import Dexie from 'dexie'
 import { db } from './db'
 import { canonicalJSON, contentDigest } from './canonical'
+import { isTimeZone } from './zoned-time'
 import { uid, validateDate, type ScoreInput, type Settings } from './domain'
 import type { ChangeContext, TaskChangeRequest } from './change-set'
 
@@ -31,12 +32,13 @@ function validateInput(input: TaskInstructionInput) {
   try { if (typeof input.timezone !== 'string' || input.timezone.length > 100) error(); new Intl.DateTimeFormat('en', { timeZone: input.timezone }).format() } catch { error('指示のタイムゾーンが不正です') }
   if (!Array.isArray(input.changes) || !input.changes.length || input.changes.length > 100 || new Set(input.changes.map(change => change?.taskId)).size !== input.changes.length) error()
   for (const change of input.changes) {
-    if (!record(change) || Object.keys(change).length !== 3 || !['taskId', 'expectedRevision', 'patch'].every(key => Object.hasOwn(change, key)) || typeof change.taskId !== 'string' || !change.taskId || change.taskId.length > 200 || !Number.isSafeInteger(change.expectedRevision) || change.expectedRevision < 1 || !record(change.patch) || !Object.keys(change.patch).length || Object.keys(change.patch).some(field => !['title', 'notes', 'scheduledDate', 'dueDate', 'manualPoints'].includes(field))) error()
+    if (!record(change) || Object.keys(change).length !== 3 || !['taskId', 'expectedRevision', 'patch'].every(key => Object.hasOwn(change, key)) || typeof change.taskId !== 'string' || !change.taskId || change.taskId.length > 200 || !Number.isSafeInteger(change.expectedRevision) || change.expectedRevision < 1 || !record(change.patch) || !Object.keys(change.patch).length || Object.keys(change.patch).some(field => !['title', 'notes', 'scheduledDate', 'dueDate', 'dueAt', 'manualPoints'].includes(field))) error()
     const patch = change.patch
     if (Object.hasOwn(patch, 'title') && (typeof patch.title !== 'string' || !patch.title.trim() || patch.title.length > 300)) error('タイトルが不正です')
     if (Object.hasOwn(patch, 'notes') && (typeof patch.notes !== 'string' || patch.notes.length > 50000)) error('メモが不正です')
     for (const field of ['scheduledDate', 'dueDate'] as const) if (Object.hasOwn(patch, field)) { if (patch[field] !== null && typeof patch[field] !== 'string') error('指示の日付が不正です'); validateDate(patch[field]!, '指示の日付') }
     if (Object.hasOwn(patch, 'manualPoints') && (!Number.isInteger(patch.manualPoints) || patch.manualPoints! < 0 || patch.manualPoints! > 100000)) error('指定ポイントは0〜100000の整数にしてください')
+    if (Object.hasOwn(patch, 'dueAt') && patch.dueAt !== null && (!record(patch.dueAt) || Object.keys(patch.dueAt).length !== 2 || typeof patch.dueAt.at !== 'string' || !Number.isFinite(Date.parse(patch.dueAt.at)) || new Date(patch.dueAt.at).toISOString() !== patch.dueAt.at || !isTimeZone(patch.dueAt.timezone))) error('指示の締め切り時刻が不正です')
   }
 }
 /** A native owner operation confirms exact values; model output is never authority. */

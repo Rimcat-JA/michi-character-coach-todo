@@ -2,10 +2,11 @@ import { useEffect, useState } from 'react'
 import { useLiveQuery } from 'dexie-react-hooks'
 import { changePolicyFor } from './change-set'
 import { sourceDb as db, type ContextSource } from './source-library'
-import { applyDetectionCreateFromUI, applyDetectionRecurrenceFromUI, detectObligationsForSource, discardDetectionRun, isLiveDetectionRun, prepareDetectionCreate, prepareDetectionFromUI, prepareDetectionRecurrenceFromUI, savedDetectionRuns, type DetectionCreationReceipt, type DetectionRun, type DetectionTransport, type PreparedDetectionCreate } from './detection-run'
+import { applyDetectionCreateFromUI, applyDetectionRecurrenceFromUI, detectObligationsForSource, discardDetectionRun, groundedDetectionDue, isLiveDetectionRun, prepareDetectionCreate, prepareDetectionFromUI, prepareDetectionRecurrenceFromUI, savedDetectionRuns, type DetectionCreationReceipt, type DetectionRun, type DetectionTransport, type PreparedDetectionCreate } from './detection-run'
 import type { DetectionChange } from './detection-contract'
 import type { Settings, Task } from './domain'
 import { loadCalendarRulesState } from './calendar-rules-save'
+import { calendarTimeAt } from './calendar-resolver'
 import RoutineAssistView from './RoutineAssistView'
 
 type Props={settings:Settings;tasks:Task[];onEdit?:(task:Task)=>void;onCreated?:(receipt:DetectionCreationReceipt)=>void}
@@ -69,10 +70,10 @@ function DetectionRunCard({run,source,settings,tasks,onEdit,onCreated,onDiscard,
         return <div className="setting-section" key={candidate.id}>
           <h4>{actionNames[change.action]}：{change.title??target?.title??'対象を確認'}</h4>
           <p>{basisNames[change.basis]} · {candidate.reason}</p>
-          {change.action==='create'?<p>期限：{change.due.kind==='date'?change.due.value:change.due.kind==='datetime'?`${change.due.value}（時刻付き期限は手動確認）`:change.due.kind==='unresolved'?'未確定（登録時に期限は空欄）':'記載なし'} · 点数・時間・優先度は推定しません。</p>:change.action==='define_recurrence'?<>
+          {change.action==='create'?<p>期限：{change.due.kind==='date'?change.due.value:change.due.kind==='datetime'?`${change.due.value}（原文と同じ時刻・タイムゾーンなら時刻付きで登録）`:change.due.kind==='unresolved'?'未確定（登録時に期限は空欄）':'記載なし'} · 点数・時間・優先度は推定しません。</p>:change.action==='define_recurrence'?<>
             <p>周期の原文：{change.recurrence?.raw}。本人が対象・参加条件・名前付きカレンダー・有効期間・時刻を選び、設定だけを確認できます。</p>
             <p className="muted">周期の設定保存と、タスク・占有予定への反映は別に承認します。点数や準備作業は推定しません。</p>
-            {change.due.kind==='datetime'&&<p role="alert">時刻付きの本当の期限は日付や予定時刻へ省略できません。原文を確認して手動編集してください。</p>}
+            {change.due.kind==='datetime'&&(groundedDetectionDue(change)?<p role="alert">時刻付きの本当の期限（原文：{change.due.raw}）は日付や予定時刻へ省略しません。周期の確認で、作業の形に締切日と原文と同じ締切時刻を本人が選んだ場合だけ採用できます。</p>:<p role="alert">期限の時刻は検証済みの原文で確認できない未確定の値です。この候補からは採用できません。締め切りは原文を確認して本人が手動で入力してください。</p>)}
           </>:<>
             <p>既存対象：{target?.title??change.target_task_id??'未確定'} · 候補の基準版 {change.expected_revision??'なし'}</p>
             {change.action==='update'&&<p>変更する項目：{change.change_fields.join(', ')}{change.change_fields.includes('due')?` / 期限 ${target?.dueDate??'未設定'} → ${change.due.value??change.due.raw??'未確定'}`:''}</p>}
@@ -84,14 +85,14 @@ function DetectionRunCard({run,source,settings,tasks,onEdit,onCreated,onDiscard,
           </>}
           <details><summary>根拠の原文と検証</summary>{change.evidence.map((evidence,index)=><blockquote key={index}><p style={{whiteSpace:'pre-wrap'}}>{evidence.quote}</p><small>{evidence.source_id} / 内容版 {evidence.revision} / {evidence.span_id} / 支持項目 {evidence.supports.join(', ')}</small></blockquote>)}{candidate.verification?.checks.map(check=><p key={check.field}>検証判定 {check.field}: {check.verdict} · 参照 {check.source_refs.join(', ')}</p>)}</details>
           {created.includes(candidate.id)?<p>登録結果を受領した候補です。</p>:candidate.status==='ready-for-review'&&change.action==='create'&&<button type="button" className="secondary-button" disabled={!sessionLive||busy||Boolean(prepared)} onClick={()=>void prepare(candidate.id)}>タスクにする内容を確認</button>}
-          {adoptedRecurrences.includes(candidate.id)?<p>周期の設定結果を受領した候補です。発生回への反映は共通カレンダーで別に確認してください。</p>:candidate.status==='ready-for-review'&&change.action==='define_recurrence'&&change.due.kind!=='datetime'&&<button type="button" className="secondary-button" disabled={!sessionLive||busy||Boolean(prepared)||Boolean(recurrenceId)} onClick={()=>setRecurrenceId(candidate.id)}>周期の設定を確認</button>}
+          {adoptedRecurrences.includes(candidate.id)?<p>周期の設定結果を受領した候補です。発生回への反映は共通カレンダーで別に確認してください。</p>:candidate.status==='ready-for-review'&&change.action==='define_recurrence'&&<button type="button" className="secondary-button" disabled={!sessionLive||busy||Boolean(prepared)||Boolean(recurrenceId)} onClick={()=>setRecurrenceId(candidate.id)}>周期の設定を確認</button>}
         </div>
       })}
       {run.reviewItems.length>0&&<div className="setting-section"><h4>検出を確定するための確認事項</h4>{run.reviewItems.map((item,index)=><p key={index}>{item.question} <small>({item.reason})</small></p>)}<p className="muted">確認事項は作業タスクではありません。件数やポイントに数えません。</p></div>}
       {run.candidates.length===0&&<p>この取得範囲から登録候補は検出されませんでした。未取得範囲の義務の有無は不明です。</p>}
       {run.ignored.length>0&&<details><summary>除外した記載 {run.ignored.length}件</summary>{run.ignored.map((item,index)=><p key={index}>{item.source_id} · {item.reason}</p>)}</details>}
       {prepared&&sessionLive&&<div className="card setting-section">
-        <h4>本人がこの内容を登録</h4><p>作業：{prepared.assisted.inputs[0].title}</p><p>本当の期限：{prepared.assisted.inputs[0].dueDate??'未設定'} / 予定日：未設定 / 必要ポイント：未評価</p><p className="muted">資料の引用{prepared.evidence.length}件はメモに複写せず、タスクの「資料の根拠」に保存します。資料の削除・期限切れ・保存/索引許可の取消で引用も消去し、外部AIへは資料の許可があるコーチ会話だけで送ります。</p>
+        <h4>本人がこの内容を登録</h4><p>作業：{prepared.assisted.inputs[0].title}</p><p>本当の期限：{prepared.assisted.inputs[0].dueDate??'未設定'}{prepared.assisted.inputs[0].dueAt&&prepared.assisted.inputs[0].dueTimezone?` ${calendarTimeAt(prepared.assisted.inputs[0].dueAt,prepared.assisted.inputs[0].dueTimezone)}（${prepared.assisted.inputs[0].dueTimezone}）`:''} / 予定日：未設定 / 必要ポイント：未評価</p><p className="muted">資料の引用{prepared.evidence.length}件はメモに複写せず、タスクの「資料の根拠」に保存します。資料の削除・期限切れ・保存/索引許可の取消で引用も消去し、外部AIへは資料の許可があるコーチ会話だけで送ります。</p>
         <label><input type="checkbox" aria-label="検出候補の根拠と本人担当を承認" checked={checked} disabled={busy} onChange={event=>setChecked(event.target.checked)}/> 行為・本人担当・現在も必要であること・原文の根拠・期限の意味を確認し、この候補の登録を承認する</label>
         <div className="export-buttons"><button type="button" className="primary-button" disabled={busy||!checked} onClick={event=>void apply(event.nativeEvent)}>確認したこの候補を登録</button><button type="button" className="text-button" disabled={busy} onClick={()=>{setPrepared(null);setChecked(false)}}>登録確認を戻す</button></div>
       </div>}

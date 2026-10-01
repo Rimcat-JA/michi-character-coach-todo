@@ -24,8 +24,10 @@ export function contextSuggestions(tasks: Task[], date: string, energy: number |
   return { matches, unknown }
 }
 
-export function urgency(task: Pick<Task, 'dueDate'>, date: string): '期限超過' | '今日' | '近日' | '先' | '期限なし' {
+export function urgency(task: Pick<Task, 'dueDate'> & Partial<Pick<Task, 'dueAt'>>, date: string, now: string | null = null): '期限超過' | '今日' | '近日' | '先' | '期限なし' {
   if (!task.dueDate) return '期限なし'
+  // A clock deadline is overdue from that instant, not only from the next local day.
+  if (task.dueAt && now !== null && task.dueAt <= now) return '期限超過'
   const days = Math.round((Date.parse(`${task.dueDate}T12:00:00Z`) - Date.parse(`${date}T12:00:00Z`)) / 86400000)
   return days < 0 ? '期限超過' : days === 0 ? '今日' : days <= 3 ? '近日' : '先'
 }

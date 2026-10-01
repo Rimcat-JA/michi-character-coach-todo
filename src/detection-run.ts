@@ -3,7 +3,9 @@ import { canonicalJSON, contentDigest } from './canonical'
 import { changePolicyFor } from './change-set'
 import { assertOperationAllowed } from './automation-policy'
 import { newTaskInput } from './commands'
-import { emptyScore, uid, type Settings } from './domain'
+import { emptyScore, uid, validateTaskDue, type Settings } from './domain'
+import { deadlineClock } from './recurrence-phrase'
+import { isTimeZone, localDateAt, localTimeAt } from './zoned-time'
 import { normalizeSourceText, readSource, recordSourceSent, sourceSpans, sourceDb as db } from './source-library'
 import { applyAssistedTasks, prepareAssistedTasks, type PreparedAssistedTasks } from './task-assist'
 import { detectionClaims, detectionDeliveryMode, detectionSemanticsPassed, inspectDetectionOutput, parseDetectionOutput, parseDetectionVerification, type DetectionChange, type DetectionOutput, type DetectionRequest, type DetectionVerification } from './detection-contract'
@@ -117,27 +119,51 @@ function recurrenceCandidate(run:DetectionRun,candidateId:string){
   const candidate=run.candidates.find(item=>item.id===candidateId)
   if(!candidate||candidate.status!=='ready-for-review'||!candidate.verification||!detectionSemanticsPassed(candidate.change,candidate.verification)||candidate.change.action!=='define_recurrence'||!candidate.change.recurrence||!candidate.change.title?.trim())throw new Error('この候補は検証済みの周期定義として採用できません')
   if(!candidate.change.evidence.some(reference=>reference.supports.includes('recurrence')&&reference.quote.includes(candidate.change.recurrence!.raw)))throw new Error('周期の原文が検証対象の証拠引用と一致しません')
-  if(candidate.change.due.kind==='datetime')throw new Error('時刻付き期限は周期の予定時刻へ置き換えません。原文を確認して本人が手動編集してください')
   return candidate
 }
+/** A datetime deadline is adopted only when its zone is valid, its offset agrees with that zone, and the quoted text states the same clock. */
+export function groundedDetectionDeadline(due:DetectionChange['due'],fallbackZone:string|null):{dueAt:string;dueTimezone:string;dueDate:string;time:string}{
+  const zone=due.timezone??fallbackZone
+  if(due.kind!=='datetime'||typeof due.value!=='string'||!isTimeZone(zone)||!due.raw)throw new Error('時刻付き期限のタイムゾーンと原文を確認してください')
+  const at=new Date(Date.parse(due.value)).toISOString(),literal=/^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})/.exec(due.value)!
+  if(!/Z$/.test(due.value)&&(localDateAt(at,zone)!==literal[1]||localTimeAt(at,zone)!==literal[2]))throw new Error('期限の時刻とタイムゾーンが一致しません。原文を確認してください')
+  let quoted:string|null=null
+  try{quoted=deadlineClock(due.raw).time}catch{quoted=null}
+  const time=localTimeAt(at,zone)
+  if(quoted!==time)throw new Error('期限の原文に同じ時刻が明示されていません。原文を確認して手動編集してください')
+  const result={dueAt:at,dueTimezone:zone,dueDate:localDateAt(at,zone),time}
+  validateTaskDue(result);return result
+}
+/** A deadline the detector names counts only when it is a checked field and an evidence quote for 'due' contains its raw text. */
+export const groundedDetectionDue=(change:DetectionChange)=>change.change_fields.includes('due')&&!!change.due.raw&&change.evidence.some(reference=>reference.supports.includes('due')&&reference.quote.includes(change.due.raw!))
 export function detectionRecurrenceMessage(run:DetectionRun,candidateId:string){const candidate=recurrenceCandidate(run,candidateId);return `${candidate.change.title}\n${candidate.change.recurrence!.raw}`}
 /** The owner supplies all calendar, participation, period and time selections.
  * Document text never becomes a current owner instruction or an approval token. */
 export async function prepareDetectionRecurrenceFromUI(run:DetectionRun,candidateId:string,input:RoutineAssistInput,event:Event):Promise<PreparedRoutineAssistance>{
   trustedClick(event)
   const selected=recurrenceCandidate(run,candidateId),change=selected.change
+  const datetimeDue=change.due.kind==='datetime'&&groundedDetectionDue(change)
+  if(datetimeDue&&!input?.selection?.dueTime)throw new Error('時刻付き期限は周期の予定時刻へ置き換えません。原文の時刻を締め切り時刻として本人が選択してください')
+  if(change.due.kind==='datetime'&&!datetimeDue)throw new Error('期限の時刻が検証済みの原文の根拠にありません。原文を確認して、締め切りは本人が手動で入力してください')
   await assertCurrent(run,run.detectorModel)
   if(input.message!==detectionRecurrenceMessage(run,candidateId)||input.targetRuleId!==null||input.expectedRuleRevision!==null)throw new Error('確認した周期の原文と新しい系列の対象が変わりました')
   const state=await loadCalendarRulesState()
   validateRoutineAssistSelection(input,state)
   const selection=input.selection
-  const trigger=verifiedRecurrenceTrigger(change.recurrence!.raw,selection.time)
+  // A quoted clock deadline becomes the step's deadline time only when the owner selected that same clock.
+  if(datetimeDue){
+    let grounded:ReturnType<typeof groundedDetectionDeadline>|null=null
+    try{grounded=groundedDetectionDeadline(change.due,selection.timezone)}catch{grounded=null}
+    if(!grounded||!selection.dueTime||grounded.time!==selection.dueTime||change.due.timezone!==null&&change.due.timezone!==selection.timezone)throw new Error('時刻付き期限は周期の予定時刻へ置き換えません。原文の時刻を締め切り時刻として本人が選択してください')
+  }else if(selection.dueTime)throw new Error('原文にない締め切り時刻は追加しません')
+  const options={startDate:selection.validFrom,dueTime:selection.dueTime??null,...(selection.nonexistentTime?{nonexistentTime:selection.nonexistentTime}:{}),...(selection.ambiguousTime?{ambiguousTime:selection.ambiguousTime}:{}),...(selection.unfinishedPolicy?{unfinishedPolicy:selection.unfinishedPolicy}:{})}
+  const trigger=verifiedRecurrenceTrigger(change.recurrence!.raw,selection.time,options)
   for(const quote of new Set(change.evidence.filter(reference=>reference.supports.includes('recurrence')).map(reference=>reference.quote))){
-    if(canonicalJSON(verifiedRecurrenceTrigger(quote,selection.time))!==canonicalJSON(trigger))throw new Error('周期の引用を短くして原文の条件を省略できません。本人が手動で確認してください')
+    if(canonicalJSON(verifiedRecurrenceTrigger(quote,selection.time,options))!==canonicalJSON(trigger))throw new Error('周期の引用を短くして原文の条件を省略できません。本人が手動で確認してください')
     if(/今日|明日|明後日|昨日|来週|来月|今週|今月|来年|今年/.test(quote))throw new Error('資料の相対的な開始・終了日は原文の日時を確認して具体的な日付で手動入力してください')
     validateRoutineInstructionPeriod({...input,message:quote},true)
   }
-  const candidate:RoutineAssistCandidate={input:structuredClone(input),definition:{title:change.title!,enabled:true,trigger,steps:[{key:'main',title:change.title!,kind:selection.stepKind,scheduledOffsetDays:selection.scheduledOffsetDays,dueOffsetDays:selection.dueOffsetDays,score:selection.stepKind==='task'?emptyScore():null,durationMinutes:selection.durationMinutes}]},notices:['検証済みの原文と本人の選択だけから、一つの周期を設定します。ポイントや準備作業は推定しません。発生回の作成は別の本人確認が必要です。']}
+  const candidate:RoutineAssistCandidate={input:structuredClone(input),definition:{title:change.title!,enabled:true,trigger,steps:[{key:'main',title:change.title!,kind:selection.stepKind,scheduledOffsetDays:selection.scheduledOffsetDays,dueOffsetDays:selection.dueOffsetDays,score:selection.stepKind==='task'?emptyScore():null,durationMinutes:selection.durationMinutes,...(selection.dueTime?{dueTime:selection.dueTime}:{})}]},notices:['検証済みの原文と本人の選択だけから、一つの周期を設定します。ポイントや準備作業は推定しません。発生回の作成は別の本人確認が必要です。']}
   validateRoutineAssistCandidate(candidate,state)
   // Citation content is the stable source identity: reimporting a selected quote
   // or changing an unrelated line must not create another copy of this series.
@@ -165,12 +191,16 @@ export async function prepareDetectionCreate(run:DetectionRun,candidateId:string
   registeredRun(run);assertOperationAllowed(changePolicyFor(await assertCurrent(run,run.detectorModel)),'detection.register')
   const candidate=run.candidates.find(item=>item.id===candidateId)
   if(!candidate||candidate.status!=='ready-for-review'||!candidate.verification||!detectionSemanticsPassed(candidate.change,candidate.verification)||candidate.change.action!=='create')throw new Error('この候補は新規タスクとして登録できません。確認事項または既存タスクへの差分です。')
-  if(candidate.change.due.kind==='datetime')throw new Error('時刻付き期限は、原文を確認してタスクを手動編集してください')
+  // The source's recorded zone is the only trusted zone; Japanese text rarely names one, so a model-chosen zone is refused.
+  const sourceZone=(await readSource(run.source.sourceId)).source.timezone,due=candidate.change.due
+  if(candidate.change.change_fields.includes('due')&&due.kind==='datetime'&&due.timezone!==null&&due.timezone!==sourceZone)throw new Error('期限のタイムゾーンが資料のタイムゾーンと一致しません。原文を確認して手動編集してください')
+  const deadline=candidate.change.change_fields.includes('due')&&due.kind==='datetime'?groundedDetectionDeadline({...due,timezone:sourceZone},sourceZone):null
   const duplicate=(await db.tasks.toArray()).some(task=>!task.deletedAt&&task.title.normalize('NFC').trim()===candidate.change.title!.normalize('NFC').trim())
   if(duplicate)throw new Error('同じ作業名の既存タスクがあります。新規作成せず既存タスクを確認してください')
   const input=newTaskInput(),evidence=candidate.change.evidence
   input.title=candidate.change.title!
-  input.dueDate=candidate.change.change_fields.includes('due')&&candidate.change.due.kind==='date'?candidate.change.due.value:null
+  input.dueDate=deadline?deadline.dueDate:candidate.change.change_fields.includes('due')&&candidate.change.due.kind==='date'?candidate.change.due.value:null
+  if(deadline){input.dueAt=deadline.dueAt;input.dueTimezone=deadline.dueTimezone}
   // Third-party quotes go to taskSourceEvidence (erased with the source), never into the task notes.
   input.notes=detectionProvenanceNotes(run.detectorModel,run.verifierModel,candidate.change.basis,candidate.change.obligation_state,run.id)
   if(evidence.some(reference=>reference.source_id!==run.source.sourceId||reference.revision!==run.source.snapshotRevision))throw new Error('候補の引用が検出した資料の版と一致しません')

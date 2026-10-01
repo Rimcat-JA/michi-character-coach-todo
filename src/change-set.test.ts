@@ -1,6 +1,7 @@
 import 'fake-indexeddb/auto'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { db, ensureSettings } from './db'
+import { changeAuditFact, operationsForFields, presetRules } from './automation-policy'
 import { completeTask, createTask, newTaskInput, updateTask } from './commands'
 import { emptyScore, type Settings } from './domain'
 import { contentDigest } from './canonical'
@@ -352,5 +353,46 @@ describe('explicit protected field proxy edits',()=>{
     const requests=[{taskId,expectedRevision:3,patch:{manualPoints:35}}],instruction=await confirmTaskInstructionFromUI({message:'30ptを35ptへ',referenceDate:'2026-10-01',timezone:'Asia/Tokyo',changes:requests},expanded(owner),humanClick())
     await db.tasks.update(taskId,{score:{...(await db.tasks.get(taskId))!.score,manualPoints:31},effectivePoints:31})
     await expect(prepareTaskChanges(requests,expanded(coach),'確認値差替え',instruction)).rejects.toMatchObject({code:'CONFLICT'})
+  })
+})
+
+describe('時刻付き締め切りのChangeSet',()=>{
+  const full=(context:ChangeContext):ChangeContext=>({...context,allowedFields:['title','notes','scheduledDate','dueDate','dueAt','manualPoints']})
+  const clock={at:'2026-10-05T08:00:00.000Z',timezone:'Asia/Tokyo'}
+  async function instructed(patch:TaskChangeRequest['patch']){
+    const task=(await db.tasks.get(taskId))!,requests=[{taskId,expectedRevision:task.revision,patch}]
+    const instruction=await confirmTaskInstructionFromUI({message:'締め切りを2026-10-05の17時にして',referenceDate:'2026-10-01',timezone:'Asia/Tokyo',changes:requests},full(owner),humanClick())
+    return prepareTaskChanges(requests,full(coach),'本人指示による締め切り時刻の変更',instruction)
+  }
+  it('締め切り時刻は本人指示と項目ごとの保護確認がなければ代理変更できない',async()=>{
+    await expect(prepareTaskChanges([{taskId,expectedRevision:1,patch:{dueDate:'2026-10-05',dueAt:clock}}],full(coach))).rejects.toMatchObject({code:'USER_INSTRUCTION_REQUIRED'})
+    const prepared=await instructed({dueDate:'2026-10-05',dueAt:clock})
+    expect(prepared.changes[0]).toMatchObject({fields:['dueDate','dueAt'],before:{dueDate:null,dueAt:null},after:{dueDate:'2026-10-05',dueAt:clock}})
+    expect(decideChangePolicy(prepared,changePolicyFor((await db.settings.get('main'))!))).toMatchObject({status:'awaiting_approval',protectedFields:['dueDate','dueAt']})
+    await expect(approveChangeSetFromUI(prepared,full(owner),humanClick(),['dueDate'])).rejects.toMatchObject({code:'PROTECTED_FIELD_APPROVAL_REQUIRED'})
+    await applyChangeSet(prepared,await approveChangeSetFromUI(prepared,full(owner),humanClick(),['dueDate','dueAt']),full(coach),'deadline-clock')
+    expect(await db.tasks.get(taskId)).toMatchObject({dueDate:'2026-10-05',dueAt:'2026-10-05T08:00:00.000Z',dueTimezone:'Asia/Tokyo',scheduledDate:'2026-10-01',effectivePoints:25})
+    await setPolicy({fieldRules:{dueDate:'deny'}});await expect(instructed({dueAt:null})).rejects.toMatchObject({code:'CHANGES_STOPPED'})
+  })
+  it('N09の操作表では締め切り時刻もtask.deadline（本人確認のみ・自動にならない）として扱う',async()=>{
+    expect(operationsForFields(['dueAt'])).toEqual(['task.deadline']);expect(operationsForFields(['dueDate','dueAt'])).toEqual(['task.deadline'])
+    await setPolicy({operations:presetRules('A3')})
+    const set=await instructed({dueDate:'2026-10-05',dueAt:clock})
+    expect(decideChangePolicy(set,changePolicyFor((await db.settings.get('main'))!))).toMatchObject({status:'awaiting_approval',protectedFields:['dueDate','dueAt']})
+    await applyChangeSet(set,await approveChangeSetFromUI(set,full(owner),humanClick(),['dueDate','dueAt']),full(coach),'a3-clock')
+    const fact=(await db.audits.toArray()).map(changeAuditFact).find(item=>item?.changeSetId===set.id)
+    expect(fact).toMatchObject({fields:['dueDate','dueAt'],operations:['task.deadline']})
+    await setPolicy({operations:presetRules('A3').map(rule=>rule.operation==='task.deadline'?{...rule,mode:'deny' as const}:rule)})
+    await expect(instructed({dueAt:null})).rejects.toMatchObject({code:'CHANGES_STOPPED'})
+  })
+  it('日付と時刻の不一致、時刻を残した日付だけの移動を拒否する',async()=>{
+    await expect(instructed({dueDate:'2026-10-06',dueAt:clock})).rejects.toMatchObject({code:'INVALID_INPUT'})
+    await expect(prepareTaskChanges([{taskId,expectedRevision:1,patch:{dueAt:{at:'2026-10-05 17:00',timezone:'Asia/Tokyo'}}}],full(owner))).rejects.toThrow()
+    const set=await instructed({dueDate:'2026-10-05',dueAt:clock});await applyChangeSet(set,await approveChangeSetFromUI(set,full(owner),humanClick(),['dueDate','dueAt']),full(coach),'set-clock')
+    const task=(await db.tasks.get(taskId))!
+    await expect(prepareTaskChanges([{taskId,expectedRevision:task.revision,patch:{dueDate:'2026-10-06'}}],full(owner))).rejects.toMatchObject({code:'INVALID_INPUT'})
+    const cleared=await instructed({dueAt:null})
+    await applyChangeSet(cleared,await approveChangeSetFromUI(cleared,full(owner),humanClick(),['dueAt']),full(coach),'clear-clock')
+    expect(await db.tasks.get(taskId)).toMatchObject({dueDate:'2026-10-05',dueAt:null,dueTimezone:null})
   })
 })

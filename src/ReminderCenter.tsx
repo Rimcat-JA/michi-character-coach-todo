@@ -1,6 +1,6 @@
 import { useState } from 'react'
-import type { ReminderRule, Settings, SmartList, Task } from './domain'
-import { createReminder, markReminderRead, setReminderPolicy, stopReminder } from './reminders'
+import { taskDueTime, type ReminderRule, type Settings, type SmartList, type Task } from './domain'
+import { createReminder, deadlineReminderAt, markReminderRead, setReminderPolicy, stopReminder } from './reminders'
 
 type Props = { tasks: Task[]; lists: SmartList[]; settings: Settings; run: (fn: () => Promise<unknown>, success?: string) => Promise<boolean>; mode: 'today' | 'settings' }
 const reminderLabel = (kind: ReminderRule['kind']) => kind === 'bug-me' ? 'Bug Me' : kind === 'smart-daily' ? 'Smart List毎日' : kind === 'review' ? '見直し日' : '1回'
@@ -33,6 +33,7 @@ export default function ReminderCenter({ tasks, lists, settings, run, mode }: Pr
     <label className="field">対象タスク<select value={taskId} onChange={event => setTaskId(event.target.value)}><option value="">選択してください</option>{availableTasks.map(task => <option key={task.id} value={task.id}>{task.title}</option>)}</select></label>
     <label className="field">1回通知する時刻<input type="datetime-local" value={when} onChange={event => setWhen(event.target.value)} /></label>
     <div className="export-buttons"><button className="secondary-button" disabled={!taskId || !when} onClick={() => run(() => createReminder('once', taskId, when, channels), 'タスクの通知を予約しました')}>1回通知を予約</button><button className="secondary-button" disabled={!taskId} onClick={() => run(() => createReminder('bug-me', taskId, '', channels), '30分間隔の催促を予約しました')}>Bug Meを開始</button></div>
+    {selectedTask?.dueAt && <><button className="secondary-button" onClick={() => run(() => createReminder('once', taskId, deadlineReminderAt(selectedTask, 30), channels), '締め切り時刻の30分前に通知を予約しました')}>締め切り時刻の30分前に通知</button><p className="muted">締め切り：{selectedTask.dueDate} {taskDueTime(selectedTask)}（{selectedTask.dueTimezone}）。時刻付きの締め切りから計算します。</p></>}
     <p className="muted">Bug Meは本人が開始したときだけ有効です。30分間隔で最大3回、今日までです。</p>
     <label className="field">見直し日の通知時刻<input type="time" value={reviewTime} onChange={event => setReviewTime(event.target.value)} /></label>
     <button className="secondary-button" disabled={!selectedTask?.reviewDate || !reviewTime || rules.some(rule => rule.kind === 'review' && rule.targetId === taskId && rule.enabled)} onClick={() => run(() => createReminder('review', taskId, reviewTime, channels), '見直し日の通知を予約しました')}>見直し日に通知</button>

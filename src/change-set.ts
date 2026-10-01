@@ -1,15 +1,24 @@
 import Dexie from 'dexie'
 import { db } from './db'
 import { contentDigest, canonicalJSON } from './canonical'
-import { calculateScore, uid, validateDate, validateTaskInput, type ScoreInput, type Settings, type Task } from './domain'
+import { calculateScore, uid, validateDate, validateTaskDue, validateTaskInput, type ScoreInput, type Settings, type Task } from './domain'
 import { assertTripTaskScoreChangeAllowed } from './trip-bundles'
+import { localDateAt, localTimeAt } from './zoned-time'
 import { cancelCoachNotificationTarget } from './coach-notification-save'
 import { assertTaskInstruction, clearTaskInstructionAuthority, type VerifiedTaskInstruction } from './task-user-instruction'
 import { autoChangeCounts, automationRulesFor, changeAuditFact, OPERATION_INFO, operationsForFields, ownerTimezone, validateAllowedHours, validateAutomationRules, validateStopFlags, withinAllowedHours, type AllowedHours, type AutomationRule, type AutomationStopFlags, type OperationGroup } from './automation-policy'
 
-export const taskChangeFields = ['title', 'notes', 'scheduledDate', 'dueDate', 'manualPoints'] as const
+export const taskChangeFields = ['title', 'notes', 'scheduledDate', 'dueDate', 'dueAt', 'manualPoints'] as const
 export type TaskChangeField = typeof taskChangeFields[number]
-export type TaskChangePatch = Partial<Pick<Task, 'title'|'notes'|'scheduledDate'|'dueDate'>> & { manualPoints?: number }
+/** A clock deadline: UTC instant plus the IANA zone it was set in; the task's dueDate must be its local date. */
+export type TaskDueClock = { at: string; timezone: string }
+export type TaskChangePatch = Partial<Pick<Task, 'title'|'notes'|'scheduledDate'|'dueDate'>> & { dueAt?: TaskDueClock|null; manualPoints?: number }
+/** Display text for a change value; a clock deadline shows its local date-time in its own zone. */
+export function taskChangeValueText(value: TaskChangeValues[keyof TaskChangeValues] | undefined): string {
+  if (value === null || value === undefined) return '未設定'
+  if (typeof value === 'object') return `${localDateAt(value.at, value.timezone)} ${localTimeAt(value.at, value.timezone)}（${value.timezone}）`
+  return String(value)
+}
 export type ChangePrincipal = { id: string; kind: 'human' | 'coach' | 'external-agent'; model?: string | null }
 export type SourceRevision = { id: string; revision: number }
 /** Constructed by the authenticated app/transport layer, never by a model payload. */
@@ -28,7 +37,7 @@ export type ChangePolicy = {
   stops?: AutomationStopFlags
 }
 export type TaskChangeRequest = { taskId: string; expectedRevision: number; patch: TaskChangePatch }
-export type TaskChangeValues = Pick<Task,'title'|'notes'|'scheduledDate'|'dueDate'> & { manualPoints: number|null }
+export type TaskChangeValues = Pick<Task,'title'|'notes'|'scheduledDate'|'dueDate'> & { dueAt: TaskDueClock|null; manualPoints: number|null }
 export type TaskChange = { taskId: string; baseRevision: number; title: string; before: TaskChangeValues; after: TaskChangeValues; fields: TaskChangeField[]; patch: TaskChangePatch; scoreBefore: ScoreInput; scoreAfter: ScoreInput; assessmentBefore: string; effectivePointsBefore: number|null; fieldOrigins:Partial<Record<TaskChangeField,TaskFieldOrigin>> }
 export type PreparedChangeSet = {
   version: 1; id: string; principal: ChangePrincipal; ownerId: string; datasetId: string
@@ -121,6 +130,7 @@ function validatePatch(value: unknown): asserts value is TaskChangePatch {
     try { validateDate(value[field] as string|null,'日付') } catch { fail('INVALID_INPUT','日付が不正です') }
   }
   if (Object.hasOwn(value,'manualPoints') && !integer(value.manualPoints,0,100000)) fail('INVALID_INPUT','本人指定ポイントは0〜100000の整数にしてください')
+  if (Object.hasOwn(value,'dueAt') && value.dueAt !== null && (!record(value.dueAt) || !exactKeys(value.dueAt,['at','timezone']) || typeof value.dueAt.at !== 'string' || typeof value.dueAt.timezone !== 'string')) fail('INVALID_INPUT','締め切り時刻はUTC時刻とタイムゾーンで指定してください')
 }
 function freeze<T>(value: T): T {
   if (value && typeof value === 'object') { for (const child of Object.values(value)) freeze(child); Object.freeze(value) }
@@ -146,7 +156,7 @@ function authorizeProposal(prepared: PreparedChangeSet, context: ChangeContext, 
   if (Date.parse(prepared.expiresAt) <= Date.now()) fail('EXPIRED','変更案の確認期限が切れました。差分を作り直してください')
   return policy
 }
-const requiresInstruction = (changes: TaskChange[]) => changes.some(change=>change.fields.some(field=>['title','dueDate','manualPoints'].includes(field)))
+const requiresInstruction = (changes: TaskChange[]) => changes.some(change=>change.fields.some(field=>['title','dueDate','dueAt','manualPoints'].includes(field)))
 const instructionRequests = (changes: TaskChange[]): TaskChangeRequest[] => changes.map(change=>({taskId:change.taskId,expectedRevision:change.baseRevision,patch:change.patch}))
 function verifyInstruction(prepared: PreparedChangeSet, context: ChangeContext, settings: Settings) {
   if (requiresInstruction(prepared.changes) || prepared.instruction) {
@@ -157,7 +167,7 @@ function verifyInstruction(prepared: PreparedChangeSet, context: ChangeContext, 
 async function ownedTaskContainer(task:Task,ownerId:string) {
   if (task.containerId) { const container=await db.containers.get(task.containerId); if(!container||container.deletedAt||container.ownerId!==ownerId) fail('UNAUTHORIZED','このタスクの所属領域を編集する権限がありません') }
 }
-function values(task:Task):TaskChangeValues { return {title:task.title,notes:task.notes,scheduledDate:task.scheduledDate,dueDate:task.dueDate,manualPoints:task.score.manualPoints} }
+function values(task:Task):TaskChangeValues { return {title:task.title,notes:task.notes,scheduledDate:task.scheduledDate,dueDate:task.dueDate,dueAt:task.dueAt&&task.dueTimezone?{at:task.dueAt,timezone:task.dueTimezone}:null,manualPoints:task.score.manualPoints} }
 function changedCharacters(before: string, after: string) {
   let prefix = 0, suffix = 0
   while (prefix < before.length && prefix < after.length && before[prefix] === after[prefix]) prefix++
@@ -172,7 +182,7 @@ function deniedOperation(policy: ChangePolicy, fields: TaskChangeField[]): Opera
 export function decideChangePolicy(prepared: PreparedChangeSet, policy: ChangePolicy, context: ChangeDecisionContext = {}): ChangePolicyDecision {
   validateChangePolicy(policy)
   const agent = prepared.principal.kind !== 'human', rules = automationRulesFor(policy), fields = prepared.changes.flatMap(change => change.fields), operations = operationsForFields(fields)
-  const protectedFields = [...new Set(prepared.changes.flatMap(change => change.fields.filter(field => field==='manualPoints'||field==='dueDate'||policy.locks[field] === 'locked_until_human_approval' || agent && policy.locks[field] === 'protect_from_autonomous')))]
+  const protectedFields = [...new Set(prepared.changes.flatMap(change => change.fields.filter(field => field==='manualPoints'||field==='dueDate'||field==='dueAt'||policy.locks[field] === 'locked_until_human_approval' || agent && policy.locks[field] === 'protect_from_autonomous')))]
   const rule = (operation: OperationGroup) => rules.find(item => item.operation === operation)!
   if (agent && !policy.aiChangesEnabled) return {status:'denied',reason:'AIによる変更は停止しています',protectedFields}
   const denied = agent ? operations.find(operation => rule(operation).mode === 'deny') : undefined
@@ -224,10 +234,12 @@ export async function prepareTaskChanges(requests: TaskChangeRequest[], context:
       if (!task || task.deletedAt) fail('UNAUTHORIZED','この領域の変更は許可されていません')
       await ownedTaskContainer(task,context.ownerId)
       if (task.revision!==request.expectedRevision) fail('CONFLICT','タスクが更新されています。新しい版で差分を作り直してください')
-      const before=values(task),after={...before,...request.patch,...(request.patch.title!==undefined?{title:request.patch.title.trim()}:{})}
+      const before=values(task),after:TaskChangeValues={...before,...request.patch,...(request.patch.title!==undefined?{title:request.patch.title.trim()}:{})}
+      // A clock deadline and a different deadline day never coexist; moving or clearing the day needs an explicit clock decision.
+      if(after.dueAt||before.dueAt&&!Object.hasOwn(request.patch,'dueAt')&&after.dueDate!==before.dueDate){try{validateTaskDue({dueDate:after.dueDate,dueAt:after.dueAt?.at??null,dueTimezone:after.dueAt?.timezone??null})}catch(error){fail('INVALID_INPUT',`${error instanceof Error?error.message:'締め切りが不正です'}。時刻付きの締め切りは日付と時刻を一緒に指定してください`)}}
       const scoreAfter=Object.hasOwn(request.patch,'manualPoints')?{...task.score,mode:'manual' as const,manualPoints:request.patch.manualPoints!}:structuredClone(task.score)
       validateTaskInput({...task,...after,score:scoreAfter})
-      const fields=taskChangeFields.filter(field=>Object.hasOwn(request.patch,field)&&(before[field]!==after[field]||field==='manualPoints'&&task.score.mode!=='manual'))
+      const fields=taskChangeFields.filter(field=>Object.hasOwn(request.patch,field)&&(canonicalJSON(before[field])!==canonicalJSON(after[field])||field==='manualPoints'&&task.score.mode!=='manual'))
       if (!fields.length) fail('NO_CHANGE','変更する内容がありません')
       if(fields.includes('manualPoints')) assertTripTaskScoreChangeAllowed(task.id,task.score,scoreAfter,await db.tripBundles.toArray())
       const fieldOrigins=Object.fromEntries(fields.map(field=>[field,context.principal.kind==='human'?'human':context.fieldOrigins?.[field]==='human_override'?'human_override':instruction?'user_instruction_via_agent':'agent_proposal']))
@@ -315,8 +327,8 @@ export async function applyChangeSet(value: PreparedChangeSet, approval: UIChang
         const agent=prepared.principal.kind!=='human'
         await db.assessments.add({id:assessmentId,taskId:task.id,score:structuredClone(change.scoreAfter),result,createdAt:at,origin:agent?'user_instruction_via_agent':'human',ruleVersion:'v1',...(agent?{instruction:{id:prepared.instruction!.id,digest:prepared.instruction!.digest,ownerId:prepared.ownerId,datasetId:prepared.datasetId,actorId:prepared.principal.id,actorKind:prepared.principal.kind as 'coach'|'external-agent',model:prepared.principal.model??null,taskRevision:task.revision,approvedBy:grant!.userId}}:{})})
       }
-      const {manualPoints:_manualPoints,...after}=change.after
-      await db.tasks.put({...task,...after,score:structuredClone(change.scoreAfter),assessmentId,effectivePoints:result.effective,firstScheduledDate:task.firstScheduledDate??task.scheduledDate??change.after.scheduledDate,revision:task.revision+1,updatedAt:at})
+      const {manualPoints:_manualPoints,dueAt,...after}=change.after
+      await db.tasks.put({...task,...after,...(dueAt||task.dueAt?{dueAt:dueAt?.at??null,dueTimezone:dueAt?.timezone??null}:{}),score:structuredClone(change.scoreAfter),assessmentId,effectivePoints:result.effective,firstScheduledDate:task.firstScheduledDate??task.scheduledDate??change.after.scheduledDate,revision:task.revision+1,updatedAt:at})
       await cancelCoachNotificationTarget(task.id,at)
       revisions.push({taskId:task.id,revision:task.revision+1})
       await db.audits.add({id:uid(),taskId:task.id,operation:'changeset.update',at,detail:JSON.stringify({changeSetId:prepared.id,digest:prepared.digest,principal:prepared.principal,decision:grant?'approved':'auto',operations:operationsForFields(change.fields),...(undoOf?{undoOf}:{}),origin:prepared.principal.kind==='human'?'human':prepared.instruction?'user_instruction_via_agent':'agent_proposal',approvedBy:grant?.userId??null,policyEpoch:policy.epoch,sourcePermissionRevision:policy.sourcePermissionRevision,sourceRevisions:prepared.sourceRevisions,instruction:prepared.instruction,before:change.before,after:change.after,scoreBefore:change.scoreBefore,scoreAfter:change.scoreAfter,assessmentBefore:task.assessmentId,assessmentAfter:assessmentId,fieldOrigins:change.fieldOrigins,reason:prepared.reason,undo:{expectedRevision:task.revision+1,patch:Object.fromEntries(change.fields.map(field=>[field,change.before[field]])),...(scoreChanged?{score:change.scoreBefore,requiresNewInstruction:true}:{})}})})
@@ -358,7 +370,7 @@ export async function prepareUndoFromAudit(auditId: string, context: ChangeConte
     if (!before||before.mode!=='manual'||!Number.isInteger(before.manualPoints)) fail('UNDO_UNAVAILABLE','元の点数方式へは自動で戻せません。タスク編集で本人が設定してください。完了記録と実績台帳は変わりません。')
     if (!instruction) fail('USER_INSTRUCTION_REQUIRED','点数の取り消しには本人の新しい指示が必要です。完了記録と実績台帳は変わりません。')
   }
-  if (!instruction&&fact.fields.some(field=>field==='title'||field==='dueDate'||field==='manualPoints')) fail('USER_INSTRUCTION_REQUIRED','タイトル・本当の締め切りの取り消しには本人の新しい指示が必要です。タスク編集で本人が直接戻すこともできます。')
+  if (!instruction&&fact.fields.some(field=>field==='title'||field==='dueDate'||field==='dueAt'||field==='manualPoints')) fail('USER_INSTRUCTION_REQUIRED','タイトル・本当の締め切りの取り消しには本人の新しい指示が必要です。タスク編集で本人が直接戻すこともできます。')
   const prepared=await prepareTaskChanges([{taskId:task.id,expectedRevision:task.revision,patch:structuredClone(undo.patch) as TaskChangePatch}],{...context,allowedFields:[...fact.fields]},`代理変更の取り消し（元の変更 ${fact.changeSetId.slice(0,8)}）`,instruction)
   undoLinks.set(prepared.id,auditId)
   return {status:'prepared',auditId,prepared}

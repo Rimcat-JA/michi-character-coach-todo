@@ -1,5 +1,5 @@
 import { createTasksAtomic, newTaskInput, type TaskInput } from './commands'
-import { addDays, emptyScore, uid, validateDate, validateTaskInput } from './domain'
+import { addDays, emptyScore, uid, validateDate, validateTaskDue, validateTaskInput } from './domain'
 import { db } from './db'
 import { contentDigest } from './canonical'
 import { changePolicyFor } from './change-set'
@@ -87,6 +87,7 @@ export async function prepareAssistedTasks(drafts: SourcedDraft[], origin: 'manu
   for (const { input } of drafts) {
     validateTaskInput(input)
     for (const value of [input.scheduledDate, input.dueDate]) validateDate(value, '日付')
+    validateTaskDue(input)
   }
   const settings = await db.settings.get('main')
   if (!settings) throw new Error('端末の設定が見つかりません')

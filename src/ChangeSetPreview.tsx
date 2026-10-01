@@ -1,8 +1,8 @@
 import { useState } from 'react'
 import { useLiveQuery } from 'dexie-react-hooks'
-import { applyChangeSet, approveChangeSetFromUI, autoChangeCountsToday, cancelChangeSet, decideChangePolicy, type ChangeContext, type ChangePolicy, type ChangeReceipt, type PreparedChangeSet, type TaskChangeField } from './change-set'
+import { applyChangeSet, approveChangeSetFromUI, autoChangeCountsToday, cancelChangeSet, decideChangePolicy, taskChangeValueText, type ChangeContext, type ChangePolicy, type ChangeReceipt, type PreparedChangeSet, type TaskChangeField } from './change-set'
 
-const labels: Record<TaskChangeField,string> = {title:'タイトル',notes:'メモ',scheduledDate:'予定日',dueDate:'本当の締め切り',manualPoints:'本人指定ポイント'}
+const labels: Record<TaskChangeField,string> = {title:'タイトル',notes:'メモ',scheduledDate:'予定日',dueDate:'本当の締め切り',dueAt:'締め切り時刻',manualPoints:'本人指定ポイント'}
 export default function ChangeSetPreview({ prepared, policy, actorContext, humanContext, onApplied, onCancel }: {
   prepared: PreparedChangeSet; policy: ChangePolicy; actorContext: ChangeContext; humanContext: ChangeContext
   onApplied: (receipt: ChangeReceipt)=>void; onCancel: ()=>void
@@ -42,7 +42,7 @@ export default function ChangeSetPreview({ prepared, policy, actorContext, human
     <h3>変更内容の確認</h3>
     <p>{prepared.changes.length}件のタスクを編集します。今回の操作者：{prepared.principal.kind==='human'?'本人':prepared.principal.kind==='coach'?'アプリ内コーチ':'外部エージェント'}{prepared.principal.model?`（${prepared.principal.model}）`:''}</p>
     <p className="muted">{prepared.reason}</p>
-    {prepared.changes.map(change=><article key={change.taskId} className="change-set-task"><h4>{change.title}</h4><small>確認する対象：版 {change.baseRevision}</small>{change.fields.map(field=><div className="change-set-comparison" key={field}><strong>{labels[field]}</strong><div><small>変更前</small><p style={{whiteSpace:'pre-wrap'}}>{field==='manualPoints'?`${change.effectivePointsBefore??'未設定'} pt · ${change.scoreBefore.mode}`:change.before[field]??'未設定'}</p></div><div><small>変更後</small><p style={{whiteSpace:'pre-wrap'}}>{field==='manualPoints'?`${change.after.manualPoints} pt · ${change.scoreAfter.mode}`:change.after[field]??'未設定'}</p></div>{change.fieldOrigins[field]==='human_override'&&<small>AI候補を本人が修正した値</small>}</div>)}</article>)}
+    {prepared.changes.map(change=><article key={change.taskId} className="change-set-task"><h4>{change.title}</h4><small>確認する対象：版 {change.baseRevision}</small>{change.fields.map(field=><div className="change-set-comparison" key={field}><strong>{labels[field]}</strong><div><small>変更前</small><p style={{whiteSpace:'pre-wrap'}}>{field==='manualPoints'?`${change.effectivePointsBefore??'未設定'} pt · ${change.scoreBefore.mode}`:taskChangeValueText(change.before[field])}</p></div><div><small>変更後</small><p style={{whiteSpace:'pre-wrap'}}>{field==='manualPoints'?`${change.after.manualPoints} pt · ${change.scoreAfter.mode}`:taskChangeValueText(change.after[field])}</p></div>{change.fieldOrigins[field]==='human_override'&&<small>AI候補を本人が修正した値</small>}</div>)}</article>)}
     {prepared.instruction&&<p>本人の指定値を対象と版へ結び付けて確認済みです。指示の確認日時：{new Date(prepared.instruction.issuedAt).toLocaleString('ja-JP')}。</p>}
     <p>点数を変更すると新しい評価履歴を追加します。既存の完了記録と実績台帳は保持します。</p>
     <p className="muted">確認期限：{new Date(prepared.expiresAt).toLocaleString('ja-JP')}。確認後にタスクや利用許可が変わった場合は、差分を作り直します。</p>

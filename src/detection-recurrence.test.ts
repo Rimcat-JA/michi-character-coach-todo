@@ -203,3 +203,38 @@ describe('検証済み周期候補の本人採用と共通カレンダー境界'
     expect((await db.calendarRules.get('main'))!.rules).toHaveLength(1)
   })
 })
+
+describe('検証済みの時刻付き期限を本人選択の締め切り時刻として採用する', () => {
+  async function deadlineRun() {
+    return run(await source('Karinさん、毎週月曜日17:00までに週報を提出してください。'), raw => {
+      raw.changes[0].due = { kind: 'datetime', value: '2026-10-05T17:00:00+09:00', timezone: 'Asia/Tokyo', raw: raw.changes[0].evidence[0].quote }
+      raw.changes[0].change_fields.push('due'); raw.changes[0].evidence[0].supports.push('due')
+    })
+  }
+  it('原文の17:00を締め切り時刻として本人が選んだ場合だけ周期の締め切りへ保存し、予定時刻は本人の選択のまま', async () => {
+    const value = await deadlineRun()
+    await expect(prepare(value, { dueOffsetDays: 0, dueTime: '18:00' })).rejects.toThrow('時刻付き期限')
+    await expect(prepare(value, { dueOffsetDays: 0 })).rejects.toThrow('時刻付き期限')
+    const prepared = await prepare(value, { dueOffsetDays: 0, dueTime: '17:00' })
+    await applyDetectionRecurrenceFromUI(value, value.candidates[0].id, prepared, prepared.digest, humanClick())
+    expect((await db.calendarRules.get('main'))!.rules[0]).toMatchObject({ trigger: { kind: 'weekly', weekdays: [1], time: '09:00' }, steps: [{ dueOffsetDays: 0, dueTime: '17:00' }] })
+    await applyCalendarProposalFromUI(await prepareCalendarGeneration('2026-10-01', '2026-10-12'), humanClick())
+    expect((await db.tasks.toArray()).map(task => [task.dueDate, task.dueAt, task.dueTimezone]).sort()).toEqual([['2026-10-05', '2026-10-05T08:00:00.000Z', 'Asia/Tokyo'], ['2026-10-12', '2026-10-12T08:00:00.000Z', 'Asia/Tokyo']])
+  })
+  it('原文にない締め切り時刻を検出周期へ追加しない', async () => {
+    const value = await run()
+    await expect(prepare(value, { dueOffsetDays: 0, dueTime: '17:00' })).rejects.toThrow('原文にない')
+  })
+  it('検証項目にない期限の原文は、資料にない時刻を締め切りとして採用しない', async () => {
+    // The source states no clock; the model adds a datetime due with its own raw text but leaves 'due' out of change_fields.
+    const value = await run(undefined, raw => { raw.changes[0].due = { kind: 'datetime', value: '2026-10-05T17:00:00+09:00', timezone: 'Asia/Tokyo', raw: '17:00まで' } })
+    await expect(prepare(value, { dueOffsetDays: 0, dueTime: '17:00' })).rejects.toThrow('原文')
+    await expect(prepare(value)).rejects.toThrow('原文')
+    expect((await db.calendarRules.get('main'))!.rules).toHaveLength(0); expect(await db.tasks.count()).toBe(0)
+  })
+  it.each(['Karinさん、毎月25日（土日祝の場合は前営業日）に振込を確認してください。', 'Karinさん、平日は毎日メールを確認してください。'])('振替・平日の条件付きの周期は手動設定へ回す: %s', async text => {
+    const value = await run(await source(text))
+    await expect(prepare(value)).rejects.toThrow()
+    expect((await db.calendarRules.get('main'))!.rules).toHaveLength(0)
+  })
+})
