@@ -1,7 +1,8 @@
 import { db } from './db'
 import { validateSnapshot, type Snapshot } from './backup-validation'
 import { tasksToCsv, tasksToIcs } from './data-export'
-import type { Settings, TaskAttachment } from './domain'
+import { uid, type Settings, type TaskAttachment } from './domain'
+import { effectiveNetworkPolicy, standaloneProfile } from './runtime-profile'
 import { clearChangeSetAuthority } from './change-set'
 import { verifySourceDigests } from './source-validation'
 import { clearDetectionAuthority } from './detection-run'
@@ -103,7 +104,10 @@ function stricterAuthority(restored: Settings, current: Settings): Settings {
   const stops = snap.stops || cur.stops ? { stops: { notifications: Boolean(snap.stops?.notifications || cur.stops?.notifications), routines: Boolean(snap.stops?.routines || cur.stops?.routines) } } : {}
   const policy = { ...snap, aiChangesEnabled: snap.aiChangesEnabled && cur.aiChangesEnabled, epoch, ...stops }
   validateChangePolicy(policy)
-  return { ...restored, aiEnabled: restored.aiEnabled && current.aiEnabled, changePolicy: policy }
+  // The owner's egress choice on this device is never widened or erased by a backup (offline_only wins); a device that has not chosen yet takes the backup's.
+  const mine = current.runtimeProfile === undefined ? null : effectiveNetworkPolicy(current).policy, back = restored.runtimeProfile === undefined ? null : effectiveNetworkPolicy(restored).policy
+  const runtimeProfile = mine ? standaloneProfile(restored.datasetId, mine === 'offline_only' || back === 'offline_only' ? 'offline_only' : 'explicit_online') : restored.runtimeProfile
+  return { ...restored, aiEnabled: restored.aiEnabled && current.aiEnabled, changePolicy: policy, ...(runtimeProfile ? { runtimeProfile } : {}) }
 }
 export async function restoreBackup(snapshot: Snapshot) {
   validateSnapshot(snapshot)
@@ -142,6 +146,7 @@ export async function restoreBackup(snapshot: Snapshot) {
     if (hash !== metadata.sha256) throw new Error('添付のハッシュが一致しません')
     return { ...metadata, blob: new Blob([bytes], { type: 'application/octet-stream' }) }
   }))
+  const bundlePolicy = snapshot.settings[0].runtimeProfile?.network_policy ?? null, restoredPolicy = prepared.settings[0].runtimeProfile?.network_policy ?? null
   await invalidateExternalConnection()
   clearCompletionReconfirmationAuthority()
   clearCalendarCSVImportAuthority()
@@ -149,6 +154,8 @@ export async function restoreBackup(snapshot: Snapshot) {
     await Promise.all([db.taskSourceEvidence.clear(), db.tasks.clear(), db.assessments.clear(), db.completions.clear(), db.ledger.clear(), db.routines.clear(), db.sessions.clear(), db.commands.clear(), db.audits.clear(), db.settings.clear(), db.containers.clear(), db.checklistItems.clear(), db.labelGroups.clear(), db.labelDefinitions.clear(), db.savedTemplates.clear(), db.taskNotes.clear(), db.taskComments.clear(), db.taskAttachments.clear(), db.taskDependencies.clear(), db.planningBuckets.clear(), db.timeBlocks.clear(), db.calendarEvents.clear(), db.rollovers.clear(), db.themeRules.clear(), db.smartLists.clear(), db.focusSelections.clear(), db.habits.clear(), db.habitLogs.clear(), db.goals.clear(), db.goalCheckIns.clear(), db.trackerDefinitions.clear(), db.trackerEntries.clear(), db.dayNotes.clear(), db.pomodoroCycles.clear(), db.reviewRecords.clear(), db.tripBundles.clear(), db.coachMemories.clear(), db.memoryTombstones.clear(), db.contextSources.clear(), db.contextSnapshots.clear(), db.sourceSummaries.clear(), db.sourceArtifacts.clear(), db.coachConversations.clear(), db.coachMessages.clear(), db.calendarRules.clear(), db.achievementPolicies.clear(), db.achievementEvidence.clear(), db.achievementExports.clear()])
     await db.tasks.bulkAdd(prepared.tasks); await db.assessments.bulkAdd(prepared.assessments); await db.completions.bulkAdd(prepared.completions); await db.ledger.bulkAdd(prepared.ledger)
     await db.routines.bulkAdd(prepared.routines); await db.sessions.bulkAdd(prepared.sessions); await db.commands.bulkAdd(prepared.commands); await db.audits.bulkAdd(prepared.audits); await db.settings.bulkAdd(prepared.settings); await db.containers.bulkAdd(prepared.containers ?? []); await db.checklistItems.bulkAdd(prepared.checklistItems ?? []); await db.labelGroups.bulkAdd(prepared.labelGroups ?? []); await db.labelDefinitions.bulkAdd(prepared.labelDefinitions ?? []); await db.savedTemplates.bulkAdd(prepared.savedTemplates ?? []); await db.taskNotes.bulkAdd(prepared.taskNotes ?? []); await db.taskComments.bulkAdd(prepared.taskComments ?? []); await db.taskAttachments.bulkAdd(attachments); await db.taskDependencies.bulkAdd(prepared.taskDependencies ?? []); await db.planningBuckets.bulkAdd(prepared.planningBuckets ?? []); await db.timeBlocks.bulkAdd(prepared.timeBlocks ?? []); await db.calendarEvents.bulkAdd(prepared.calendarEvents ?? []); await db.rollovers.bulkAdd(prepared.rollovers ?? []); await db.themeRules.bulkAdd(prepared.themeRules ?? []); await db.smartLists.bulkAdd(prepared.smartLists ?? []); await db.focusSelections.bulkAdd(prepared.focusSelections ?? []); await db.habits.bulkAdd(prepared.habits ?? []); await db.habitLogs.bulkAdd(prepared.habitLogs ?? []); await db.goals.bulkAdd(prepared.goals ?? []); await db.goalCheckIns.bulkAdd(prepared.goalCheckIns ?? []); await db.trackerDefinitions.bulkAdd(prepared.trackerDefinitions ?? []); await db.trackerEntries.bulkAdd(prepared.trackerEntries ?? []); await db.dayNotes.bulkAdd(prepared.dayNotes ?? []); await db.pomodoroCycles.bulkAdd(prepared.pomodoroCycles ?? []); await db.reviewRecords.bulkAdd(prepared.reviewRecords ?? []); await db.tripBundles.bulkAdd(prepared.tripBundles ?? []); await db.coachMemories.bulkAdd(prepared.coachMemories ?? []); await db.memoryTombstones.bulkAdd(prepared.memoryTombstones ?? []); await db.contextSources.bulkAdd(prepared.contextSources ?? []); await db.contextSnapshots.bulkAdd(prepared.contextSnapshots ?? []); await db.sourceSummaries.bulkAdd(prepared.sourceSummaries ?? []); await db.sourceArtifacts.bulkAdd(prepared.sourceArtifacts ?? []); await db.coachConversations.bulkAdd(prepared.coachConversations ?? []); await db.coachMessages.bulkAdd(prepared.coachMessages ?? []); await db.calendarRules.bulkAdd(prepared.calendarRules ?? []); await db.achievementPolicies.bulkAdd(prepared.achievementPolicies ?? []); await db.achievementEvidence.bulkAdd(prepared.achievementEvidence ?? []); await db.achievementExports.bulkAdd(prepared.achievementExports ?? []); await db.taskSourceEvidence.bulkAdd(prepared.taskSourceEvidence ?? [])
+    // A restore that kept this device's stricter egress choice over the bundle's leaves a trace, since the owner's own audit was replaced.
+    if (restoredPolicy !== bundlePolicy) await db.audits.add({ id: uid(), taskId: null, operation: 'runtime.network_policy', at, detail: JSON.stringify({ kind: 'standalone', authority: 'local', network_policy: restoredPolicy, previous: bundlePolicy, reason: 'restore' }) })
     // Memories, notifications and pending turns derived from these sources are purged by the same rules as a deletion, in this transaction.
     for (const source of (prepared.contextSources ?? []).filter(row => touched.includes(row.id))) await purgeRestoredSourceDerived(source, at)
   })

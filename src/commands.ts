@@ -229,7 +229,7 @@ export async function createRoutine(input: Omit<Routine, 'id' | 'revision' | 'cr
     return id
   })
 }
-function matchesRoutine(r: Routine, date: string) {
+export function matchesRoutine(r: Routine, date: string) {
   if (date < r.startDate || (r.endDate && date > r.endDate) || r.excludedDates?.includes(date)) return false
   const start = new Date(`${r.startDate}T12:00:00`), current = new Date(`${date}T12:00:00`)
   const days = Math.round((current.getTime() - start.getTime()) / 86400000)

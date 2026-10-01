@@ -29,7 +29,7 @@ function fakeGateway() {
     const receipt = await db.commands.get(`achievement:publish:${request.exportId}:${request.attemptId}`)
     expect(receipt).toMatchObject({ hash: request.approvalDigest, resultId: request.exportId })
   })
-  const api: GitHubAchievementsGateway = { status: vi.fn(async () => structuredClone(status)), inspectConfiguration: async () => { throw new Error('fake only') }, configure: async () => structuredClone(status), publish, recordReceipt, reconcile: vi.fn(async () => reconcileResult), disconnect: async () => ({ ...status, state: 'integration_not_configured', configurationId: null, repository: null }), invalidate: vi.fn(async () => undefined) }
+  const api: GitHubAchievementsGateway = { status: vi.fn(async () => structuredClone(status)), storedStatus: vi.fn(async () => ({ ...structuredClone(status), state: 'awaiting_connection' as const })), inspectConfiguration: async () => { throw new Error('fake only') }, configure: async () => structuredClone(status), publish, recordReceipt, reconcile: vi.fn(async () => reconcileResult), disconnect: async () => ({ ...status, state: 'integration_not_configured', configurationId: null, repository: null }), invalidate: vi.fn(async () => undefined) }
   return { api, publish, recordReceipt, setStatus(value: GitHubGatewayStatus) { status = value }, setPublish(value: GitHubPublishResult | 'throw') { publishResult = value }, setReconcile(value: GitHubPublishResult) { reconcileResult = value } }
 }
 async function fixture(points: number | null = 40) {

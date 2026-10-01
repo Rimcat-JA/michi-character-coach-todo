@@ -21,6 +21,8 @@ export type GitHubPublishResult = { status: 'published' | 'pr_pending'; receipt:
 export type GitHubConfigurationInspection = { reference: string; digest: string; target: GitHubRepositoryTarget }
 export type GitHubAchievementsGateway = {
   status(): Promise<GitHubGatewayStatus>
+  /** Stored configuration only; makes no GitHub request. */
+  storedStatus(): Promise<GitHubGatewayStatus>
   inspectConfiguration(input: { token: string; owner: string; name: string; branch: string; visibility: 'public' | 'private' }): Promise<GitHubConfigurationInspection>
   configure(input: { reference: string; digest: string }): Promise<GitHubGatewayStatus>
   publish(input: GitHubPublishRequest): Promise<GitHubPublishResult>
