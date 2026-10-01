@@ -1,4 +1,4 @@
-import type { EntityTable } from 'dexie'
+import Dexie, { type EntityTable } from 'dexie'
 import { db } from './db'
 import { addTask, ConflictError, newTaskInput } from './commands'
 import { canonicalJSON, contentDigest } from './canonical'
@@ -116,10 +116,11 @@ function assertProposal(proposal: Proposal) {
 function eventFrom(spec: ResolvedCalendarSpec, id: string, ownerId: string, at: string): CalendarEvent { return { id, ownerId, title: spec.title, kind: spec.eventKind!, startAt: spec.startAt!, endAt: spec.endAt!, timezone: spec.timezone, linkedTaskId: null, createdAt: at } }
 export async function applyCalendarProposalFromUI(input: Proposal, event: Event): Promise<string> {
   humanEvent(event)
-  const proposal = structuredClone(input), key = `calendar:${proposal.id}`, hash = await contentDigest(proposal)
+  // waitFor keeps an enclosing transaction (the K12 file entrance) alive across the digest.
+  const proposal = structuredClone(input), key = `calendar:${proposal.id}`, hash = await Dexie.waitFor(contentDigest(proposal))
   assertProposal(proposal)
   const { digest, ...unsigned } = proposal
-  if (await contentDigest(unsigned) !== digest) throw new Error('確認後に案が変わりました')
+  if (await Dexie.waitFor(contentDigest(unsigned)) !== digest) throw new Error('確認後に案が変わりました')
   const calendarTable = table()
   const moves: CalendarMove[] = []
   const applied = await db.transaction('rw', [calendarTable, db.settings, db.tasks, db.calendarEvents, db.assessments, db.completions, db.sessions, db.tripBundles, db.audits, db.commands, db.containers, db.labelGroups, db.labelDefinitions, db.contextSources, db.contextSnapshots, db.sourceArtifacts], async () => {

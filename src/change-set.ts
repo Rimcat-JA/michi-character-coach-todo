@@ -282,7 +282,9 @@ export async function approveChangeSetFromUI(value: PreparedChangeSet, context: 
   return grant
 }
 
-export async function applyChangeSet(value: PreparedChangeSet, approval: UIChangeApproval | null, context: ChangeContext, requestKey: string): Promise<ChangeReceipt> {
+/** Audit-only facts supplied by the command bus (entrance/basis/commandId); never authority. */
+export type ChangeTrace = { entrance: string; basis: string; commandId: string; label?: string | null }
+export async function applyChangeSet(value: PreparedChangeSet, approval: UIChangeApproval | null, context: ChangeContext, requestKey: string, trace: ChangeTrace | null = null): Promise<ChangeReceipt> {
   const enclosing=Dexie.currentTransaction
   context=freeze(structuredClone(context))
   validateContext(context)
@@ -332,7 +334,7 @@ export async function applyChangeSet(value: PreparedChangeSet, approval: UIChang
       await db.tasks.put({...task,...after,...(dueAt||task.dueAt?{dueAt:dueAt?.at??null,dueTimezone:dueAt?.timezone??null}:{}),score:structuredClone(change.scoreAfter),assessmentId,effectivePoints:result.effective,firstScheduledDate:task.firstScheduledDate??task.scheduledDate??change.after.scheduledDate,revision:task.revision+1,updatedAt:at})
       await cancelCoachNotificationTarget(task.id,at)
       revisions.push({taskId:task.id,revision:task.revision+1})
-      await db.audits.add({id:uid(),taskId:task.id,operation:'changeset.update',at,detail:JSON.stringify({changeSetId:prepared.id,digest:prepared.digest,principal:prepared.principal,decision:grant?'approved':'auto',operations:operationsForFields(change.fields),...(undoLink?{undoOf:typeof undoLink==='string'?undoLink:undoLink[task.id]}:{}),origin:prepared.principal.kind==='human'?'human':prepared.instruction?'user_instruction_via_agent':'agent_proposal',approvedBy:grant?.userId??null,policyEpoch:policy.epoch,sourcePermissionRevision:policy.sourcePermissionRevision,sourceRevisions:prepared.sourceRevisions,instruction:prepared.instruction,before:change.before,after:change.after,scoreBefore:change.scoreBefore,scoreAfter:change.scoreAfter,assessmentBefore:task.assessmentId,assessmentAfter:assessmentId,fieldOrigins:change.fieldOrigins,reason:prepared.reason,undo:{expectedRevision:task.revision+1,patch:Object.fromEntries(change.fields.map(field=>[field,change.before[field]])),...(scoreChanged?{score:change.scoreBefore,requiresNewInstruction:true}:{})}})})
+      await db.audits.add({id:uid(),taskId:task.id,operation:'changeset.update',at,detail:JSON.stringify({changeSetId:prepared.id,digest:prepared.digest,principal:prepared.principal,decision:grant?'approved':'auto',operations:operationsForFields(change.fields),...(undoLink?{undoOf:typeof undoLink==='string'?undoLink:undoLink[task.id]}:{}),...(trace?{entrance:String(trace.entrance).slice(0,40),basis:String(trace.basis).slice(0,40),commandId:String(trace.commandId).slice(0,200),...(trace.label?{label:String(trace.label).slice(0,100)}:{})}:{}),origin:prepared.principal.kind==='human'?'human':prepared.instruction?'user_instruction_via_agent':'agent_proposal',approvedBy:grant?.userId??null,policyEpoch:policy.epoch,sourcePermissionRevision:policy.sourcePermissionRevision,sourceRevisions:prepared.sourceRevisions,instruction:prepared.instruction,before:change.before,after:change.after,scoreBefore:change.scoreBefore,scoreAfter:change.scoreAfter,assessmentBefore:task.assessmentId,assessmentAfter:assessmentId,fieldOrigins:change.fieldOrigins,reason:prepared.reason,undo:{expectedRevision:task.revision+1,patch:Object.fromEntries(change.fields.map(field=>[field,change.before[field]])),...(scoreChanged?{score:change.scoreBefore,requiresNewInstruction:true}:{})}})})
     }
     const result:ChangeReceipt={changeSetId:prepared.id,digest:prepared.digest,taskIds:prepared.changes.map(change=>change.taskId),revisions,appliedAt:at}
     const resultId=JSON.stringify(result)

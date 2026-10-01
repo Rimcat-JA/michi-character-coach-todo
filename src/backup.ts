@@ -4,6 +4,8 @@ import { tasksToCsv, tasksToIcs } from './data-export'
 import { uid, type Settings, type TaskAttachment } from './domain'
 import { effectiveNetworkPolicy, standaloneProfile } from './runtime-profile'
 import { clearChangeSetAuthority } from './change-set'
+import { clearCommandAuthority } from './command-bus'
+import { clearTaskSplitAuthority } from './task-split-change'
 import { verifySourceDigests } from './source-validation'
 import { clearDetectionAuthority } from './detection-run'
 import { clearCoachTurnAuthority } from './chat-history'
@@ -164,6 +166,8 @@ export async function restoreBackup(snapshot: Snapshot) {
   })
 
   clearChangeSetAuthority()
+  clearCommandAuthority()
+  clearTaskSplitAuthority()
   clearDetectionAuthority()
   clearCoachTurnAuthority()
   clearCalendarRulesAuthority()

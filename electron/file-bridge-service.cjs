@@ -1,7 +1,7 @@
 const fs = require('node:fs/promises')
 const path = require('node:path')
 const crypto = require('node:crypto')
-const { createLocalFileBridge, canonicalFileJSON, validateFileBridgeRegistration } = require('./local-file-bridge.cjs')
+const { createLocalFileBridge, canonicalFileJSON, validateFileBridgeRegistration, FILE_BRIDGE_REJECTED_STATES } = require('./local-file-bridge.cjs')
 
 const uuid = value => typeof value === 'string' && /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i.test(value)
 const digest = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value)
@@ -26,7 +26,9 @@ function n09Automatic(p, fields, shift) {
 }
 
 /** Coordinates the durable file claim BEFORE the renderer's atomic DB write. */
-async function createFileBridgeService({ agentDirectory, journalDirectory, signingKey, getSettings, getTasks, getReceipt, loadConfiguration, saveConfiguration, verifyNativeProof, leaseMilliseconds = 60000 }) {
+const rejection = value => exact(value, ['state', 'code']) && FILE_BRIDGE_REJECTED_STATES.includes(value.state) && typeof value.code === 'string' && /^[A-Z0-9_]{1,60}$/.test(value.code)
+
+async function createFileBridgeService({ agentDirectory, journalDirectory, signingKey, getSettings, getTasks, getReceipt, getRules = async () => [], loadConfiguration, saveConfiguration, verifyNativeProof, leaseMilliseconds = 60000 }) {
   let connection = null, initializing = null
   const entries = new Map(), leases = new Map(), proofs = new WeakSet()
   await fs.mkdir(agentDirectory, { recursive: true }); await fs.mkdir(journalDirectory, { recursive: true })
@@ -78,14 +80,16 @@ async function createFileBridgeService({ agentDirectory, journalDirectory, signi
     if (!context.enabled || context.ownerId !== current.registration.owner_id || context.datasetId !== current.registration.dataset_id || context.policyEpoch !== current.registration.policy_epoch || context.sourcePermissionRevision !== current.registration.source_permission_revision || Date.parse(current.registration.client.grant.expires_at) <= Date.now()) { await invalidate(); return status() }
     const results = [...new Map(current.results.map(result => [result.command_id, result])).values()].slice(-100)
     const automatic = current.registration.client.grant.mutation_mode === 'auto_within_bounds'
-    return { version: 1, available: true, connected: true, root: current.root, registration: structuredClone(current.registration), snapshot: current.snapshot, results, notice: automatic ? '手動ポイント・期限・完了・周期は変更できません。本人が許可した範囲内のメモ・予定日変更だけを受信確認時に自動適用し、それ以外は本人承認を待ちます。' : '手動ポイント・期限・完了・周期は変更できません。登録済み範囲内の変更も本人承認が必要です。' }
+    return { version: 1, available: true, connected: true, root: current.root, registration: structuredClone(current.registration), snapshot: current.snapshot, results, notice: automatic ? '完了・取消・削除・実績訂正・権限は変更できません。本人が許可した範囲内のメモ・予定日変更だけを受信確認時に自動適用し、期限・ポイント・分割・周期を含むそれ以外は本人承認を待ちます。' : '完了・取消・削除・実績訂正・権限は変更できません。期限・ポイント・分割・周期を許可した場合も、毎回アプリで本人が値を確認して承認します。' }
   }
   async function configure(request, nativeProof) {
     if (!await verifyNativeProof('configure', '', nativeProof)) fail('HUMAN_APPROVAL_REQUIRED')
     const configKeys = ['ownerId', 'datasetId', 'policyEpoch', 'sourcePermissionRevision', 'intendedHost', 'taskIds', 'fields', 'lifetimeHours']
-    if (!exact(request, configKeys) && !exact(request, [...configKeys, 'automation']) || !Number.isInteger(request.lifetimeHours) || request.lifetimeHours < 1 || request.lifetimeHours > 168) fail('CONFIG_INVALID')
+    if (!request || typeof request !== 'object' || Array.isArray(request) || configKeys.some(key => !Object.hasOwn(request, key)) || Object.keys(request).some(key => !configKeys.includes(key) && !['automation', 'allowSplit', 'ruleIds'].includes(key)) || !Number.isInteger(request.lifetimeHours) || request.lifetimeHours < 1 || request.lifetimeHours > 168) fail('CONFIG_INVALID')
     const automation = request.automation ?? null
     if (automation !== null && (!exact(automation, ['maxScheduleShiftDays', 'maxOperationsPerDay']) || !Number.isInteger(automation.maxScheduleShiftDays) || automation.maxScheduleShiftDays < 0 || automation.maxScheduleShiftDays > 7 || !Number.isInteger(automation.maxOperationsPerDay) || automation.maxOperationsPerDay < 1 || automation.maxOperationsPerDay > 20 || !Array.isArray(request.fields) || !request.fields.length || request.fields.some(field => !['notes', 'scheduled_date'].includes(field)))) fail('AUTOMATION_SCOPE')
+    const allowSplit = request.allowSplit === true, ruleIds = request.ruleIds ?? []
+    if (Object.hasOwn(request, 'allowSplit') && typeof request.allowSplit !== 'boolean' || !Array.isArray(ruleIds) || ruleIds.length > 50 || ruleIds.some(id => !uuid(id)) || new Set(ruleIds).size !== ruleIds.length) fail('CONFIG_INVALID')
     await ensure()
     const settings = await getSettings(), current = policy(settings)
     if (request.ownerId !== settings.profileId || request.datasetId !== settings.datasetId || request.policyEpoch !== current.epoch || request.sourcePermissionRevision !== current.sourcePermissionRevision || !settings.aiEnabled || !current.aiChangesEnabled) fail('AUTHORITY_CHANGED')
@@ -93,7 +97,9 @@ async function createFileBridgeService({ agentDirectory, journalDirectory, signi
     if (!Array.isArray(request.taskIds) || request.taskIds.length > 100 || request.taskIds.some(id => !uuid(id)) || new Set(request.taskIds).size !== request.taskIds.length) fail('TASK_SCOPE')
     const tasks = await getTasks(request.taskIds)
     if (tasks.length !== request.taskIds.length || tasks.some(task => task.deletedAt)) fail('TASK_SCOPE')
-    const id = crypto.randomUUID(), registration = { schema_version: '1', owner_id: request.ownerId, dataset_id: request.datasetId, policy_epoch: current.epoch, source_permission_revision: current.sourcePermissionRevision, task_ids: [...request.taskIds], client: { id, dataset_id: request.datasetId, intended_host: request.intendedHost, transport: 'stdio', status: 'active', revision: 1, grant_epoch: 1, grant: { keys: ['tasks:read', 'tasks:prepare', 'changes:submit', 'commands:read'], project_ids: [], fields: [...request.fields], mutation_mode: automation ? 'auto_within_bounds' : 'require_approval', max_operations_per_day: 20, max_schedule_shift_days: 7, max_point_delta: 0, allow_external_context: false, allow_handoffs: false, expires_at: new Date(Date.now() + request.lifetimeHours * 3600000).toISOString(), ...(automation ? { automation: { max_schedule_shift_days: automation.maxScheduleShiftDays, max_operations_per_day: automation.maxOperationsPerDay } } : {}) } } }
+    if (ruleIds.length && (await getRules(ruleIds)).length !== ruleIds.length) fail('RULE_SCOPE')
+    const keys = ['tasks:read', 'tasks:prepare', 'changes:submit', 'commands:read', ...(allowSplit ? ['tasks:split'] : []), ...(ruleIds.length ? ['routines:prepare'] : [])]
+    const id = crypto.randomUUID(), registration = { schema_version: '1', owner_id: request.ownerId, dataset_id: request.datasetId, policy_epoch: current.epoch, source_permission_revision: current.sourcePermissionRevision, task_ids: [...request.taskIds], ...(ruleIds.length ? { rule_ids: [...ruleIds] } : {}), client: { id, dataset_id: request.datasetId, intended_host: request.intendedHost, transport: 'stdio', status: 'active', revision: 1, grant_epoch: 1, grant: { keys, project_ids: [], fields: [...request.fields], mutation_mode: automation ? 'auto_within_bounds' : 'require_approval', max_operations_per_day: 20, max_schedule_shift_days: 7, max_point_delta: 0, allow_external_context: false, allow_handoffs: false, expires_at: new Date(Date.now() + request.lifetimeHours * 3600000).toISOString(), ...(automation ? { automation: { max_schedule_shift_days: automation.maxScheduleShiftDays, max_operations_per_day: automation.maxOperationsPerDay } } : {}) } } }
     validateFileBridgeRegistration(registration)
     await invalidate()
     const configuration = { root: path.join(agentDirectory, id), registration }
@@ -101,7 +107,7 @@ async function createFileBridgeService({ agentDirectory, journalDirectory, signi
     return status()
   }
   async function exportSnapshot(request) {
-    if (!exact(request, ['tasks']) || !Array.isArray(request.tasks)) fail('TASK_SCOPE')
+    if (!(exact(request, ['tasks']) || exact(request, ['tasks', 'rules'])) || !Array.isArray(request.tasks) || Object.hasOwn(request, 'rules') && !Array.isArray(request.rules)) fail('TASK_SCOPE')
     const current = await ensure(); if (!current) fail('NOT_CONNECTED')
     const ids = request.tasks.map(task => task?.id)
     if (ids.length > 100 || ids.some(id => !current.registration.task_ids.includes(id)) || new Set(ids).size !== ids.length) fail('TASK_SCOPE')
@@ -109,7 +115,12 @@ async function createFileBridgeService({ agentDirectory, journalDirectory, signi
     if (tasks.length !== ids.length || tasks.some(task => task.deletedAt)) fail('TASK_SCOPE')
     // The renderer may withhold source-derived lines from notes, but can never add text the DB does not hold.
     const requested = new Map(request.tasks.map(task => [task.id, task]))
-    current.snapshot = await current.bridge.exportSnapshot(tasks.map(task => { const wanted = requested.get(task.id); if (!wanted || !Object.hasOwn(wanted, 'notes')) return task; const notes = redactedNotes(task.notes, wanted.notes); if (notes === null) fail('TASK_SCOPE'); return { ...task, notes } }))
+    // Rule titles/triggers come from the renderer's current definition; ids and revisions must match the DB and the grant.
+    const rules = request.rules ?? [], ruleIds = rules.map(rule => rule?.id)
+    if (ruleIds.some(id => !current.registration.rule_ids?.includes(id))) fail('RULE_SCOPE')
+    const stored = ruleIds.length ? await getRules(ruleIds) : []
+    if (stored.length !== rules.length || rules.some(rule => stored.find(item => item.id === rule.id)?.revision !== rule.revision)) fail('RULE_SCOPE')
+    current.snapshot = await current.bridge.exportSnapshot(tasks.map(task => { const wanted = requested.get(task.id); if (!wanted || !Object.hasOwn(wanted, 'notes')) return task; const notes = redactedNotes(task.notes, wanted.notes); if (notes === null) fail('TASK_SCOPE'); return { ...task, notes } }), rules)
     return status()
   }
   async function scanInbox() {
@@ -177,11 +188,21 @@ async function createFileBridgeService({ agentDirectory, journalDirectory, signi
     return lease.work
   }
   async function cancelApplication(request) {
-    if (!exact(request, ['leaseId', 'reference'])) fail('LEASE_INVALID')
+    if (!(exact(request, ['leaseId', 'reference']) || exact(request, ['leaseId', 'reference', 'outcome']) && rejection(request.outcome))) fail('LEASE_INVALID')
     const lease = leases.get(request.leaseId); if (!lease || lease.binding.reference !== request.reference) fail('LEASE_INVALID')
     const actual = receiptFor(lease, await getReceipt(receiptKey(lease.prepared.command.command_id)))
-    if (actual) lease.committed.resolve(actual.file); else lease.committed.reject(new Error('APPLICATION_CANCELLED'))
+    // A stated rejection is signed only while the DB holds no receipt for this command.
+    if (actual) lease.committed.resolve(actual.file); else lease.committed.reject(Object.assign(new Error('APPLICATION_CANCELLED'), request.outcome ? { outcome: { ...request.outcome } } : {}))
     return lease.work
+  }
+  /** Records why a scanned command was not applied (denied/conflict/expired/rejected). It cannot apply anything. */
+  async function recordRejected(request) {
+    if (!exact(request, ['reference', 'state', 'code']) || !rejection({ state: request.state, code: request.code })) fail('REJECTION_INVALID')
+    const entry = entries.get(request.reference), current = await ensure()
+    if (!entry || !current || entry.bridge !== current.bridge || [...leases.values()].some(value => value.prepared.command.command_id === entry.prepared.command.command_id && !value.settled)) fail('REJECTION_INVALID')
+    const result = await entry.bridge.reject(entry.prepared, request.state, request.code)
+    entries.delete(request.reference); current.results.push(result)
+    return result
   }
   async function invalidate() {
     if (initializing) await initializing.catch(() => null)
@@ -202,7 +223,7 @@ async function createFileBridgeService({ agentDirectory, journalDirectory, signi
     if (connection && request.clientId !== connection.registration.client.id) fail('AUTHORITY_CHANGED')
     await invalidate(); return status()
   }
-  return Object.freeze({ status, configure, disconnect, exportSnapshot, scanInbox, authorizeApplication, authorizeAutomaticApplication, recordApplied, cancelApplication, invalidate })
+  return Object.freeze({ status, configure, disconnect, exportSnapshot, scanInbox, authorizeApplication, authorizeAutomaticApplication, recordApplied, cancelApplication, recordRejected, invalidate })
 }
 
 module.exports = { createFileBridgeService }

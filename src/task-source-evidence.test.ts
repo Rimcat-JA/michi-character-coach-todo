@@ -343,7 +343,7 @@ describe('K11 旧形式メモの受領記録・監査の複写', () => {
     const completions = await db.completions.toArray(), ledger = await db.ledger.toArray(), receipts = (await db.commands.toArray()).filter(row => row.hash.includes(reason))
     expect(completions[0]).toMatchObject({ originalPoints: 40, netPoints: 35 }); expect(receipts).toHaveLength(1)
     expect(await migrateLegacyDetectionNotes()).toMatchObject({ migrated: 1 })
-    expect((await db.audits.toArray()).find(row => row.operation === 'correct_points')!.detail).toBe(`35pt: ${reason}`)
+    expect(JSON.parse((await db.audits.toArray()).find(row => row.operation === 'correct_points')!.detail)).toMatchObject({ summary: `35pt: ${reason}`, extra: { reason } })
     expect((await db.commands.toArray()).filter(row => row.hash.includes(reason))).toEqual(receipts)
     expect(await db.completions.toArray()).toEqual(completions); expect(await db.ledger.toArray()).toEqual(ledger)
     const notes = (await db.tasks.get(taskId))!.notes

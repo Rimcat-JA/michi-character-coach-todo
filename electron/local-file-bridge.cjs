@@ -23,15 +23,24 @@ const digest = value => crypto.createHash('sha256').update(canonical(value)).dig
 const bytesDigest = value => crypto.createHash('sha256').update(value).digest('hex')
 const samePath = (left, right) => process.platform === 'win32' ? left.toLowerCase() === right.toLowerCase() : left === right
 function freeze(value) { if (value && typeof value === 'object') { Object.freeze(value); Object.values(value).forEach(freeze) }; return value }
+const GRANT_KEYS = ['tasks:read', 'tasks:prepare', 'changes:submit', 'commands:read', 'tasks:split', 'routines:prepare']
+const FIELDS = ['title', 'notes', 'scheduled_date', 'due_date', 'manual_points']
+const CREATE_FIELDS = ['title', 'notes', 'scheduled_date']
+const TYPES = ['task.create', 'task.update', 'task.split', 'routine.change']
+/** Terminal non-applied states carry the same stable code the app shows (K12 outcome parity). */
+const REJECTED_STATES = ['denied', 'conflict', 'expired', 'rejected']
+const RESULT_STATES = ['applied', 'failed', 'unknown', ...REJECTED_STATES]
+const resultCode = value => typeof value === 'string' && /^[A-Z0-9_]{1,60}$/.test(value)
 function date(value) { if (value === null) return true; if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false; const parsed = new Date(`${value}T00:00:00Z`); return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value }
 function validateRegistration(registration) {
-  if (!exact(registration, ['schema_version', 'owner_id', 'dataset_id', 'policy_epoch', 'source_permission_revision', 'task_ids', 'client']) || registration.schema_version !== '1' || !string(registration.owner_id) || !uuid(registration.dataset_id) || !integer(registration.policy_epoch) || !integer(registration.source_permission_revision) || !Array.isArray(registration.task_ids) || registration.task_ids.length > 100 || registration.task_ids.some(id => !uuid(id)) || new Set(registration.task_ids).size !== registration.task_ids.length) fail('REGISTRATION_INVALID')
+  const base = ['schema_version', 'owner_id', 'dataset_id', 'policy_epoch', 'source_permission_revision', 'task_ids', 'client']
+  if (!(exact(registration, base) || exact(registration, [...base, 'rule_ids'])) || Object.hasOwn(registration, 'rule_ids') && (!Array.isArray(registration.rule_ids) || registration.rule_ids.length > 50 || registration.rule_ids.some(id => !uuid(id)) || new Set(registration.rule_ids).size !== registration.rule_ids.length) || registration.schema_version !== '1' || !string(registration.owner_id) || !uuid(registration.dataset_id) || !integer(registration.policy_epoch) || !integer(registration.source_permission_revision) || !Array.isArray(registration.task_ids) || registration.task_ids.length > 100 || registration.task_ids.some(id => !uuid(id)) || new Set(registration.task_ids).size !== registration.task_ids.length) fail('REGISTRATION_INVALID')
   const client = registration.client
   if (!exact(client, ['id', 'dataset_id', 'intended_host', 'transport', 'status', 'revision', 'grant_epoch', 'grant']) || !uuid(client.id) || client.dataset_id !== registration.dataset_id || !['chatgpt', 'claude', 'codex', 'claude_code', 'other'].includes(client.intended_host) || client.transport !== 'stdio' || client.status !== 'active' || !integer(client.revision, 1) || !integer(client.grant_epoch, 1)) fail('REGISTRATION_INVALID')
   const grant = client.grant
-  const grantKeys = ['keys', 'project_ids', 'fields', 'mutation_mode', 'max_operations_per_day', 'max_schedule_shift_days', 'max_point_delta', 'allow_external_context', 'allow_handoffs', 'expires_at']
-  if (!exact(grant, grantKeys) && !exact(grant, [...grantKeys, 'automation'])) fail('REGISTRATION_INVALID')
-  if (!Array.isArray(grant.keys) || grant.keys.some(key => !['tasks:read', 'tasks:prepare', 'changes:submit', 'commands:read'].includes(key)) || new Set(grant.keys).size !== grant.keys.length || !Array.isArray(grant.project_ids) || grant.project_ids.length > 100 || grant.project_ids.some(id => !uuid(id)) || new Set(grant.project_ids).size !== grant.project_ids.length || !Array.isArray(grant.fields) || grant.fields.some(field => !['title', 'notes', 'scheduled_date'].includes(field)) || new Set(grant.fields).size !== grant.fields.length || !['require_approval', 'auto_within_bounds'].includes(grant.mutation_mode) || (grant.mutation_mode === 'auto_within_bounds') !== Object.hasOwn(grant, 'automation') || !integer(grant.max_operations_per_day) || grant.max_operations_per_day > 100 || !integer(grant.max_schedule_shift_days) || grant.max_schedule_shift_days > 31 || grant.max_point_delta !== 0 || grant.allow_external_context !== false || grant.allow_handoffs !== false || !timestamp(grant.expires_at)) fail('REGISTRATION_INVALID', 'このローカル接続は本人承認によるタイトル・メモ・予定日だけに対応しています')
+  const grantFields = ['keys', 'project_ids', 'fields', 'mutation_mode', 'max_operations_per_day', 'max_schedule_shift_days', 'max_point_delta', 'allow_external_context', 'allow_handoffs', 'expires_at']
+  if (!exact(grant, grantFields) && !exact(grant, [...grantFields, 'automation'])) fail('REGISTRATION_INVALID')
+  if (!Array.isArray(grant.keys) || grant.keys.some(key => !GRANT_KEYS.includes(key)) || grant.keys.includes('routines:prepare') && !registration.rule_ids?.length || new Set(grant.keys).size !== grant.keys.length || !Array.isArray(grant.project_ids) || grant.project_ids.length > 100 || grant.project_ids.some(id => !uuid(id)) || new Set(grant.project_ids).size !== grant.project_ids.length || !Array.isArray(grant.fields) || grant.fields.some(field => !FIELDS.includes(field)) || new Set(grant.fields).size !== grant.fields.length || !['require_approval', 'auto_within_bounds'].includes(grant.mutation_mode) || (grant.mutation_mode === 'auto_within_bounds') !== Object.hasOwn(grant, 'automation') || !integer(grant.max_operations_per_day) || grant.max_operations_per_day > 100 || !integer(grant.max_schedule_shift_days) || grant.max_schedule_shift_days > 31 || grant.max_point_delta !== 0 || grant.allow_external_context !== false || grant.allow_handoffs !== false || !timestamp(grant.expires_at)) fail('REGISTRATION_INVALID', 'このローカル接続は本人承認による選択項目・分割・選択した周期の変更と、許可した範囲内のメモ・予定日の自動適用だけに対応しています')
   // Owner-delegated automatic application: notes/scheduled date only, inside stricter bounds than the grant.
   if (grant.mutation_mode === 'auto_within_bounds' && (!exact(grant.automation, ['max_schedule_shift_days', 'max_operations_per_day']) || !integer(grant.automation.max_schedule_shift_days) || grant.automation.max_schedule_shift_days > grant.max_schedule_shift_days || !integer(grant.automation.max_operations_per_day, 1) || grant.automation.max_operations_per_day > grant.max_operations_per_day || grant.fields.some(field => !['notes', 'scheduled_date'].includes(field)))) fail('REGISTRATION_INVALID', '範囲内の自動適用はメモと予定日だけに設定できます')
 }
@@ -39,14 +48,35 @@ function parseEnvelope(text) {
   if (typeof text !== 'string' || Buffer.byteLength(text, 'utf8') > LIMIT) fail('COMMAND_TOO_LARGE')
   let command
   try { command = JSON.parse(text) } catch { fail('INVALID_JSON') }
-  if (!exact(command, ['schema_version', 'command_id', 'snapshot_id', 'expires_at', 'type', 'target_id', 'expected_revision', 'payload']) || command.schema_version !== '1' || !uuid(command.command_id) || !uuid(command.snapshot_id) || !timestamp(command.expires_at) || !object(command.payload)) fail('COMMAND_SCHEMA', 'コマンド形式が不正です。本文の承認・actor・SQL・権限は受け付けません')
-  if (!['task.create', 'task.update'].includes(command.type)) fail('UNSUPPORTED_OPERATION', '手動点数・完了・取消・周期・ルーティンの操作は未対応です')
-  const fields = Object.keys(command.payload)
-  if (!fields.length || fields.some(field => !['title', 'notes', 'scheduled_date'].includes(field)) || command.type === 'task.update' && fields.includes('title')) fail('UNSUPPORTED_FIELD', 'メモと予定日の変更だけに対応しています')
-  if (Object.hasOwn(command.payload, 'title') && !string(command.payload.title, 300) || Object.hasOwn(command.payload, 'notes') && (typeof command.payload.notes !== 'string' || command.payload.notes.length > 50000) || Object.hasOwn(command.payload, 'scheduled_date') && !date(command.payload.scheduled_date)) fail('INVALID_PAYLOAD')
-  if (command.type === 'task.create') { if (command.target_id !== null || command.expected_revision !== null || !Object.hasOwn(command.payload, 'title')) fail('INVALID_TARGET') }
+  // basis and via are optional, self-declared labels (external_request / mcp_stdio); they never grant authority.
+  const base = ['schema_version', 'command_id', 'snapshot_id', 'expires_at', 'type', 'target_id', 'expected_revision', 'payload'], extra = object(command) ? Object.keys(command).filter(key => !base.includes(key)) : []
+  if (!object(command) || base.some(key => !Object.hasOwn(command, key)) || extra.some(key => !['basis', 'via'].includes(key)) || Object.hasOwn(command, 'basis') && (!(exact(command.basis, ['kind']) || exact(command.basis, ['kind', 'note'])) || command.basis.kind !== 'external_request' || Object.hasOwn(command.basis, 'note') && (typeof command.basis.note !== 'string' || command.basis.note.length > 1000)) || Object.hasOwn(command, 'via') && command.via !== 'mcp_stdio' || command.schema_version !== '1' || !uuid(command.command_id) || !uuid(command.snapshot_id) || !timestamp(command.expires_at) || !object(command.payload)) fail('COMMAND_SCHEMA', 'コマンド形式が不正です。本文の承認・actor・SQL・権限は受け付けません')
+  if (!TYPES.includes(command.type)) fail('UNSUPPORTED_OPERATION', '完了・取消・削除・実績訂正・権限の操作は未対応です')
+  const payload = command.payload, fields = Object.keys(payload)
+  if (command.type === 'task.split') validateSplitPayload(payload)
+  else if (command.type === 'routine.change') validateRoutinePayload(payload)
+  else {
+    if (!fields.length || fields.some(field => !(command.type === 'task.create' ? CREATE_FIELDS : FIELDS).includes(field))) fail('UNSUPPORTED_FIELD', 'タイトル・メモ・予定日・期限・本人指定ポイント以外は変更できません')
+    if (Object.hasOwn(payload, 'title') && !string(payload.title, 300) || Object.hasOwn(payload, 'notes') && (typeof payload.notes !== 'string' || payload.notes.length > 50000) || ['scheduled_date', 'due_date'].some(field => Object.hasOwn(payload, field) && !date(payload[field])) || Object.hasOwn(payload, 'manual_points') && (!integer(payload.manual_points) || payload.manual_points > 100000)) fail('INVALID_PAYLOAD')
+  }
+  if (command.type === 'task.create') { if (command.target_id !== null || command.expected_revision !== null || !Object.hasOwn(payload, 'title')) fail('INVALID_TARGET') }
   else if (!uuid(command.target_id) || !integer(command.expected_revision, 1)) fail('INVALID_TARGET')
   return command
+}
+
+function validateSplitPayload(payload) {
+  if (!exact(payload, ['children']) || !Array.isArray(payload.children)) fail('UNSUPPORTED_FIELD', '分割は子タスクの名前とポイントだけを指定できます')
+  if (payload.children.length < 2 || payload.children.length > 20 || payload.children.some(child => !exact(child, ['title', 'points']) || !string(child.title, 300) || child.points !== null && (!integer(child.points) || child.points > 100000))) fail('INVALID_PAYLOAD', '分割は2〜20件の名前と整数ポイント（または未設定）です')
+}
+const time = value => typeof value === 'string' && /^([01]\d|2[0-3]):[0-5]\d$/.test(value)
+function validateRoutinePayload(payload) {
+  if (!exact(payload, ['scope', 'definition']) || !exact(payload.definition, ['trigger'])) fail('UNSUPPORTED_FIELD', '周期の変更は変更範囲と周期だけを指定できます。名称・点数は本人がアプリで入力します')
+  const scope = payload.scope, trigger = payload.definition.trigger
+  if (!(exact(scope, ['kind']) && scope.kind === 'all_uncompleted' || exact(scope, ['kind', 'from_date']) && scope.kind === 'this_and_future' && date(scope.from_date) && scope.from_date !== null || exact(scope, ['kind', 'generation_key']) && scope.kind === 'this_instance' && string(scope.generation_key, 200))) fail('INVALID_PAYLOAD', '変更範囲が不正です')
+  const weekly = exact(trigger, ['kind', 'weekdays', 'time']) && trigger.kind === 'weekly' && Array.isArray(trigger.weekdays) && trigger.weekdays.length > 0 && trigger.weekdays.length <= 7 && trigger.weekdays.every(day => Number.isInteger(day) && day >= 0 && day <= 6) && new Set(trigger.weekdays).size === trigger.weekdays.length && time(trigger.time)
+  const monthly = exact(trigger, ['kind', 'ordinal', 'from', 'time']) && trigger.kind === 'monthly_business' && integer(trigger.ordinal, 1) && trigger.ordinal <= 31 && ['start', 'end'].includes(trigger.from) && time(trigger.time)
+  const relative = exact(trigger, ['kind', 'activity_id', 'edge', 'offset_days', 'offset_minutes']) && trigger.kind === 'activity_relative' && string(trigger.activity_id, 200) && ['start', 'end'].includes(trigger.edge) && Number.isInteger(trigger.offset_days) && Math.abs(trigger.offset_days) <= 366 && Number.isInteger(trigger.offset_minutes) && Math.abs(trigger.offset_minutes) <= 10080
+  if (!weekly && !monthly && !relative) fail('INVALID_PAYLOAD', '周期は毎週・毎月の営業日・活動相対のいずれかで指定してください')
 }
 
 /** Main-process boundary. Credentials and human proof are supplied by the app, never inbox JSON. */
@@ -145,27 +175,41 @@ async function createLocalFileBridge({ root, journalDirectory, signingKey, regis
   const regRecord = signed(reg)
   await write('registration.json', regRecord)
   async function currentRegistration() { await authorize(); try { await read('revoked.json'); fail('AUTHORITY_CHANGED') } catch (error) { if (error.code !== 'ENOENT') throw error }; const disk = verify(JSON.parse((await read('registration.json')).toString('utf8'))); if (canonical(disk) !== canonical(reg)) fail('REGISTRATION_CHANGED') }
-  async function exportSnapshot(tasks) {
+  async function exportSnapshot(tasks, rules = []) {
     await currentRegistration()
     if (!reg.client.grant.keys.includes('tasks:read') || !Array.isArray(tasks) || tasks.length > 100 || new Set(tasks.map(task => task.id)).size !== tasks.length) fail('SCOPE_DENIED')
+    const fields = reg.client.grant.fields
     const views = tasks.map(task => {
-      if (!object(task) || !uuid(task.id) || !reg.task_ids.includes(task.id) || !integer(task.revision, 1) || !string(task.title, 300) || typeof task.notes !== 'string' || task.notes.length > 50000 || !date(task.scheduledDate) || reg.client.grant.project_ids.length && !reg.client.grant.project_ids.includes(task.containerId)) fail('TASK_SCOPE')
+      const points = object(task?.score) && ['manual', 'allocated'].includes(task.score.mode) && integer(task.score.manualPoints) ? task.score.manualPoints : null
+      if (!object(task) || !uuid(task.id) || !reg.task_ids.includes(task.id) || !integer(task.revision, 1) || !string(task.title, 300) || typeof task.notes !== 'string' || task.notes.length > 50000 || !date(task.scheduledDate) || fields.includes('due_date') && !date(task.dueDate ?? null) || reg.client.grant.project_ids.length && !reg.client.grant.project_ids.includes(task.containerId)) fail('TASK_SCOPE')
       const view = { id: task.id, revision: task.revision }
-      if (reg.client.grant.fields.includes('title')) view.title = task.title
-      if (reg.client.grant.fields.includes('notes')) view.notes = task.notes
-      if (reg.client.grant.fields.includes('scheduled_date')) view.scheduled_date = task.scheduledDate
+      if (fields.includes('title')) view.title = task.title
+      if (fields.includes('notes')) view.notes = task.notes
+      if (fields.includes('scheduled_date')) view.scheduled_date = task.scheduledDate
+      if (fields.includes('due_date')) view.due_date = task.dueDate ?? null
+      if (fields.includes('manual_points')) view.manual_points = points
       return view
     })
+    if (!Array.isArray(rules) || rules.length > 50 || rules.some(rule => !exact(rule, ['id', 'revision', 'title', 'trigger']) || !reg.rule_ids?.includes(rule.id) || !integer(rule.revision, 1) || !string(rule.title, 300) || !object(rule.trigger)) || new Set(rules.map(rule => rule.id)).size !== rules.length) fail('RULE_SCOPE')
     const viewText = canonical(views), at = new Date().toISOString(), snapshotId = crypto.randomUUID()
     const manifest = { schema_version: '1', snapshot_id: snapshotId, owner_id: reg.owner_id, dataset_id: reg.dataset_id, client_id: reg.client.id, policy_epoch: reg.policy_epoch, source_permission_revision: reg.source_permission_revision, registration_revision: reg.client.revision, grant_epoch: reg.client.grant_epoch, generated_at: at, expires_at: new Date(Math.min(Date.now() + 24 * 60 * 60 * 1000, Date.parse(reg.client.grant.expires_at))).toISOString(), view_path: 'views/tasks.active.json', view_sha256: bytesDigest(viewText), entity_revisions: Object.fromEntries(views.map(task => [task.id, task.revision])), registration_sha256: digest(reg) }
     await write(manifest.view_path, views)
+    // Owner-selected series only: id, revision, title and trigger. No facts, sources or completions.
+    if (reg.rule_ids?.length) await write('routines.json', signed({ schema_version: '1', snapshot_id: snapshotId, rules: rules.map(rule => ({ id: rule.id, revision: rule.revision, title: rule.title, trigger: rule.trigger })) }))
     await write('manifest.json', signed(manifest))
     return freeze(structuredClone(manifest))
   }
   async function manifestFor(command) {
     const manifest = verify(JSON.parse((await read('manifest.json')).toString('utf8')))
     if (!exact(manifest, ['schema_version', 'snapshot_id', 'owner_id', 'dataset_id', 'client_id', 'policy_epoch', 'source_permission_revision', 'registration_revision', 'grant_epoch', 'generated_at', 'expires_at', 'view_path', 'view_sha256', 'entity_revisions', 'registration_sha256']) || manifest.schema_version !== '1' || manifest.snapshot_id !== command.snapshot_id || manifest.owner_id !== reg.owner_id || manifest.dataset_id !== reg.dataset_id || manifest.client_id !== reg.client.id || manifest.policy_epoch !== reg.policy_epoch || manifest.source_permission_revision !== reg.source_permission_revision || manifest.registration_revision !== reg.client.revision || manifest.grant_epoch !== reg.client.grant_epoch || manifest.registration_sha256 !== digest(reg) || manifest.view_path !== 'views/tasks.active.json' || !timestamp(manifest.expires_at) || Date.parse(manifest.expires_at) <= Date.now() || !object(manifest.entity_revisions) || bytesDigest(await read(manifest.view_path)) !== manifest.view_sha256) fail('SNAPSHOT_INVALID')
-    if (command.type === 'task.update' && (!reg.task_ids.includes(command.target_id) || manifest.entity_revisions[command.target_id] !== command.expected_revision)) fail('REVISION_CONFLICT')
+    if ((command.type === 'task.update' || command.type === 'task.split') && (!reg.task_ids.includes(command.target_id) || manifest.entity_revisions[command.target_id] !== command.expected_revision)) fail('REVISION_CONFLICT')
+    if (command.type === 'routine.change') {
+      const routines = verify(JSON.parse((await read('routines.json')).toString('utf8')))
+      if (!exact(routines, ['schema_version', 'snapshot_id', 'rules']) || routines.snapshot_id !== manifest.snapshot_id || !Array.isArray(routines.rules)) fail('SNAPSHOT_INVALID')
+      const rule = routines.rules.find(item => item.id === command.target_id)
+      if (!reg.rule_ids?.includes(command.target_id) || !rule) fail('RULE_SCOPE')
+      if (rule.revision !== command.expected_revision) fail('REVISION_CONFLICT')
+    }
     return manifest
   }
   async function readSnapshot() {
@@ -181,7 +225,8 @@ async function createLocalFileBridge({ root, journalDirectory, signingKey, regis
     if (`${command.command_id}.ready.json`.toLowerCase() !== filename.toLowerCase()) fail('COMMAND_FILENAME')
     if (Date.parse(command.expires_at) <= Date.now() || Date.parse(command.expires_at) > Date.now() + 24 * 60 * 60 * 1000 || Date.parse(command.expires_at) > Date.parse(reg.client.grant.expires_at)) fail('COMMAND_EXPIRED')
     const grant = reg.client.grant
-    if (!grant.keys.includes('tasks:prepare') || !grant.keys.includes('changes:submit') || Object.keys(command.payload).some(field => !grant.fields.includes(field)) || !grant.max_operations_per_day) fail('SCOPE_DENIED')
+    if (!grant.keys.includes('tasks:prepare') || !grant.keys.includes('changes:submit') || !grant.max_operations_per_day) fail('SCOPE_DENIED')
+    if (command.type === 'task.split' ? !grant.keys.includes('tasks:split') : command.type === 'routine.change' ? !grant.keys.includes('routines:prepare') : Object.keys(command.payload).some(field => !grant.fields.includes(field))) fail('SCOPE_DENIED')
     const commandDigest = digest({ command, owner_id: reg.owner_id, dataset_id: reg.dataset_id, client_id: reg.client.id, policy_epoch: reg.policy_epoch, source_permission_revision: reg.source_permission_revision, registration_revision: reg.client.revision, grant_epoch: reg.client.grant_epoch })
     const result = await resultFor(command.command_id).catch(error => { if (error.code === 'ENOENT') return null; throw error })
     if (result && result.digest !== commandDigest) fail('IDEMPOTENCY_MISMATCH')
@@ -209,7 +254,7 @@ async function createLocalFileBridge({ root, journalDirectory, signingKey, regis
   async function resultFor(commandId) {
     if (!uuid(commandId)) fail('INVALID_COMMAND_ID')
     const result = await readPrivate(`${commandId}.result.json`)
-    if (result.command_id !== commandId || result.owner_id !== reg.owner_id || result.dataset_id !== reg.dataset_id || result.client_id !== reg.client.id || !/^[a-f0-9]{64}$/.test(result.digest) || !['applied', 'failed', 'unknown'].includes(result.state)) fail('RESULT_INVALID')
+    if (result.command_id !== commandId || result.owner_id !== reg.owner_id || result.dataset_id !== reg.dataset_id || result.client_id !== reg.client.id || !/^[a-f0-9]{64}$/.test(result.digest) || !RESULT_STATES.includes(result.state) || REJECTED_STATES.includes(result.state) !== Object.hasOwn(result, 'code') || Object.hasOwn(result, 'code') && !resultCode(result.code)) fail('RESULT_INVALID')
     return result
   }
   async function unchangedCommand(prepared) {
@@ -217,7 +262,7 @@ async function createLocalFileBridge({ root, journalDirectory, signingKey, regis
     if (canonical(latest) !== canonical(prepared.command)) fail('COMMAND_CHANGED', '確認後にコマンドが変更されました。新しい内容を再確認してください')
   }
   function validateReceipt(prepared, receipt) {
-    if (!exact(receipt, ['commandId', 'digest', 'taskIds', 'appliedAt']) || receipt.commandId !== prepared.command.command_id || receipt.digest !== prepared.digest || !Array.isArray(receipt.taskIds) || receipt.taskIds.length !== 1 || receipt.taskIds.some(id => !uuid(id)) || !timestamp(receipt.appliedAt) || prepared.command.type === 'task.update' && receipt.taskIds[0] !== prepared.command.target_id) fail('RECEIPT_INVALID')
+    if (!exact(receipt, ['commandId', 'digest', 'taskIds', 'appliedAt']) || receipt.commandId !== prepared.command.command_id || receipt.digest !== prepared.digest || !Array.isArray(receipt.taskIds) || receipt.taskIds.length !== 1 || receipt.taskIds.some(id => !uuid(id)) || !timestamp(receipt.appliedAt) || prepared.command.type !== 'task.create' && receipt.taskIds[0] !== prepared.command.target_id) fail('RECEIPT_INVALID')
   }
   async function execute(prepared, token) {
     await currentRegistration()
@@ -272,10 +317,15 @@ async function createLocalFileBridge({ root, journalDirectory, signingKey, regis
       const receipt = await applyApprovedCommand(prepared, token)
       validateReceipt(prepared, receipt)
       return finish(prepared, 'applied', receipt)
-    } catch { return finish(prepared, 'unknown', null) }
+    } catch (error) {
+      // The app reports a definite rejection only when its DB has no receipt (checked by the service).
+      const outcome = error?.outcome
+      if (object(outcome) && REJECTED_STATES.includes(outcome.state) && resultCode(outcome.code)) return finish(prepared, outcome.state, null, outcome.code)
+      return finish(prepared, 'unknown', null)
+    }
   }
-  async function finish(prepared, state, receipt) {
-    const result = { schema_version: '1', command_id: prepared.command.command_id, digest: prepared.digest, owner_id: reg.owner_id, dataset_id: reg.dataset_id, client_id: reg.client.id, state, receipt: receipt || null, finished_at: new Date().toISOString() }
+  async function finish(prepared, state, receipt, code = null) {
+    const result = { schema_version: '1', command_id: prepared.command.command_id, digest: prepared.digest, owner_id: reg.owner_id, dataset_id: reg.dataset_id, client_id: reg.client.id, state, receipt: receipt || null, finished_at: new Date().toISOString(), ...(REJECTED_STATES.includes(state) ? { code } : {}) }
     try { await writePrivate(`${result.command_id}.result.json`, result, true) } catch (error) { if (error.code !== 'EEXIST') throw error; const existing = await readPrivate(`${result.command_id}.result.json`); if (canonical(existing) !== canonical(result)) fail('RESULT_MISMATCH') }
     await write(`results/${result.command_id}.json`, signed(result)); pending.delete(result.command_id); return freeze(result)
   }
@@ -292,8 +342,23 @@ async function createLocalFileBridge({ root, journalDirectory, signingKey, regis
     for (const item of (await fs.readdir(journalRoot)).filter(name => name.endsWith('.claim.json') && UUID.test(name.replace(/\.claim\.json$/, '')))) { const record = await readPrivate(item); if (record.client_id === reg.client.id && record.automatic === true && record.started_at?.slice(0, 10) === new Date().toISOString().slice(0, 10)) count++ }
     return count
   }
+  /** Terminal app-side rejection before any lease. It only closes a scanned command and never applies one. */
+  async function reject(prepared, state, code) {
+    if (pending.get(prepared?.command?.command_id) !== prepared || running.has(prepared.command.command_id) || !REJECTED_STATES.includes(state) || !resultCode(code)) fail('REJECTION_INVALID')
+    try { await read('revoked.json'); fail('AUTHORITY_CHANGED') } catch (error) { if (error.code !== 'ENOENT') throw error }
+    const disk = verify(JSON.parse((await read('registration.json')).toString('utf8')))
+    if (canonical(disk) !== canonical(reg)) fail('REGISTRATION_CHANGED')
+    // An epoch or AI change still allows recording why the queued command did not run.
+    const context = await getCurrentContext()
+    if (!object(context) || context.ownerId !== reg.owner_id || context.datasetId !== reg.dataset_id || context.clientId !== reg.client.id) fail('AUTHORITY_CHANGED')
+    const claim = await readPrivate(`${prepared.command.command_id}.claim.json`).catch(error => { if (error.code === 'ENOENT') return null; throw error })
+    if (claim) fail('APPLICATION_IN_PROGRESS')
+    const prior = await resultFor(prepared.command.command_id).catch(error => { if (error.code === 'ENOENT') return null; throw error })
+    if (prior) { if (prior.digest !== prepared.digest) fail('IDEMPOTENCY_MISMATCH'); return prior }
+    return finish(prepared, state, null, code)
+  }
   function clearAuthorities() { pending.clear() }
   async function revoke() { clearAuthorities(); await write('revoked.json', signed({ schema_version: '1', client_id: reg.client.id, dataset_id: reg.dataset_id, revoked_at: new Date().toISOString() })) }
-  return Object.freeze({ exportSnapshot, readSnapshot, prepareCommand, approve, execute, scanInbox, readResult: async id => { await currentRegistration(); return resultFor(id) }, clearAuthorities, revoke })
+  return Object.freeze({ exportSnapshot, readSnapshot, prepareCommand, approve, execute, reject, scanInbox, readResult: async id => { await currentRegistration(); return resultFor(id) }, clearAuthorities, revoke })
 }
-module.exports = { createLocalFileBridge, parseEnvelope, canonicalFileJSON: canonical, fileCommandDigest: digest, validateFileBridgeRegistration: validateRegistration }
+module.exports = { createLocalFileBridge, parseEnvelope, canonicalFileJSON: canonical, fileCommandDigest: digest, validateFileBridgeRegistration: validateRegistration, FILE_BRIDGE_REJECTED_STATES: REJECTED_STATES, FILE_BRIDGE_RESULT_STATES: RESULT_STATES }

@@ -136,8 +136,12 @@ describe('registered external file commands require native owner approval',()=>{
     await db.commands.add({key:fileBridgeReceiptKey(fakeId),hash:fakeReceipt.applicationDigest,resultId:JSON.stringify(fakeReceipt),at:fakeReceipt.appliedAt})
     await expect(f.controller.applyFromUI(prepared,click())).rejects.toMatchObject({code:'DAILY_BOUND'})
     expect(await db.tasks.count()).toBe(1);expect(f.gateway.cancelApplication).toHaveBeenCalledOnce()
-    await db.commands.delete(fileBridgeScopeKey(f.settings.profileId,f.settings.datasetId))
-    await expect(f.controller.applyFromUI(prepared,click())).rejects.toMatchObject({code:'AUTHORITY_CHANGED'})
+    // K12: the denial is signed as a terminal result, so the same proposal cannot be retried.
+    expect(f.gateway.cancelApplication).toHaveBeenCalledWith(expect.objectContaining({outcome:{state:'denied',code:'DAILY_BOUND'}}))
+    await expect(f.controller.applyFromUI(prepared,click())).rejects.toMatchObject({code:'UNVERIFIED_COMMAND'})
+    const g=await fixture('task.create'),next=await g.controller.prepare(g.reference)
+    await db.commands.delete(fileBridgeScopeKey(g.settings.profileId,g.settings.datasetId))
+    await expect(g.controller.applyFromUI(next,click())).rejects.toMatchObject({code:'AUTHORITY_CHANGED'})
   })
   it('does not export score, deadlines, ledger or unrelated tasks into the IPC snapshot input',async()=>{
     const f=await fixture();await f.controller.exportSnapshot(click())
@@ -188,7 +192,7 @@ describe('N09 owner-delegated automatic application for file/MCP entries',()=>{
     expect(pick(viaFile)).toEqual(pick(viaApp))
     const decisions=(await db.audits.toArray()).filter(audit=>audit.operation==='changeset.update').map(audit=>{const detail=JSON.parse(audit.detail);return {decision:detail.decision,operations:detail.operations,approvedBy:detail.approvedBy}})
     expect(decisions).toEqual([{decision:'auto',operations:['task.text','task.schedule'],approvedBy:null},{decision:'auto',operations:['task.text','task.schedule'],approvedBy:null}])
-    expect(JSON.parse((await db.audits.toArray()).find(audit=>audit.operation==='filebridge.auto')!.detail)).toMatchObject({decision:'auto',entrance:'file-bridge',approvedBy:null})
+    expect(JSON.parse((await db.audits.toArray()).find(audit=>audit.operation==='filebridge.auto')!.detail)).toMatchObject({decision:'auto',entrance:'file',basis:'external_request',approvedBy:null})
   })
   it('keeps out-of-bound or non-delegated entries waiting for native approval',async()=>{
     await enableA2()

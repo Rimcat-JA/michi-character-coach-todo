@@ -1,34 +1,56 @@
 import { useEffect, useMemo, useState } from 'react'
-import { changePolicyFor, decideChangePolicy, taskChangeValueText, type TaskChangeField } from './change-set'
+import { useLiveQuery } from 'dexie-react-hooks'
+import { changePolicyFor, type TaskChangeField } from './change-set'
 import { createFileBridgeController, fileBridgeAutomationAllowed, type FileBridgeApplicationOutcome, type PreparedFileBridgeApplication } from './file-bridge-commands'
 import { egressNotice } from './egress-policy'
 import { updateAIConnection } from './ai-connection'
+import { db } from './db'
 import AIProcessingResume from './AIProcessingResume'
-import type { FileBridgeField, FileBridgeGateway, FileBridgeHost, FileBridgeInboxEntry, FileBridgeStatus, FileBridgeWindow } from './file-bridge-types'
+import ChangeSetPreview from './ChangeSetPreview'
+import TaskSplitPreview from './TaskSplitPreview'
+import { agentChangesStopped, humanContextFor, changeContextFor } from './command-bus'
+import { splitBody, type SplitChildDraft } from './task-split-change'
+import { externallyEditableTrigger, routineBody } from './routine-external-change'
+import { calendarRuleEditorDefinition } from './calendar-rule-editor'
+import type { FileBridgeField, FileBridgeGateway, FileBridgeHost, FileBridgeInboxEntry, FileBridgeResult, FileBridgeStatus, FileBridgeWindow } from './file-bridge-types'
+import type { CalendarRule } from './calendar-resolver'
 import type { Settings, Task } from './domain'
 
-const labels:Record<FileBridgeField,string>={title:'タスク名',notes:'メモ',scheduled_date:'予定日'}
-const changeLabels:Record<TaskChangeField,string>={title:'タイトル',notes:'メモ',scheduledDate:'予定日',dueDate:'締め切り',dueAt:'締め切り時刻',manualPoints:'ポイント'}
+const labels:Record<FileBridgeField,string>={title:'タスク名',notes:'メモ',scheduled_date:'予定日',due_date:'本当の締め切り',manual_points:'本人指定ポイント'}
+const valueFields:FileBridgeField[]=['title','due_date','manual_points']
+const resultLabels:Record<FileBridgeResult['state'],string>={applied:'保存を確認済み',unknown:'結果未確定。再実行せず保存履歴を確認してください。',failed:'実行失敗',denied:'拒否',conflict:'競合',expired:'期限切れ・権限変更',rejected:'受付拒否'}
+const resultText=(result:FileBridgeResult)=>`${resultLabels[result.state]}${result.code?`（${result.code}）`:''}`
+const weekdayNames=['日','月','火','水','木','金','土']
+function triggerText(trigger:CalendarRule['trigger']) {
+  if(trigger.kind==='weekly')return `毎週${trigger.weekdays.map(day=>weekdayNames[day]).join('・')}曜 ${trigger.time}`
+  if(trigger.kind==='monthly_business')return `毎月${trigger.from==='end'?'最終から':''}第${trigger.ordinal}営業日 ${trigger.time}`
+  if(trigger.kind==='activity_relative')return `活動の${trigger.edge==='start'?'開始':'終了'}から${trigger.offsetDays}日・${trigger.offsetMinutes}分`
+  return trigger.kind==='rrule'?`RRULE ${trigger.rrule}`:`完了から${trigger.afterDays}日後 ${trigger.time}`
+}
 export default function LocalFileBridgeView({settings,tasks,gateway,onApplied}: {settings:Settings;tasks:Task[];gateway?:FileBridgeGateway;onApplied?:(receipt:FileBridgeApplicationOutcome['receipt'])=>void}) {
   const connection=gateway??(window as FileBridgeWindow).michiFileBridge
   const controller=useMemo(()=>connection?createFileBridgeController(connection):null,[connection])
   const policy=changePolicyFor(settings),scopeKey=`${settings.profileId}:${settings.datasetId}:${policy.epoch}:${policy.sourcePermissionRevision}:${settings.aiEnabled}`
+  const stoppedNow=agentChangesStopped(settings)
   const [view,setView]=useState<{scopeKey:string;status:FileBridgeStatus|null;entries:FileBridgeInboxEntry[];prepared:PreparedFileBridgeApplication|null;outcome:FileBridgeApplicationOutcome|null}>({scopeKey,status:null,entries:[],prepared:null,outcome:null})
   const [taskIds,setTaskIds]=useState<string[]>([]),[fields,setFields]=useState<FileBridgeField[]>(['title']),[host,setHost]=useState<FileBridgeHost>('codex'),[hours,setHours]=useState(1)
-  const [busy,setBusy]=useState(false),[notice,setNotice]=useState(''),[checks,setChecks]=useState<{digest:string;fields:TaskChangeField[]}>({digest:'',fields:[]})
+  const [allowSplit,setAllowSplit]=useState(false),[ruleIds,setRuleIds]=useState<string[]>([])
+  const [busy,setBusy]=useState(false),[notice,setNotice]=useState('')
+  const [valueMessage,setValueMessage]=useState(''),[splitDraft,setSplitDraft]=useState<{id:string;children:SplitChildDraft[]}|null>(null)
   const [mcpConfig,setMcpConfig]=useState<{scopeKey:string;root:string;json:string}|null>(null)
   const [autoMode,setAutoMode]=useState(false),[autoDays,setAutoDays]=useState(2),[autoCount,setAutoCount]=useState(5)
   const autoAllowed=fileBridgeAutomationAllowed(policy,fields,autoDays)
+  const rules=useLiveQuery(async()=>(await db.calendarRules.get('main'))?.rules??[],[])??[],editableRules=rules.filter(rule=>externallyEditableTrigger(calendarRuleEditorDefinition(rule).trigger))
   const visible=view.scopeKey===scopeKey,prepared=visible?view.prepared:null,status=visible?view.status:null,entries=visible?view.entries:[],outcome=visible?view.outcome:null
-  const decision=prepared?.changeSet?decideChangePolicy(prepared.changeSet,policy):null,checked=prepared&&checks.digest===prepared.digest?checks.fields:[]
   useEffect(()=>{
     if(!controller)return
-    controller.clearAuthority()
     let active=true
-    void controller.refresh().then(status=>{if(active)setView({scopeKey,status,entries:[],prepared:null,outcome:null})}).catch(error=>{if(active)setNotice(error instanceof Error?error.message:String(error))})
-    return()=>{active=false;controller.clearAuthority()}
-  },[controller,scopeKey])
-  async function run(action:()=>Promise<void>) {if(busy)return;setBusy(true);setNotice('');try{await action()}catch(error){setNotice(error instanceof Error?error.message:String(error))}finally{setBusy(false)}}
+    // Queued commands get a signed reason before authority is dropped, so agents see the app's code.
+    void controller.closePending(stoppedNow?'CHANGES_STOPPED':'POLICY_CHANGED').catch(()=>undefined).then(()=>{controller.clearAuthority();return controller.refresh()}).then(status=>{if(active)setView({scopeKey,status,entries:[],prepared:null,outcome:null})}).catch(error=>{if(active)setNotice(error instanceof Error?error.message:String(error))})
+    return()=>{active=false}
+  },[controller,scopeKey,stoppedNow])
+  useEffect(()=>()=>{controller?.clearAuthority()},[controller])
+  async function run(action:()=>Promise<void>) {if(busy)return;setBusy(true);setNotice('');try{await action()}catch(error){setNotice(error instanceof Error?`${error.message}${'code' in error&&typeof error.code==='string'?`（${error.code}）`:''}`:String(error))}finally{setBusy(false)}}
   function replaceStatus(status:FileBridgeStatus) {setView({scopeKey,status,entries:[],prepared:null,outcome:null})}
   async function scan() {
     if(!controller)return
@@ -41,12 +63,19 @@ export default function LocalFileBridgeView({settings,tasks,gateway,onApplied}: 
     setView({scopeKey,...scanned,prepared:null,outcome:null})
     if(applied||waiting)setNotice(`範囲内の${applied}件を自動適用しました。${waiting}件は本人の確認待ちです。自動適用した変更は「変更の履歴」から取り消せます。`)
   }
-  async function approve(event:Event) {
+  function show(next:PreparedFileBridgeApplication) {setView(previous=>({...previous,prepared:next,outcome:null}));setSplitDraft(null)}
+  async function approve(event:Event,checked:TaskChangeField[]) {
     if(!controller||!prepared)return
     const result=await controller.applyFromUI(prepared,event,checked)
     setView(previous=>({...previous,outcome:result}));onApplied?.(result.receipt)
-    setNotice(result.resultPending?'変更は保存済みです。結果ファイルの書き出しを再試行してください。':'変更を保存し、結果ファイルを記録しました。')
+    setNotice(result.resultPending?'変更は保存済みです。結果ファイルの書き出しを再試行してください。':`変更を保存し、結果ファイルを記録しました。${prepared.command.envelope.type==='routine.change'?'発生回の反映は「繰り返し」画面で別に確認してください。':''}`)
   }
+  const command=prepared?.command??null,approveAttributes=prepared?{'data-file-bridge-approve':prepared.reference}:undefined
+  const target=command?.envelope.target_id?tasks.find(task=>task.id===command.envelope.target_id):undefined
+  const split=command?.envelope.type==='task.split'?splitBody(command):null,routine=command?.envelope.type==='routine.change'?routineBody(command):null
+  const draftChildren=split?.stage==='owner_values'?(splitDraft?.id===command!.id?splitDraft.children:split.proposed.map(child=>({title:child.title,points:child.points,titleOrigin:'agent_proposal' as const,pointsOrigin:child.points===null?null:'agent_proposal' as const}))):[]
+  const draftSum=draftChildren.reduce((sum,child)=>sum+(child.points??0),0)
+  function editChild(index:number,patch:Partial<SplitChildDraft>) {if(!command)return;setSplitDraft({id:command.id,children:draftChildren.map((child,i)=>i===index?{...child,...patch}:child)})}
   return <section className="card" aria-label="ローカルエージェント接続">
     <h3>ローカルエージェント接続</h3>
     <p>選んだタスクをフォルダーで共有し、外部エージェントの作成・変更案をこの画面で確認できます。</p>
@@ -59,32 +88,50 @@ export default function LocalFileBridgeView({settings,tasks,gateway,onApplied}: 
         <p>選択した内容をフォルダーへ書き出します。このフォルダーを渡す相手は内容を読めます。資料から検出したタスクの引用（資料の根拠・旧形式メモの引用行）は書き出しません。</p>
         <label className="field"><span>利用するクライアント</span><select value={host} disabled={busy} onChange={event=>setHost(event.target.value as FileBridgeHost)}><option value="codex">Codex</option><option value="claude_code">Claude Code</option><option value="chatgpt">ChatGPT</option><option value="claude">Claude</option><option value="other">その他</option></select></label>
         <label className="field"><span>許可の有効時間</span><select value={hours} disabled={busy} onChange={event=>setHours(Number(event.target.value))}>{[1,4,12,24].map(value=><option key={value} value={value}>{value}時間</option>)}</select></label>
-        <fieldset disabled={busy}><legend>共有する項目</legend>{(['title','notes','scheduled_date'] as FileBridgeField[]).map(field=><label key={field} className="field"><span><input type="checkbox" checked={fields.includes(field)} onChange={event=>setFields(event.target.checked?[...fields,field]:fields.filter(item=>item!==field))}/> {labels[field]}</span></label>)}</fieldset>
+        <fieldset disabled={busy}><legend>共有・変更依頼を受ける項目</legend>{(['title','notes','scheduled_date','due_date','manual_points'] as FileBridgeField[]).map(field=><label key={field} className="field"><span><input type="checkbox" checked={fields.includes(field)} onChange={event=>setFields(event.target.checked?[...fields,field]:fields.filter(item=>item!==field))}/> {labels[field]}{valueFields.includes(field)?'（依頼のたびに本人が値を確認）':''}</span></label>)}</fieldset>
+        <label className="field"><span><input type="checkbox" checked={allowSplit} disabled={busy} onChange={event=>setAllowSplit(event.target.checked)}/> 選択タスクの分割案を受け付ける（配分は毎回本人が確認）</span></label>
+        {editableRules.length?<fieldset disabled={busy}><legend>周期の変更案を受け付ける系列（名称・点数は変更不可。RRULE・完了起点の系列は対象外）</legend>{editableRules.map(rule=><label key={rule.id} className="field"><span><input type="checkbox" checked={ruleIds.includes(rule.id)} onChange={event=>setRuleIds(event.target.checked?[...ruleIds,rule.id]:ruleIds.filter(id=>id!==rule.id))}/> {calendarRuleEditorDefinition(rule).title}（{triggerText(calendarRuleEditorDefinition(rule).trigger)}）</span></label>)}</fieldset>:null}
         <fieldset disabled={busy}><legend>共有するタスク（最大100件）</legend>{tasks.filter(task=>!task.deletedAt&&task.status==='open').map(task=><label key={task.id} className="field"><span><input type="checkbox" checked={taskIds.includes(task.id)} onChange={event=>setTaskIds(event.target.checked?[...taskIds,task.id]:taskIds.filter(id=>id!==task.id))}/> {task.title}</span></label>)}</fieldset>
-        <p>変更案は毎回本人が承認します。新規作成では点数と締め切りを未設定にします。</p>
+        <p>変更案は毎回本人が承認します。新規作成では点数と締め切りを未設定にします。完了・取消・削除・実績訂正・権限の変更は受け付けません。</p>
         <fieldset disabled={busy}><legend>範囲内の自動適用（任意）</legend><label className="field"><span><input type="checkbox" checked={autoMode&&autoAllowed} disabled={!autoAllowed} onChange={event=>setAutoMode(event.target.checked)}/> 範囲内のメモ・予定日の変更は承認なしで適用する</span></label>
           <div className="form-grid"><label className="field">予定日を動かせる日数<input type="number" min={0} max={7} step={1} value={autoDays} onChange={event=>setAutoDays(Number(event.target.value))}/></label><label className="field">1日の自動件数<input type="number" min={1} max={20} step={1} value={autoCount} onChange={event=>setAutoCount(Number(event.target.value))}/></label></div>
           <small>{autoAllowed?'共有項目がメモ・予定日だけで、自動化設定（S20）でも範囲内自動を許可している場合に使えます。範囲外・タイトル・新規作成は毎回本人が承認します。':'自動化設定（S20）でメモ・予定日を「範囲内で自動」にし、共有項目をメモ・予定日だけにすると選べます。'}</small></fieldset>
-        <button type="button" data-file-bridge-configure="true" className="primary-button" disabled={busy||!fields.length||taskIds.length>100||!settings.aiEnabled||!policy.aiChangesEnabled} onClick={event=>{const native=event.nativeEvent;void run(async()=>replaceStatus(await controller.configure({intendedHost:host,taskIds,fields,lifetimeHours:hours,automation:autoMode&&autoAllowed?{maxScheduleShiftDays:autoDays,maxOperationsPerDay:autoCount}:null},native)))}}>選択した範囲だけを許可して接続</button>
+        <button type="button" data-file-bridge-configure="true" className="primary-button" disabled={busy||!fields.length||taskIds.length>100||!settings.aiEnabled||!policy.aiChangesEnabled} onClick={event=>{const native=event.nativeEvent;void run(async()=>replaceStatus(await controller.configure({intendedHost:host,taskIds,fields,lifetimeHours:hours,allowSplit,ruleIds,automation:autoMode&&autoAllowed?{maxScheduleShiftDays:autoDays,maxOperationsPerDay:autoCount}:null},native)))}}>選択した範囲だけを許可して接続</button>
       </details>
       {status?.connected&&status.registration?<div>
         <h4>登録した接続</h4><p>{status.registration.client.intended_host} / {status.root}</p>
-        <p>タスク{status.registration.task_ids.length}件、共有項目：{status.registration.client.grant.fields.map(field=>labels[field]).join('・')}。1日{status.registration.client.grant.max_operations_per_day}件まで、予定日の移動は{status.registration.client.grant.max_schedule_shift_days}日まで。{status.registration.client.grant.automation?`範囲内自動：予定日±${status.registration.client.grant.automation.max_schedule_shift_days}日・1日${status.registration.client.grant.automation.max_operations_per_day}件まで。それ以外は本人承認。`:'すべて本人承認。'}</p>
+        <p>タスク{status.registration.task_ids.length}件、共有項目：{status.registration.client.grant.fields.map(field=>labels[field]).join('・')}{status.registration.client.grant.keys.includes('tasks:split')?'・分割案':''}{status.registration.rule_ids?.length?`・周期${status.registration.rule_ids.length}系列`:''}。1日{status.registration.client.grant.max_operations_per_day}件まで、予定日の移動は{status.registration.client.grant.max_schedule_shift_days}日まで。{status.registration.client.grant.automation?`範囲内自動：予定日±${status.registration.client.grant.automation.max_schedule_shift_days}日・1日${status.registration.client.grant.automation.max_operations_per_day}件まで。それ以外は本人承認。`:'すべて本人承認。'}</p>
         <p className="muted">有効期限：{new Date(status.registration.client.grant.expires_at).toLocaleString('ja-JP')}。接続版 {status.registration.client.revision} / 許可版 {status.registration.client.grant_epoch}</p>
         <div className="change-set-actions"><button type="button" data-file-bridge-export={status.registration.client.id} className="secondary-button" disabled={busy||!settings.aiEnabled} onClick={event=>{const native=event.nativeEvent;void run(async()=>{replaceStatus(await controller.exportSnapshot(native));const withheld=controller.lastEgress();if(withheld&&(withheld.withheldQuotes||withheld.notesWithheld))setNotice(egressNotice({withheldQuotes:withheld.withheldQuotes,notesWithheld:withheld.notesWithheld>0},'書出し')!)})}}>選択タスクの現在の内容を書き出す</button><button type="button" data-file-bridge-disconnect={status.registration.client.id} className="secondary-button" disabled={busy} onClick={event=>{const native=event.nativeEvent;void run(async()=>replaceStatus(await controller.disconnect(native)))}}>この接続の許可を取り消す</button></div>
         {status.snapshot?<p>確認用データ：{new Date(status.snapshot.generated_at).toLocaleString('ja-JP')}、{Object.keys(status.snapshot.entity_revisions).length}件。<small className="muted">識別子 {status.snapshot.snapshot_id} / 内容hash {status.snapshot.view_sha256.slice(0,12)}</small></p>:<p>現在のタスクを書き出してから、外部クライアントで案を作成してください。</p>}
-        {connection?.mcpConfiguration&&status.snapshot?<details><summary>stdio対応MCPクライアントへ接続</summary><p>Codex・Claude Code等のローカルMCP設定に登録します。読み取りは選択した項目だけ、変更はこのアプリで毎回承認します。クライアントへの設定と起動は別操作です。ChatGPT等のクラウド接続・HTTPサーバーは未提供です。</p><button type="button" className="secondary-button" disabled={busy} onClick={()=>void run(async()=>setMcpConfig({scopeKey,root:status.root!,json:JSON.stringify(await connection.mcpConfiguration!(),null,2)}))}>この接続のMCP設定を表示</button>{mcpConfig?.scopeKey===scopeKey&&mcpConfig.root===status.root?<pre style={{whiteSpace:'pre-wrap',overflowWrap:'anywhere'}}>{mcpConfig.json}</pre>:null}<p className="muted">外部ツールの結果ファイルは未検証コピーとして返します。実保存と署名の確認はアプリの結果欄で行ってください。既に共有したコピーは取消後も相手側に残ることがあります。</p></details>:null}
+        {connection?.mcpConfiguration&&status.snapshot?<details><summary>stdio対応MCPクライアントへ接続</summary><p>Codex・Claude Code等のローカルMCP設定に登録します。読み取りは選択した項目だけ、変更はこのアプリで毎回承認します。クライアントへの設定と起動は別操作です。ChatGPT等のクラウド接続・HTTPサーバーは未提供です。</p><button type="button" className="secondary-button" disabled={busy} onClick={()=>void run(async()=>setMcpConfig({scopeKey,root:status.root!,json:JSON.stringify(await connection.mcpConfiguration!(),null,2)}))}>この接続のMCP設定を表示</button>{mcpConfig?.scopeKey===scopeKey&&mcpConfig.root===status.root?<pre style={{whiteSpace:'pre-wrap',overflowWrap:'anywhere'}}>{mcpConfig.json}</pre>:null}<p className="muted">外部ツールの結果ファイルは未検証コピーとして返します。拒否・競合・期限切れはアプリと同じコードのエラーとして返します。実保存と署名の確認はアプリの結果欄で行ってください。既に共有したコピーは取消後も相手側に残ることがあります。</p></details>:null}
         <button type="button" className="secondary-button" disabled={busy||!status.snapshot} onClick={()=>void run(scan)}>受信箱と結果を更新</button>
       </div>:null}
       <p className="muted">{status?.notice}</p>
-      {entries.length?<div><h4>受信した案</h4>{entries.map(entry=><article key={entry.filename}><strong>{entry.filename}</strong>{entry.state==='rejected'?<p>受付拒否：{entry.error}</p>:entry.state==='finished'?<p>{entry.result.state==='applied'?'保存結果を確認済み':entry.result.state==='unknown'?'結果未確定。再実行せず保存履歴を確認してください。':'実行失敗'}</p>:<div><p>{entry.prepared.command.type==='task.create'?'タスクの新規作成':'既存タスクのメモ・予定日変更'} / 本人の承認待ち</p><button type="button" className="secondary-button" disabled={busy||Boolean(outcome)} onClick={()=>void run(async()=>{const proposal=await controller.prepare(entry.reference);setView(previous=>({...previous,prepared:proposal,outcome:null}))})}>内容を確認</button></div>}</article>)}</div>:null}
-      {prepared?<section className="change-set-preview" aria-label="外部コマンドの本人確認"><h4>今回だけ許可する内容</h4>
-        {prepared.changeSet?prepared.changeSet.changes.map(change=><article className="change-set-task" key={change.taskId}><h4>{change.title}</h4><small>対象の版 {change.baseRevision}</small>{change.fields.map(field=><div className="change-set-comparison" key={field}><strong>{changeLabels[field]}</strong><div><small>変更前</small><p style={{whiteSpace:'pre-wrap'}}>{taskChangeValueText(change.before[field])}</p></div><div><small>変更後</small><p style={{whiteSpace:'pre-wrap'}}>{taskChangeValueText(change.after[field])}</p></div></div>)}</article>):prepared.assisted?.inputs.map((input,index)=><article key={index}><h4>{input.title}</h4><p style={{whiteSpace:'pre-wrap'}}>{input.notes}</p><p>予定日：{input.scheduledDate??'未設定'} / 点数：未設定 / 締め切り：未設定</p></article>)}
-        <p className="muted">接続 {prepared.registration.client.intended_host}。確認期限 {new Date(prepared.entry.prepared.expiresAt).toLocaleString('ja-JP')}。変更内容 {prepared.digest.slice(0,12)}</p>
-        {decision?.protectedFields.map(field=><label className="field" key={field}><span><input type="checkbox" checked={checked.includes(field)} disabled={busy||Boolean(outcome)} onChange={event=>setChecks({digest:prepared.digest,fields:event.target.checked?[...checked,field]:checked.filter(item=>item!==field)})}/> {changeLabels[field]}の保護を確認し、今回だけ許可する</span></label>)}
-        {!outcome?<button type="button" data-file-bridge-approve={prepared.reference} className="primary-button" disabled={busy||decision?.status==='denied'||decision?.protectedFields.some(field=>!checked.includes(field))||!settings.aiEnabled} onClick={event=>{const native=event.nativeEvent;void run(()=>approve(native))}}>この内容だけを承認して保存</button>:outcome.resultPending?<button type="button" className="secondary-button" disabled={busy} onClick={event=>{const native=event.nativeEvent;void run(async()=>{const result=await controller.retryResultFromUI(prepared,native);setView(previous=>({...previous,outcome:result}));setNotice(result.resultPending?'変更は保存済みです。結果ファイルは未確認です。':'結果ファイルを記録しました。')})}}>保存済み結果の書き出しを再試行</button>:<p>保存と結果ファイルの記録を確認しました。</p>}
+      {entries.length?<div><h4>受信した案</h4>{entries.map(entry=><article key={entry.filename}><strong>{entry.filename}</strong>{entry.state==='rejected'?<p>受付拒否：{entry.error}</p>:entry.state==='finished'?<p>{resultText(entry.result)}</p>:<div><p>{{'task.create':'タスクの新規作成','task.update':'既存タスクの変更','task.split':'タスクの分割','routine.change':'系列の周期変更'}[entry.prepared.command.type]}{entry.prepared.command.via==='mcp_stdio'?'（ローカルMCP経由・自己申告）':''} / 本人の承認待ち</p><button type="button" className="secondary-button" disabled={busy||Boolean(outcome)} onClick={()=>void run(async()=>show(await controller.prepare(entry.reference)))}>内容を確認</button></div>}</article>)}</div>:null}
+      {prepared&&command?<section className="change-set-preview" aria-label="外部コマンドの本人確認"><h4>今回だけ許可する内容</h4>
+        <p className="muted">接続 {prepared.registration.client.intended_host}・入口 {prepared.entrance==='mcp'?'ローカルMCP':'ファイル受信箱'}。確認期限 {new Date(prepared.entry.prepared.expiresAt).toLocaleString('ja-JP')}。変更内容 {prepared.digest.slice(0,12)}</p>
+        {command.envelope.type==='task.update'&&command.stage==='owner_values'?<div><p>外部エージェントがタイトル・本当の締め切り・本人指定ポイントの変更を依頼しています。値は依頼であり本人の指示ではありません。次の値で変更する場合だけ、本人が確定してください。</p>
+          {command.ownerValues![0]&&Object.entries(command.ownerValues![0].patch).map(([field,value])=><p key={field}>{({title:'タイトル',notes:'メモ',scheduledDate:'予定日',dueDate:'本当の締め切り',manualPoints:'本人指定ポイント'} as Record<string,string>)[field]}：{String(target?(field==='manualPoints'?target.score.manualPoints??'未設定':(target as unknown as Record<string,unknown>)[field]??'未設定'):'?')} → <strong>{String(value??'未設定')}</strong></p>)}
+          <label className="field">本人の確認メモ（任意）<input value={valueMessage} maxLength={500} onChange={event=>setValueMessage(event.target.value)}/></label>
+          <button type="button" className="primary-button" disabled={busy||!settings.aiEnabled} onClick={event=>{const native=event.nativeEvent;void run(async()=>show(await controller.confirmValuesFromUI(prepared,native,valueMessage)))}}>本人の指定値を確定して差分を作る</button></div>
+        :command.envelope.type==='task.split'&&split?.stage==='owner_values'?<div><p>外部エージェントの分割案です。名前と配分は提案です。親の{target?.score.manualPoints??'?'}ptと合計を一致させ、本人が値を確定してください。</p>
+          {draftChildren.map((child,index)=><div className="breakdown-row" key={index}><input aria-label={`子タスク${index+1}の名前`} maxLength={300} value={child.title} onChange={event=>editChild(index,{title:event.target.value,titleOrigin:'human'})}/><input aria-label={`子タスク${index+1}のポイント`} type="number" min={0} max={100000} step={1} value={child.points??''} onChange={event=>editChild(index,{points:event.target.value===''?null:Number(event.target.value),pointsOrigin:'human'})}/><span>pt</span></div>)}
+          <p>配分合計：{draftSum} / {target?.score.manualPoints??'?'}pt{draftChildren.some(child=>child.points===null)?'（未入力あり）':''}</p>
+          <button type="button" className="primary-button" disabled={busy||!settings.aiEnabled||draftChildren.some(child=>child.points===null||!child.title.trim())} onClick={event=>{const native=event.nativeEvent;void run(async()=>show(await controller.confirmSplitFromUI(prepared,draftChildren,native,'外部エージェントの分割案を本人が確認')))}}>本人の配分を確定して分割差分を作る</button></div>
+        :command.envelope.type==='routine.change'&&routine?.stage==='owner_values'?<div><p>系列「{routine.ruleTitle}」（版 {routine.ruleRevision}）の周期を変更する依頼です。名称・点数・手順・完了済みの回は変更しません。</p>
+          <p>変更後：<strong>{triggerText(routine.candidate.definition.trigger)}</strong> / 範囲：{routine.candidate.input.scope.kind==='this_and_future'?`${routine.candidate.input.scope.fromDate}以降`:routine.candidate.input.scope.kind==='this_instance'?'今回だけ':'未完了のすべて'}</p>
+          <button type="button" className="primary-button" disabled={busy||!settings.aiEnabled} onClick={event=>{const native=event.nativeEvent;void run(async()=>show(await controller.confirmRoutineFromUI(prepared,native)))}}>依頼内容を確認して次の回を表示</button></div>
+        :command.envelope.type==='routine.change'&&routine?.stage==='review'?<div><h4>保存される設定と次の10回</h4>{routine.assistance.configuration.preview.length?<ol>{routine.assistance.configuration.preview.map(spec=><li key={spec.generationKey}>{spec.title}：{spec.scheduledDate??spec.startAt}</li>)}</ol>:<p>この期間の発生回はありません。</p>}
+          <p>この承認で保存するのは周期の設定だけです。タスク・予定への反映は「繰り返し」画面で別に確認して承認します。</p>
+          {!outcome?<button type="button" data-file-bridge-approve={prepared.reference} className="primary-button" disabled={busy||!settings.aiEnabled} onClick={event=>{const native=event.nativeEvent;void run(()=>approve(native,[]))}}>この周期の設定だけを承認して保存</button>:null}</div>
+        :command.envelope.type==='task.split'&&split?.stage==='review'?(!outcome?<TaskSplitPreview key={command.id} command={command} approveAttributes={approveAttributes} onApprove={(event,checked)=>run(()=>approve(event,checked))} onApplied={()=>undefined} onCancel={()=>setView(previous=>({...previous,prepared:null}))}/>:null)
+        :command.changeSet?(!outcome?<ChangeSetPreview key={command.id} prepared={command.changeSet} policy={policy} actorContext={changeContextFor(command.actor)} humanContext={humanContextFor(command.actor)} command={command} approveAttributes={approveAttributes} onApprove={(event,checked)=>run(()=>approve(event,checked))} onApplied={()=>undefined} onCancel={()=>setView(previous=>({...previous,prepared:null}))}/>:null)
+        :prepared.assisted?<div>{prepared.assisted.inputs.map((input,index)=><article key={index}><h4>{input.title}</h4><p style={{whiteSpace:'pre-wrap'}}>{input.notes}</p><p>予定日：{input.scheduledDate??'未設定'} / 点数：未設定 / 締め切り：未設定</p></article>)}
+          {!outcome?<button type="button" data-file-bridge-approve={prepared.reference} className="primary-button" disabled={busy||!settings.aiEnabled} onClick={event=>{const native=event.nativeEvent;void run(()=>approve(native,[]))}}>この内容だけを承認して保存</button>:null}</div>:null}
+        {outcome?.resultPending?<button type="button" className="secondary-button" disabled={busy} onClick={event=>{const native=event.nativeEvent;void run(async()=>{const result=await controller.retryResultFromUI(prepared,native);setView(previous=>({...previous,outcome:result}));setNotice(result.resultPending?'変更は保存済みです。結果ファイルは未確認です。':'結果ファイルを記録しました。')})}}>保存済み結果の書き出しを再試行</button>:outcome?<p>保存と結果ファイルの記録を確認しました。</p>:null}
       </section>:null}
-      {status?.results.length?<details><summary>結果ファイル（{status.results.length}件）</summary>{status.results.map(result=><p key={result.command_id}>{result.command_id}：{result.state==='applied'?'保存を確認済み':result.state==='unknown'?'結果未確定':'失敗'}</p>)}</details>:null}
+      {status?.results.length?<details><summary>結果ファイル（{status.results.length}件）</summary>{status.results.map(result=><p key={result.command_id}>{result.command_id}：{resultText(result)}</p>)}</details>:null}
     </>}
     <p role="status">{notice||(!controller?'接続機能は未接続です。':busy?'確認しています…':'')}</p>
   </section>

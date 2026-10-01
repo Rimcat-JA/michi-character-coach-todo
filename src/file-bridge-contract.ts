@@ -1,8 +1,12 @@
 import { validateDate } from './domain'
 import type { FileBridgeCommand, FileBridgeInboxEntry, FileBridgeLease, FileBridgeManifest, FileBridgeRegistration, FileBridgeResult, FileBridgeStatus } from './file-bridge-types'
 
-export class FileBridgeError extends Error { readonly code: string; constructor(code: string, message: string) { super(message); this.code=code } }
-export function rejectFileBridge(code: string, message='接続・コマンドまたは承認内容を確認できません。もう一度確認してください。'): never { throw new FileBridgeError(code,message) }
+/** commonCode names the shared K12 reason when an entrance code is ambiguous (AUTHORITY_CHANGED). */
+export class FileBridgeError extends Error { readonly code: string; readonly commonCode?: string; constructor(code: string, message: string, commonCode?: string) { super(message); this.code=code; if(commonCode)this.commonCode=commonCode } }
+export function rejectFileBridge(code: string, message='接続・コマンドまたは承認内容を確認できません。もう一度確認してください。', commonCode?: string): never { throw new FileBridgeError(code,message,commonCode) }
+export const fileBridgeRejectedStates=['denied','conflict','expired','rejected'] as const
+const resultStates=['applied','failed','unknown',...fileBridgeRejectedStates]
+const fields=['title','notes','scheduled_date','due_date','manual_points'],grantKeys=['tasks:read','tasks:prepare','changes:submit','commands:read','tasks:split','routines:prepare']
 const record=(value:unknown):value is Record<string,unknown>=>Boolean(value&&typeof value==='object'&&!Array.isArray(value)&&Object.getPrototypeOf(value)===Object.prototype)
 const exact=(value:Record<string,unknown>,keys:string[])=>Object.keys(value).length===keys.length&&keys.every(key=>Object.hasOwn(value,key))
 const text=(value:unknown,max=200)=>typeof value==='string'&&Boolean(value.trim())&&value.length<=max
@@ -13,27 +17,51 @@ const strings=(value:unknown,allowed:string[])=>Array.isArray(value)&&value.ever
 export const fileBridgeTimestamp=(value:unknown):value is string=>typeof value==='string'&&/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value)&&Number.isFinite(Date.parse(value))&&new Date(value).toISOString()===value
 export const fileBridgeDigest=(value:unknown):value is string=>typeof value==='string'&&/^[a-f0-9]{64}$/.test(value)
 export function assertFileBridgeRegistration(value:unknown):asserts value is FileBridgeRegistration {
-  if(!record(value)||!exact(value,['schema_version','owner_id','dataset_id','policy_epoch','source_permission_revision','task_ids','client'])||value.schema_version!=='1'||!text(value.owner_id)||!uuid(value.dataset_id)||!integer(value.policy_epoch)||!integer(value.source_permission_revision)||!ids(value.task_ids))rejectFileBridge('REGISTRATION_INVALID')
+  const base=['schema_version','owner_id','dataset_id','policy_epoch','source_permission_revision','task_ids','client']
+  if(!record(value)||!(exact(value,base)||exact(value,[...base,'rule_ids']))||Object.hasOwn(value,'rule_ids')&&!ids(value.rule_ids,50)||value.schema_version!=='1'||!text(value.owner_id)||!uuid(value.dataset_id)||!integer(value.policy_epoch)||!integer(value.source_permission_revision)||!ids(value.task_ids))rejectFileBridge('REGISTRATION_INVALID')
   const client=value.client
   if(!record(client)||!exact(client,['id','dataset_id','intended_host','transport','status','revision','grant_epoch','grant'])||!uuid(client.id)||client.dataset_id!==value.dataset_id||!['chatgpt','claude','codex','claude_code','other'].includes(client.intended_host as string)||client.transport!=='stdio'||client.status!=='active'||!integer(client.revision,1)||!integer(client.grant_epoch,1))rejectFileBridge('REGISTRATION_INVALID')
   const grant=client.grant
-  const grantKeys=['keys','project_ids','fields','mutation_mode','max_operations_per_day','max_schedule_shift_days','max_point_delta','allow_external_context','allow_handoffs','expires_at']
-  if(!record(grant)||!exact(grant,grantKeys)&&!exact(grant,[...grantKeys,'automation'])||!strings(grant.keys,['tasks:read','tasks:prepare','changes:submit','commands:read'])||!ids(grant.project_ids)||!strings(grant.fields,['title','notes','scheduled_date'])||!['require_approval','auto_within_bounds'].includes(grant.mutation_mode as string)||(grant.mutation_mode==='auto_within_bounds')!==Object.hasOwn(grant,'automation')||!integer(grant.max_operations_per_day,0,100)||!integer(grant.max_schedule_shift_days,0,31)||grant.max_point_delta!==0||grant.allow_external_context!==false||grant.allow_handoffs!==false||!fileBridgeTimestamp(grant.expires_at))rejectFileBridge('REGISTRATION_INVALID')
+  const grantFields=['keys','project_ids','fields','mutation_mode','max_operations_per_day','max_schedule_shift_days','max_point_delta','allow_external_context','allow_handoffs','expires_at']
+  if(!record(grant)||!exact(grant,grantFields)&&!exact(grant,[...grantFields,'automation'])||!strings(grant.keys,grantKeys)||(grant.keys as string[]).includes('routines:prepare')&&!(value.rule_ids as string[]|undefined)?.length||!ids(grant.project_ids)||!strings(grant.fields,fields)||!['require_approval','auto_within_bounds'].includes(grant.mutation_mode as string)||(grant.mutation_mode==='auto_within_bounds')!==Object.hasOwn(grant,'automation')||!integer(grant.max_operations_per_day,0,100)||!integer(grant.max_schedule_shift_days,0,31)||grant.max_point_delta!==0||grant.allow_external_context!==false||grant.allow_handoffs!==false||!fileBridgeTimestamp(grant.expires_at))rejectFileBridge('REGISTRATION_INVALID')
   if(grant.mutation_mode==='auto_within_bounds'){const automation=grant.automation;if(!record(automation)||!exact(automation,['max_schedule_shift_days','max_operations_per_day'])||!integer(automation.max_schedule_shift_days,0,Number(grant.max_schedule_shift_days))||!integer(automation.max_operations_per_day,1,Number(grant.max_operations_per_day))||(grant.fields as string[]).some(field=>!['notes','scheduled_date'].includes(field)))rejectFileBridge('REGISTRATION_INVALID')}
 }
+const day=(value:unknown)=>{if(value===null)return true;if(typeof value!=='string')return false;try{validateDate(value,'日付');return true}catch{return false}}
+const clock=(value:unknown)=>typeof value==='string'&&/^([01]\d|2[0-3]):[0-5]\d$/.test(value)
+function assertSplitPayload(payload:Record<string,unknown>) {
+  if(!exact(payload,['children'])||!Array.isArray(payload.children))rejectFileBridge('UNSUPPORTED_FIELD')
+  const children=payload.children as unknown[]
+  if(children.length<2||children.length>20||children.some(child=>!record(child)||!exact(child,['title','points'])||!text(child.title,300)||child.points!==null&&!integer(child.points,0,100000)))rejectFileBridge('INVALID_PAYLOAD')
+}
+function assertRoutinePayload(payload:Record<string,unknown>) {
+  if(!exact(payload,['scope','definition'])||!record(payload.definition)||!exact(payload.definition,['trigger']))rejectFileBridge('UNSUPPORTED_FIELD')
+  const scope=payload.scope,trigger=(payload.definition as Record<string,unknown>).trigger
+  if(!record(scope)||!(exact(scope,['kind'])&&scope.kind==='all_uncompleted'||exact(scope,['kind','from_date'])&&scope.kind==='this_and_future'&&typeof scope.from_date==='string'&&day(scope.from_date)||exact(scope,['kind','generation_key'])&&scope.kind==='this_instance'&&text(scope.generation_key)))rejectFileBridge('INVALID_PAYLOAD')
+  const weekly=record(trigger)&&exact(trigger,['kind','weekdays','time'])&&trigger.kind==='weekly'&&Array.isArray(trigger.weekdays)&&trigger.weekdays.length>0&&trigger.weekdays.length<=7&&trigger.weekdays.every(item=>integer(item,0,6))&&new Set(trigger.weekdays).size===trigger.weekdays.length&&clock(trigger.time)
+  const monthly=record(trigger)&&exact(trigger,['kind','ordinal','from','time'])&&trigger.kind==='monthly_business'&&integer(trigger.ordinal,1,31)&&['start','end'].includes(trigger.from as string)&&clock(trigger.time)
+  const relative=record(trigger)&&exact(trigger,['kind','activity_id','edge','offset_days','offset_minutes'])&&trigger.kind==='activity_relative'&&text(trigger.activity_id)&&['start','end'].includes(trigger.edge as string)&&Number.isInteger(trigger.offset_days)&&Math.abs(Number(trigger.offset_days))<=366&&Number.isInteger(trigger.offset_minutes)&&Math.abs(Number(trigger.offset_minutes))<=10080
+  if(!weekly&&!monthly&&!relative)rejectFileBridge('INVALID_PAYLOAD')
+}
 export function assertFileBridgeCommand(value:unknown):asserts value is FileBridgeCommand {
-  if(!record(value)||!exact(value,['schema_version','command_id','snapshot_id','expires_at','type','target_id','expected_revision','payload'])||value.schema_version!=='1'||!uuid(value.command_id)||!uuid(value.snapshot_id)||!fileBridgeTimestamp(value.expires_at)||!['task.create','task.update'].includes(value.type as string)||!record(value.payload))rejectFileBridge('COMMAND_SCHEMA','外部コマンドの形式が不正です。点数・期限・完了・権限は変更できません。')
-  const fields=Object.keys(value.payload)
-  if(!fields.length||fields.some(field=>!['title','notes','scheduled_date'].includes(field))||value.type==='task.update'&&fields.includes('title'))rejectFileBridge('UNSUPPORTED_FIELD')
-  if(Object.hasOwn(value.payload,'title')&&!text(value.payload.title,300)||Object.hasOwn(value.payload,'notes')&&(typeof value.payload.notes!=='string'||value.payload.notes.length>50000))rejectFileBridge('INVALID_PAYLOAD')
-  if(Object.hasOwn(value.payload,'scheduled_date')){if(value.payload.scheduled_date!==null&&typeof value.payload.scheduled_date!=='string')rejectFileBridge('INVALID_PAYLOAD');try{validateDate(value.payload.scheduled_date as string|null,'予定日')}catch{rejectFileBridge('INVALID_PAYLOAD')}}
-  if(value.type==='task.create'?(value.target_id!==null||value.expected_revision!==null||!Object.hasOwn(value.payload,'title')):(!uuid(value.target_id)||!integer(value.expected_revision,1)))rejectFileBridge('INVALID_TARGET')
+  const base=['schema_version','command_id','snapshot_id','expires_at','type','target_id','expected_revision','payload']
+  if(!record(value)||base.some(key=>!Object.hasOwn(value,key))||Object.keys(value).some(key=>!base.includes(key)&&!['basis','via'].includes(key))||Object.hasOwn(value,'basis')&&(!record(value.basis)||!(exact(value.basis,['kind'])||exact(value.basis,['kind','note']))||value.basis.kind!=='external_request'||Object.hasOwn(value.basis,'note')&&(typeof value.basis.note!=='string'||value.basis.note.length>1000))||Object.hasOwn(value,'via')&&value.via!=='mcp_stdio'||value.schema_version!=='1'||!uuid(value.command_id)||!uuid(value.snapshot_id)||!fileBridgeTimestamp(value.expires_at)||!record(value.payload))rejectFileBridge('COMMAND_SCHEMA','外部コマンドの形式が不正です。承認・操作者・権限は受け付けません。')
+  if(!['task.create','task.update','task.split','routine.change'].includes(value.type as string))rejectFileBridge('UNSUPPORTED_OPERATION')
+  const payload=value.payload as Record<string,unknown>
+  if(value.type==='task.split')assertSplitPayload(payload)
+  else if(value.type==='routine.change')assertRoutinePayload(payload)
+  else {
+    const keys=Object.keys(payload)
+    if(!keys.length||keys.some(field=>!(value.type==='task.create'?['title','notes','scheduled_date']:fields).includes(field)))rejectFileBridge('UNSUPPORTED_FIELD')
+    if(Object.hasOwn(payload,'title')&&!text(payload.title,300)||Object.hasOwn(payload,'notes')&&(typeof payload.notes!=='string'||payload.notes.length>50000)||['scheduled_date','due_date'].some(field=>Object.hasOwn(payload,field)&&!day(payload[field]))||Object.hasOwn(payload,'manual_points')&&!integer(payload.manual_points,0,100000))rejectFileBridge('INVALID_PAYLOAD')
+  }
+  if(value.type==='task.create'?(value.target_id!==null||value.expected_revision!==null||!Object.hasOwn(payload,'title')):(!uuid(value.target_id)||!integer(value.expected_revision,1)))rejectFileBridge('INVALID_TARGET')
 }
 export function assertFileBridgeManifest(value:unknown):asserts value is FileBridgeManifest {
   if(!record(value)||!exact(value,['schema_version','snapshot_id','owner_id','dataset_id','client_id','policy_epoch','source_permission_revision','registration_revision','grant_epoch','generated_at','expires_at','view_path','view_sha256','entity_revisions','registration_sha256'])||value.schema_version!=='1'||!uuid(value.snapshot_id)||!text(value.owner_id)||!uuid(value.dataset_id)||!uuid(value.client_id)||!integer(value.policy_epoch)||!integer(value.source_permission_revision)||!integer(value.registration_revision,1)||!integer(value.grant_epoch,1)||!fileBridgeTimestamp(value.generated_at)||!fileBridgeTimestamp(value.expires_at)||value.view_path!=='views/tasks.active.json'||!fileBridgeDigest(value.view_sha256)||!fileBridgeDigest(value.registration_sha256)||!record(value.entity_revisions)||Object.keys(value.entity_revisions).length>100||Object.entries(value.entity_revisions).some(([id,revision])=>!uuid(id)||!integer(revision,1)))rejectFileBridge('SNAPSHOT_INVALID')
 }
 export function assertFileBridgeResult(value:unknown):asserts value is FileBridgeResult {
-  if(!record(value)||!exact(value,['schema_version','command_id','digest','owner_id','dataset_id','client_id','state','receipt','finished_at'])||value.schema_version!=='1'||!uuid(value.command_id)||!fileBridgeDigest(value.digest)||!text(value.owner_id)||!uuid(value.dataset_id)||!uuid(value.client_id)||!['applied','failed','unknown'].includes(value.state as string)||!fileBridgeTimestamp(value.finished_at))rejectFileBridge('RESULT_INVALID')
+  const keys=['schema_version','command_id','digest','owner_id','dataset_id','client_id','state','receipt','finished_at'],rejected=record(value)&&(fileBridgeRejectedStates as readonly string[]).includes(value.state as string)
+  if(!record(value)||!exact(value,rejected?[...keys,'code']:keys)||rejected&&(typeof value.code!=='string'||!/^[A-Z0-9_]{1,60}$/.test(value.code))||value.schema_version!=='1'||!uuid(value.command_id)||!fileBridgeDigest(value.digest)||!text(value.owner_id)||!uuid(value.dataset_id)||!uuid(value.client_id)||!resultStates.includes(value.state as string)||!fileBridgeTimestamp(value.finished_at))rejectFileBridge('RESULT_INVALID')
   if(value.receipt!==null){const receipt=value.receipt;if(!record(receipt)||!exact(receipt,['commandId','digest','taskIds','appliedAt'])||receipt.commandId!==value.command_id||receipt.digest!==value.digest||!ids(receipt.taskIds,1)||(receipt.taskIds as unknown[]).length!==1||!fileBridgeTimestamp(receipt.appliedAt))rejectFileBridge('RESULT_INVALID')}
   if(value.state==='applied'&&value.receipt===null||value.state!=='applied'&&value.receipt!==null)rejectFileBridge('RESULT_INVALID')
 }

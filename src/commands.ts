@@ -5,6 +5,10 @@ import { validateLabelsForOwner } from './labels'
 import { assertTripTaskScoreChangeAllowed, freezeTripBundle } from './trip-bundles'
 import { cancelCoachNotificationTarget } from './coach-notification-save'
 import { allocationAssessmentForFirstCompletion, pointsForRecompletion } from './allocation-completion'
+import { recordHumanCommand } from './command-bus'
+
+/** Owner-editable values recorded as before/after in structured audits (K12-G3). */
+export const auditedTaskValues = (task: Task): Record<string, unknown> => ({ title: task.title, notes: task.notes, project: task.project, containerId: task.containerId ?? null, labels: task.labels, scheduledDate: task.scheduledDate, dueDate: task.dueDate, targetDate: task.targetDate, reviewDate: task.reviewDate, availableFrom: task.availableFrom, deferredUntil: task.deferredUntil ?? null, importance: task.importance, frog: task.frog ?? null, weight: task.weight ?? null, energyNeed: task.energyNeed ?? null, focusNeed: task.focusNeed ?? null, positiveFeeling: task.positiveFeeling ?? null, score: task.score, effectivePoints: task.effectivePoints, status: task.status, deletedAt: task.deletedAt })
 
 export class ConflictError extends Error { constructor() { super('別の画面で更新されました。再読み込みして差分を確認してください。') } }
 const now = () => new Date().toISOString()
@@ -82,7 +86,7 @@ export async function bulkUpdateTasksAtomic(items: { id: string; revision: numbe
   }
   if ('importance' in patch && (!Number.isInteger(patch.importance) || patch.importance! < 0 || patch.importance! > 3)) throw new Error('重要度は0〜3で指定してください')
   const hash = JSON.stringify({ operation: 'bulk_update', items, patch })
-  return db.transaction('rw', db.tasks, db.commands, db.audits, async () => {
+  return db.transaction('rw', db.tasks, db.commands, db.audits, db.settings, async () => {
     const prior = await db.commands.get(key)
     if (prior) {
       if (prior.hash !== hash) throw new Error('IDEMPOTENCY_MISMATCH')
@@ -94,8 +98,9 @@ export async function bulkUpdateTasksAtomic(items: { id: string; revision: numbe
     for (const task of tasks as Task[]) {
       // Clearing the deadline clears its clock; moving a clock deadline's day needs the owner's time decision.
       const due = 'dueDate' in patch && task.dueAt ? patch.dueDate === null ? { dueAt: null, dueTimezone: null } : (() => { validateTaskDue({ dueDate: patch.dueDate!, dueAt: task.dueAt, dueTimezone: task.dueTimezone }); return {} })() : {}
-      await db.tasks.put({ ...task, ...patch, ...due, revision: task.revision + 1, updatedAt: at })
-      await db.audits.add({ id: uid(), taskId: task.id, operation: 'bulk_update', at, detail: `一括編集: ${fields.join(',')}` })
+      const next = { ...task, ...patch, ...due, revision: task.revision + 1, updatedAt: at }
+      await db.tasks.put(next)
+      await recordHumanCommand({ operation: 'bulk_update', taskId: task.id, commandKey: key, before: auditedTaskValues(task), after: auditedTaskValues(next), revisionBefore: task.revision, revisionAfter: next.revision, summary: `一括編集: ${fields.join(',')}`, at })
     }
     const ids = tasks.map(task => task!.id)
     await db.commands.add({ key, hash, resultId: JSON.stringify(ids), at })
@@ -118,9 +123,10 @@ export async function updateTask(id: string, expectedRevision: number, input: Ta
     const project = await resolvedProject(input)
     const assessmentId = scoreChanged ? uid() : old.assessmentId
     if (scoreChanged) await db.assessments.add({ id: assessmentId, taskId: id, score: { ...input.score }, result, createdAt: now(), origin: 'human', ruleVersion: 'v1' })
-    await db.tasks.put({ ...old, ...input, project, firstScheduledDate: old.firstScheduledDate ?? old.scheduledDate ?? input.scheduledDate, title: input.title.trim(), labels: [...input.labels], score: { ...input.score }, assessmentId, effectivePoints: result.effective, revision: old.revision + 1, updatedAt: now() })
+    const next: Task = { ...old, ...input, project, firstScheduledDate: old.firstScheduledDate ?? old.scheduledDate ?? input.scheduledDate, title: input.title.trim(), labels: [...input.labels], score: { ...input.score }, assessmentId, effectivePoints: result.effective, revision: old.revision + 1, updatedAt: now() }
+    await db.tasks.put(next)
     await cancelCoachNotificationTarget(id)
-    await db.audits.add({ id: uid(), taskId: id, operation: 'update', at: now(), detail: '本人が編集' })
+    await recordHumanCommand({ operation: 'update', taskId: id, commandKey: key, before: auditedTaskValues(old), after: auditedTaskValues(next), revisionBefore: old.revision, revisionAfter: next.revision, summary: '本人が編集', ...(scoreChanged ? { extra: { assessmentBefore: old.assessmentId, assessmentAfter: assessmentId } } : {}) })
     return id
   }, true)
 }
@@ -132,7 +138,7 @@ export async function setTaskFlag(id: string, expectedRevision: number, flag: 'p
     if (task.revision !== expectedRevision) throw new ConflictError()
     const at = now()
     await db.tasks.put({ ...task, [flag]: value, revision: task.revision + 1, updatedAt: at })
-    await db.audits.add({ id: uid(), taskId: id, operation: 'set_flag', at, detail: `${flag}=${value}` })
+    await recordHumanCommand({ operation: 'set_flag', taskId: id, commandKey: key, before: { [flag]: task[flag] ?? false }, after: { [flag]: value }, revisionBefore: task.revision, revisionAfter: task.revision + 1, summary: `${flag}=${value}`, at })
     return id
   })
 }
@@ -160,7 +166,7 @@ export async function completeTask(id: string, expectedRevision: number, key: st
     }
     await db.tasks.put({ ...task, status: 'completed', revision: task.revision + 1, updatedAt: at })
     await cancelCoachNotificationTarget(id, at)
-    await db.audits.add({ id: uid(), taskId: id, operation: 'complete', at, detail: points === null ? 'ポイント未設定で完了' : `${points}ptで完了` })
+    await recordHumanCommand({ operation: 'complete', taskId: id, commandKey: key, before: { status: task.status, completionPoints: existing ? existing.netPoints : null }, after: { status: 'completed', completionPoints: points }, revisionBefore: task.revision, revisionAfter: task.revision + 1, summary: points === null ? 'ポイント未設定で完了' : `${points}ptで完了`, at })
     return id
   }, true, true)
 }
@@ -175,7 +181,7 @@ export async function undoCompletion(id: string, expectedRevision: number, key: 
     if (completion.netPoints !== null) await db.ledger.add({ id: uid(), completionId: completion.id, taskId: id, kind: 'reverse', delta: -completion.netPoints, at: now(), reason: '完了取消' })
     await db.completions.put({ ...completion, currentAt: null, netPoints: null, lastConfirmedPoints: completion.netPoints })
     await db.tasks.put({ ...task, status: 'open', revision: task.revision + 1, updatedAt: now() })
-    await db.audits.add({ id: uid(), taskId: id, operation: 'undo', at: now(), detail: '完了を取消' })
+    await recordHumanCommand({ operation: 'undo', taskId: id, commandKey: key, before: { status: 'completed', completionPoints: completion.netPoints }, after: { status: 'open', completionPoints: null }, revisionBefore: task.revision, revisionAfter: task.revision + 1, summary: '完了を取消' })
     return id
   })
 }
@@ -188,7 +194,7 @@ export async function correctCompletion(id: string, points: number, reason: stri
     const delta = points - (completion.netPoints ?? 0)
     await db.ledger.add({ id: uid(), completionId: completion.id, taskId: id, kind: 'adjust', delta, at: now(), reason: reason.trim() })
     await db.completions.put({ ...completion, netPoints: points, scoreState: 'confirmed' })
-    await db.audits.add({ id: uid(), taskId: id, operation: 'correct_points', at: now(), detail: `${points}pt: ${reason.trim()}` })
+    await recordHumanCommand({ operation: 'correct_points', taskId: id, commandKey: key, before: { completionPoints: completion.netPoints }, after: { completionPoints: points }, revisionBefore: null, revisionAfter: null, summary: `${points}pt: ${reason.trim()}`, extra: { reason: reason.trim(), completionId: completion.id } })
     return id
   })
 }
@@ -197,9 +203,10 @@ export async function trashTask(id: string, expectedRevision: number, key: strin
     const task = await db.tasks.get(id)
     if (!task) throw new Error('タスクが見つかりません')
     if (task.revision !== expectedRevision) throw new ConflictError()
-    await db.tasks.put({ ...task, deletedAt: now(), revision: task.revision + 1, updatedAt: now() })
+    const deletedAt = now()
+    await db.tasks.put({ ...task, deletedAt, revision: task.revision + 1, updatedAt: deletedAt })
     await cancelCoachNotificationTarget(id)
-    await db.audits.add({ id: uid(), taskId: id, operation: 'trash', at: now(), detail: '表示上の削除。実績は維持' })
+    await recordHumanCommand({ operation: 'trash', taskId: id, commandKey: key, before: { deletedAt: task.deletedAt }, after: { deletedAt }, revisionBefore: task.revision, revisionAfter: task.revision + 1, summary: '表示上の削除。実績は維持', at: deletedAt })
     return id
   })
 }
@@ -209,6 +216,7 @@ export async function restoreTask(id: string, expectedRevision: number, key: str
     if (!task) throw new Error('タスクが見つかりません')
     if (task.revision !== expectedRevision) throw new ConflictError()
     await db.tasks.put({ ...task, deletedAt: null, revision: task.revision + 1, updatedAt: now() })
+    await recordHumanCommand({ operation: 'restore_task', taskId: id, commandKey: key, before: { deletedAt: task.deletedAt }, after: { deletedAt: null }, revisionBefore: task.revision, revisionAfter: task.revision + 1, summary: 'ゴミ箱から戻す。実績は維持' })
     return id
   })
 }
