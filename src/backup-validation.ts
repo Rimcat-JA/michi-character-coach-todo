@@ -29,6 +29,7 @@ import { validateAchievementRecords } from './achievements-validation'
 import { validateTaskSourceEvidenceRecords, type TaskSourceEvidence } from './task-source-evidence'
 import { validateRuntimeProfile } from './runtime-profile'
 import { validateRoutineCatchupState } from './routine-catchup'
+import { validateHandoffManifest, type HandoffManifest } from './handoff-manifest'
 
 export type Snapshot = {
   format: 'coachbundle'; version: 1; exportedAt: string
@@ -73,6 +74,8 @@ export type Snapshot = {
   achievementEvidence?: AchievementEvidence[]
   achievementExports?: AchievementExport[]
   taskSourceEvidence?: TaskSourceEvidence[]
+  /** I05 handoff manifest. Task heads are never read from it; they are recomputed from the rows. */
+  handoff?: HandoffManifest
 }
 
 const tableNames = ['tasks', 'assessments', 'completions', 'ledger', 'routines', 'sessions', 'commands', 'audits', 'settings'] as const
@@ -204,7 +207,7 @@ export function validateSnapshot(input: unknown): asserts input is Snapshot {
       const instruction = assessment.instruction, settings = tables.settings[0], task = (tables.tasks as Task[]).find(row => row.id === assessment.taskId)
       const keys = ['id', 'digest', 'ownerId', 'datasetId', 'actorId', 'actorKind', 'model', 'taskRevision', 'approvedBy']
       const identity = (value: unknown) => filled(value) && value.length <= 200 && value.trim() === value && ![...value].some(char => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127)
-      if (!record(instruction) || Object.keys(instruction).length !== keys.length || keys.some(key => !Object.hasOwn(instruction, key)) || !identity(instruction.id) || typeof instruction.digest !== 'string' || !/^[a-f0-9]{64}$/.test(instruction.digest) || !identity(instruction.ownerId) || !identity(instruction.datasetId) || instruction.ownerId !== settings.profileId || instruction.datasetId !== settings.datasetId || instruction.approvedBy !== instruction.ownerId || !identity(instruction.actorId) || !['coach', 'external-agent'].includes(instruction.actorKind) || !(instruction.model === null || typeof instruction.model === 'string' && /^[\w~./:-]{3,120}$/.test(instruction.model)) || !Number.isSafeInteger(instruction.taskRevision) || instruction.taskRevision < 1 || !task || instruction.taskRevision > task.revision || !(assessment.score.mode === 'manual' && assessment.score.manualPoints !== null || assessment.score.mode === 'allocated' && Number.isInteger(assessment.score.manualPoints) && splitChild(task))) throw new Error('本人指示による評価履歴が不正です')
+      if (!record(instruction) || Object.keys(instruction).length !== keys.length || keys.some(key => !Object.hasOwn(instruction, key)) || !identity(instruction.id) || typeof instruction.digest !== 'string' || !/^[a-f0-9]{64}$/.test(instruction.digest) || !identity(instruction.ownerId) || !identity(instruction.datasetId) || instruction.ownerId !== settings.profileId || !(instruction.datasetId === settings.datasetId || (record(settings.lineage) && Array.isArray((settings.lineage as { ancestorDatasetIds?: unknown }).ancestorDatasetIds) && ((settings.lineage as { ancestorDatasetIds: string[] }).ancestorDatasetIds.includes(instruction.datasetId)))) || instruction.approvedBy !== instruction.ownerId || !identity(instruction.actorId) || !['coach', 'external-agent'].includes(instruction.actorKind) || !(instruction.model === null || typeof instruction.model === 'string' && /^[\w~./:-]{3,120}$/.test(instruction.model)) || !Number.isSafeInteger(instruction.taskRevision) || instruction.taskRevision < 1 || !task || instruction.taskRevision > task.revision || !(assessment.score.mode === 'manual' && assessment.score.manualPoints !== null || assessment.score.mode === 'allocated' && Number.isInteger(assessment.score.manualPoints) && splitChild(task))) throw new Error('本人指示による評価履歴が不正です')
     } else if (Object.hasOwn(assessment, 'instruction')) throw new Error('評価履歴の指示情報が不正です')
     const calculated = calculateScore(assessment.score)
     if (calculated.effective !== assessment.result.effective || calculated.lower !== assessment.result.lower || calculated.upper !== assessment.result.upper) throw new Error('評価履歴のポイントが一致しません')
@@ -336,12 +339,12 @@ export function validateSnapshot(input: unknown): asserts input is Snapshot {
   const notes = (input.taskNotes ?? []) as TaskNote[], comments = (input.taskComments ?? []) as TaskComment[], attachments = (input.taskAttachments ?? []) as NonNullable<Snapshot['taskAttachments']>
   unique(notes, 'taskNotes', 'id'); unique(comments, 'taskComments', 'id'); unique(attachments, 'taskAttachments', 'id')
   for (const note of notes) if (!taskIds.has(note.taskId) || note.ownerId !== settings.profileId || !['self', 'source'].includes(note.kind) || !filled(note.body) || note.body.length > 50000 || !timestamp(note.createdAt)) throw new Error('ノートが不正です')
-  for (const comment of comments) if (!taskIds.has(comment.taskId) || comment.ownerId !== settings.profileId || !filled(comment.body) || comment.body.length > 10000 || !timestamp(comment.createdAt)) throw new Error('コメントが不正です')
+  for (const comment of comments) if (!taskIds.has(comment.taskId) || comment.ownerId !== settings.profileId || !filled(comment.body) || comment.body.length > 10000 || !timestamp(comment.createdAt) || Object.keys(comment).some(key => !['id', 'taskId', 'ownerId', 'body', 'createdAt', 'authorKind', 'authorLabel'].includes(key)) || (comment.authorKind !== undefined || comment.authorLabel !== undefined) && (comment.authorKind !== 'share_recipient' || !filled(comment.authorLabel) || comment.authorLabel.length > 100)) throw new Error('コメントが不正です')
   for (const attachment of attachments) {
     if (!taskIds.has(attachment.taskId) || attachment.ownerId !== settings.profileId || !filled(attachment.name) || attachment.name.length > 200 || [...attachment.name].some(char => char.charCodeAt(0) < 32 || '\\/:*?"<>|'.includes(char)) || typeof attachment.mediaType !== 'string' || attachment.mediaType.length > 120 || !Number.isInteger(attachment.size) || attachment.size < 1 || attachment.size > 5 * 1024 * 1024 || !/^[a-f0-9]{64}$/.test(attachment.sha256) || !timestamp(attachment.createdAt) || typeof attachment.contentBase64 !== 'string' || !/^[A-Za-z0-9+/]*={0,2}$/.test(attachment.contentBase64) || attachment.contentBase64.length > Math.ceil(attachment.size / 3) * 4) throw new Error('添付が不正です')
   }
   if (containers.some(raw => (raw as Container).ownerId !== settings.profileId)) throw new Error('カテゴリ・プロジェクトの所有者が不正です')
-  const allowedSettings = new Set(['id', 'profileId', 'datasetId', 'createdAt', 'coachName', 'dailyMinutes', 'dailyPoints', 'notifications', 'aiEnabled', 'aiModel', 'daySectionMode', 'taskListLimit', 'automation', 'lastBackupAt', 'timeTargets', 'dayProgressBaseline', 'wallTiles', 'navDesktop', 'navMobile', 'hiddenFeatures', 'workflowPresets', 'appearance', 'reminderState', 'keybindings', 'characterProfile', 'dashboardWidgets', 'customScreen', 'changePolicy', 'notificationState', 'runtimeProfile', 'routineCatchup'])
+  const allowedSettings = new Set(['id', 'profileId', 'datasetId', 'createdAt', 'coachName', 'dailyMinutes', 'dailyPoints', 'notifications', 'aiEnabled', 'aiModel', 'daySectionMode', 'taskListLimit', 'automation', 'lastBackupAt', 'timeTargets', 'dayProgressBaseline', 'wallTiles', 'navDesktop', 'navMobile', 'hiddenFeatures', 'workflowPresets', 'appearance', 'reminderState', 'keybindings', 'characterProfile', 'dashboardWidgets', 'customScreen', 'changePolicy', 'notificationState', 'runtimeProfile', 'routineCatchup', 'datasetMode', 'lineage'])
   if (Object.keys(settings).some(key => !allowedSettings.has(key))) throw new Error('設定に未対応の項目があります')
   if (!filled(settings.profileId) || !filled(settings.datasetId) || !timestamp(settings.createdAt) || typeof settings.coachName !== 'string' || !Number.isInteger(settings.dailyMinutes) || settings.dailyMinutes < 0 || !Number.isInteger(settings.dailyPoints) || settings.dailyPoints < 0 || typeof settings.aiEnabled !== 'boolean' || typeof settings.notifications !== 'boolean' || !['A0', 'A1', 'A2', 'A3', 'custom'].includes(settings.automation) || !nullableString(settings.lastBackupAt) || (settings.lastBackupAt !== null && !timestamp(settings.lastBackupAt))) throw new Error('設定が不正です')
   for (const rule of themeRules) { if (rule.ownerId !== settings.profileId || !timestamp(rule.createdAt)) throw new Error('重点テーマが不正です'); validateThemeRule(rule) }
@@ -394,6 +397,12 @@ export function validateSnapshot(input: unknown): asserts input is Snapshot {
   if (settings.changePolicy !== undefined) validateChangePolicy(settings.changePolicy)
   if (settings.runtimeProfile !== undefined) validateRuntimeProfile(settings.runtimeProfile, settings.datasetId)
   if (settings.routineCatchup !== undefined) validateRoutineCatchupState(settings.routineCatchup)
+  if (settings.datasetMode !== undefined && !['active', 'frozen', 'read_only'].includes(settings.datasetMode)) throw new Error('データセットの状態が不正です')
+  if (settings.lineage !== undefined) {
+    const lineage = settings.lineage as unknown
+    if (!record(lineage) || Object.keys(lineage).length !== 4 || !['parentDatasetId', 'ancestorDatasetIds', 'forkedAt', 'moveId'].every(key => Object.hasOwn(lineage, key)) || !(lineage.parentDatasetId === null || filled(lineage.parentDatasetId) && lineage.parentDatasetId.length <= 200 && lineage.parentDatasetId !== settings.datasetId) || !Array.isArray(lineage.ancestorDatasetIds) || lineage.ancestorDatasetIds.length > 50 || lineage.ancestorDatasetIds.some(id => !filled(id) || id.length > 200 || id === settings.datasetId) || (lineage.parentDatasetId !== null && lineage.ancestorDatasetIds[0] !== lineage.parentDatasetId) || !(lineage.forkedAt === null || timestamp(lineage.forkedAt)) || !(lineage.moveId === null || filled(lineage.moveId) && lineage.moveId.length <= 200)) throw new Error('データセットの系譜が不正です')
+  }
+  if (input.handoff !== undefined) validateHandoffManifest(input.handoff, settings.datasetId)
   if (settings.notificationState !== undefined) validateCoachNotificationState(settings.notificationState, settings.profileId, settings.datasetId)
   validateSourceRecords(input.contextSources, input.contextSnapshots, input.sourceSummaries, input.sourceArtifacts, settings.profileId, settings.changePolicy)
   validateTaskSourceEvidenceRecords(input.taskSourceEvidence, taskIds, new Set(((input.contextSources ?? []) as ContextSource[]).map(source => source.id)), settings.profileId, settings.datasetId)
