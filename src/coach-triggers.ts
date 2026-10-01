@@ -1,7 +1,7 @@
 import { db } from './db'
 import { addDays, type Settings, type Task } from './domain'
 import { DEFAULT_CHARACTER } from './character'
-import { calendarFactual, calendarRuleRevision, deadlineFactual, deadlineFacts, deadlineRuleRevision, factsDigest, isCalendarIntent, isDeadlineIntent, isReplanIntent, replanFactual, slippedTasks } from './coach-facts'
+import { calendarFactual, calendarRuleRevision, deadlineCoveredByReminder, deadlineFactual, deadlineLabel, deadlineFacts, deadlineRuleRevision, factsDigest, isCalendarIntent, isDeadlineIntent, isReplanIntent, replanFactual, slippedTasks } from './coach-facts'
 import { coachTriggersOf, notificationLocalClock, type CoachNotificationIntent, type CoachTriggerSettings, type NotificationGuard, type NotificationRequest } from './coach-notifications'
 import { acceptCoachNotificationInApp, coachNotificationGuardFor, coachNotificationStateFor, prepareCoachNotificationDelivery, queueCoachNotification, recordCoachNotificationDelivery, saveCoachNotificationAIText } from './coach-notification-save'
 import { draftNotificationText, type NotificationTextTransport } from './notification-text'
@@ -19,14 +19,22 @@ export function zonedInstant(day: string, time: string, timezone: string): strin
   return new Date(guess).toISOString()
 }
 const destinations = (os: boolean, settings: Pick<Settings, 'notifications'>) => ['in-app', ...(os && settings.notifications ? ['os'] : [])]
-/** Fact trigger for open tasks whose real deadline is within the person's lead window. */
-export function deadlineNearRequests(tasks: Task[], triggers: CoachTriggerSettings, settings: Pick<Settings, 'notifications'>, at: string, timezone: string): NotificationRequest[] {
+const hourMs = 3600000
+/**
+ * Fact trigger for open tasks whose real deadline is within the person's lead window. A timed deadline (dueAt) ends the window at that instant and
+ * is never announced after it; when the lead time falls after dueAt the notice moves to one hour before it. A one-time reminder the person set on the
+ * task inside the same window (e.g. 「締め切り時刻の30分前」) replaces the coach notice, so the deadline is not announced twice.
+ */
+export function deadlineNearRequests(tasks: Task[], triggers: CoachTriggerSettings, settings: Pick<Settings, 'notifications'> & Partial<Pick<Settings, 'reminderState'>>, at: string, timezone: string): NotificationRequest[] {
   if (!triggers.deadlineNear.enabled) return []
   return tasks.filter(task => !task.deletedAt && task.status === 'open' && task.dueDate && (!task.snoozedUntil || task.snoozedUntil <= at)).flatMap(task => {
-    const expiresAt = zonedInstant(addDays(task.dueDate!, 1), '00:00', timezone), lead = zonedInstant(addDays(task.dueDate!, -triggers.deadlineNear.leadDays), triggers.deadlineNear.time, timezone)
-    const notBefore = new Date(Math.max(Date.parse(lead), Date.parse(expiresAt) - 7 * dayMs + 60000)).toISOString()
+    const timed = Boolean(task.dueAt && task.dueTimezone)
+    const expiresAt = timed ? new Date(Date.parse(task.dueAt!)).toISOString() : zonedInstant(addDays(task.dueDate!, 1), '00:00', timezone), lead = zonedInstant(addDays(task.dueDate!, -triggers.deadlineNear.leadDays), triggers.deadlineNear.time, timezone)
+    const start = timed ? Math.min(Date.parse(lead), Date.parse(expiresAt) - hourMs) : Date.parse(lead)
+    const notBefore = new Date(Math.max(start, Date.parse(expiresAt) - 7 * dayMs + 60000)).toISOString()
     if (at < notBefore || at >= expiresAt) return []
-    return [{ id: `deadline:${task.id}:${task.dueDate}`, purpose: 'deadline_near', category: 'proactive', target: { kind: 'task', id: task.id, revision: task.revision }, ruleId: `deadline:${task.id}`, ruleRevision: deadlineRuleRevision(task), ruleWindow: task.dueDate!, notBefore, expiresAt, destinationIds: destinations(triggers.deadlineNear.os, settings), sourceRefs: [], text: { factual: deadlineFactual(task.title, task.dueDate!), savedAI: null }, intervalMinutes: null, maxCount: null, endDate: null } satisfies NotificationRequest]
+    if (deadlineCoveredByReminder(task, settings.reminderState?.rules, notBefore, expiresAt)) return []
+    return [{ id: `deadline:${task.id}:${task.dueDate}`, purpose: 'deadline_near', category: 'proactive', target: { kind: 'task', id: task.id, revision: task.revision }, ruleId: `deadline:${task.id}`, ruleRevision: deadlineRuleRevision(task), ruleWindow: task.dueDate!, notBefore, expiresAt, destinationIds: destinations(triggers.deadlineNear.os, settings), sourceRefs: [], text: { factual: deadlineFactual(task.title, deadlineLabel(task, timezone)), savedAI: null }, intervalMinutes: null, maxCount: null, endDate: null } satisfies NotificationRequest]
   })
 }
 /** Optional daily prompt: only a count of slipped tasks, never a change. */
@@ -61,7 +69,10 @@ async function reserve(settings: Settings, request: NotificationRequest, at: str
 /** AI wording is written only after a reservation passed the policy; any failure keeps the factual template. */
 async function wordIntent(intent: CoachNotificationIntent, deps: CoachTriggerDeps, at: string) {
   const settings = await db.settings.get('main'), task = await db.tasks.get(intent.target.id)
-  if (!settings || !isDeadlineIntent(intent) || !coachTriggersOf(coachNotificationStateFor(settings)).aiText || !settings.aiEnabled || !settings.aiModel || !deps.notificationText || !task?.dueDate) return
+  const state = settings ? coachNotificationStateFor(settings) : null
+  if (!settings || !state || !isDeadlineIntent(intent) || !coachTriggersOf(state).aiText || !settings.aiEnabled || !settings.aiModel || !deps.notificationText || !task?.dueDate) return
+  // A deadline set in another zone keeps the factual template: the zone name is not something the AI wording may restate.
+  if (task.dueAt && task.dueTimezone !== state.policy.timezone) return
   const facts = deadlineFacts(task), model = settings.aiModel, others = (await db.tasks.toArray()).filter(item => item.id !== task.id && !item.deletedAt && item.status === 'open').map(item => item.title)
   const draft = await draftNotificationText(deps.notificationText, { model, facts, character: settings.characterProfile ?? DEFAULT_CHARACTER }, others)
   if (draft.text) await saveCoachNotificationAIText(intent.id, draft.text, model, await factsDigest(facts), at)

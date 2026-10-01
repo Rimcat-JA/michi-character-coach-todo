@@ -153,3 +153,33 @@ test('automatic AI wording IPC is refused unless the saved settings still allow 
   }
   assert.equal(notificationTextAllowed(null, 'synthetic/qa', now), false)
 })
+function timedDeadlineFixture(item = facts.timedDeadline[0]) {
+  const value = deadlineFixture()
+  Object.assign(value.context.task, { title: item.title, dueDate: item.dueDate, dueAt: item.dueAt, dueTimezone: item.dueTimezone, scheduledDate: item.scheduledDate })
+  Object.assign(value.intent, { ruleRevision: `deadline:1:${item.dueDate}`, ruleWindow: item.dueDate, expiresAt: item.dueAt, text: { factual: item.factual, savedAI: null } })
+  value.payload.body = item.factual
+  return value
+}
+test('timed deadline (dueAt): the shared fixture wording with the clock time and zone, digest including dueTime, nothing after dueAt', () => {
+  for (const item of facts.timedDeadline) {
+    assert.equal(createHash('sha256').update(JSON.stringify(['deadline_near', item.title, item.dueDate, item.scheduledDate, item.dueTime])).digest('hex'), item.digest)
+    const value = timedDeadlineFixture(item); assert.deepEqual(validateOSNotification(value.context, value.payload, now), { title: 'michi 通知', body: item.factual })
+  }
+  // The date-only wording is refused for a timed deadline, and the deadline instant ends the notice even if the stored intent says otherwise.
+  const dateOnly = timedDeadlineFixture(); dateOnly.payload.body = `期限が近いタスク: ${facts.timedDeadline[0].title}（期限 ${facts.timedDeadline[0].dueDate}）`; dateOnly.intent.text.factual = dateOnly.payload.body
+  assert.equal(validateOSNotification(dateOnly.context, dateOnly.payload, now), null)
+  const late = timedDeadlineFixture(); late.context.task.dueAt = '2026-10-01T01:59:00.000Z'; late.context.task.dueDate = '2026-10-01'
+  assert.equal(validateOSNotification(late.context, late.payload, now), null)
+  // Saved AI wording is bound to the digest that includes the deadline time.
+  const ai = timedDeadlineFixture(); ai.context.settings.aiEnabled = true; ai.context.settings.aiModel = 'synthetic/qa'; ai.intent.text = { factual: facts.timedDeadline[0].factual, savedAI: '申請書の提出は10月2日17:00までです。', savedAIModel: 'synthetic/qa', factsDigest: facts.timedDeadline[0].digest }; ai.payload = { ...ai.payload, body: ai.intent.text.savedAI, provenance: 'saved-ai' }
+  assert.notEqual(validateOSNotification(ai.context, ai.payload, now), null)
+  ai.intent.text.factsDigest = facts.deadline[0].digest; assert.equal(validateOSNotification(ai.context, ai.payload, now), null)
+})
+test('the person\'s own one-time reminder inside the notice window replaces the coach deadline notice at the OS boundary', () => {
+  const covered = timedDeadlineFixture(); covered.context.settings.reminderState.rules.push({ id: 'before', kind: 'once', targetId: 'task', nextAt: '2026-10-02T07:30:00.000Z', enabled: true, sentCount: 0, maxCount: 1, updatedAt: now })
+  assert.equal(validateOSNotification(covered.context, covered.payload, now), null)
+  const stopped = timedDeadlineFixture(); stopped.context.settings.reminderState.rules.push({ id: 'before', kind: 'once', targetId: 'task', nextAt: '2026-10-02T07:30:00.000Z', enabled: false, sentCount: 0, maxCount: 1, updatedAt: now })
+  assert.notEqual(validateOSNotification(stopped.context, stopped.payload, now), null)
+  const other = timedDeadlineFixture(); other.context.settings.reminderState.rules.push({ id: 'before', kind: 'once', targetId: 'other-task', nextAt: '2026-10-02T07:30:00.000Z', enabled: true, sentCount: 0, maxCount: 1, updatedAt: now })
+  assert.notEqual(validateOSNotification(other.context, other.payload, now), null)
+})

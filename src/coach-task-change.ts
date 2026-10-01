@@ -128,7 +128,7 @@ export async function prepareCoachTaskChange(proposal:CoachTaskProposal,latest:C
   if(proposal.targetId!==latest!.id||proposal.targetRevision!==latest!.revision)throw new Error('選択したタスクまたは版が変わりました。新しい内容から変更案を作り直してください。')
   // Model prose is not an execution result. The preview uses a program-owned
   // description so even "saved already" in the model's reason cannot claim success.
-  const labels={title:'タイトル',notes:'メモ',scheduledDate:'予定日',dueDate:'本当の締め切り',manualPoints:'本人指定ポイント'}
+  const labels={title:'タイトル',notes:'メモ',scheduledDate:'予定日',dueDate:'本当の締め切り',dueAt:'締め切り時刻',manualPoints:'本人指定ポイント'}
   const fields=Object.keys(proposal.patch).map(field=>labels[field as keyof typeof labels]).join('・')
   return prepareTaskChanges([{taskId:latest!.id,expectedRevision:latest!.revision,patch:proposal.patch}],context,`選択したタスクの${fields}を変更するコーチ候補（まだ適用していません）`,instruction)
 }

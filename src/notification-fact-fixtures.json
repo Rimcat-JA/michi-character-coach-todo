@@ -15,6 +15,30 @@
       "digest": "4b6749b2a70ce62e809ccfedf0068ef8f74ca7fe4218c40508b63cd944339da9"
     }
   ],
+  "timedDeadline": [
+    {
+      "title": "申請書の提出",
+      "dueDate": "2026-10-02",
+      "dueAt": "2026-10-02T08:00:00.000Z",
+      "dueTimezone": "Asia/Tokyo",
+      "timezone": "Asia/Tokyo",
+      "scheduledDate": "2026-10-01",
+      "dueTime": "17:00",
+      "factual": "期限が近いタスク: 申請書の提出（期限 2026-10-02 17:00）",
+      "digest": "5524d4b8ec981fe95093ea3038493936236d4b871ae7bb748b6bf51a09c5fdf7"
+    },
+    {
+      "title": "海外拠点への提出",
+      "dueDate": "2026-10-01",
+      "dueAt": "2026-10-01T21:00:00.000Z",
+      "dueTimezone": "America/New_York",
+      "timezone": "Asia/Tokyo",
+      "scheduledDate": null,
+      "dueTime": "17:00",
+      "factual": "期限が近いタスク: 海外拠点への提出（期限 2026-10-01 17:00（America/New_York））",
+      "digest": "67d35ed142a798e9318e17737dcdfd44d4648e76296aa06d991d71975e4e4631"
+    }
+  ],
   "calendar": [
     {
       "title": "定例会議の準備",

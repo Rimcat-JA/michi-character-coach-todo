@@ -13,11 +13,16 @@ const sameTarget = (a, b) => a?.id === b?.id && a?.kind === b?.kind
 const notificationsStopped = settings => Boolean(settings?.changePolicy?.stops?.notifications) || Array.isArray(settings?.changePolicy?.operations) && settings.changePolicy.operations.find(rule => rule?.operation === 'notification.send')?.mode !== 'auto_within_bounds'
 const { createHash } = require('node:crypto')
 // Fact wording mirrors src/coach-facts.ts; src/notification-fact-fixtures.json is checked by both test suites.
-const deadlineFactual = (title, dueDate) => `期限が近いタスク: ${title}（期限 ${dueDate}）`
+const deadlineFactual = (title, due) => `期限が近いタスク: ${title}（期限 ${due}）`
+// A timed deadline (dueAt + dueTimezone) is shown at its own clock time; the zone is named only when it differs from the notification zone.
+const deadlineTime = task => typeof task.dueAt === 'string' && typeof task.dueTimezone === 'string' && task.dueAt && task.dueTimezone ? clock(task.dueAt, task.dueTimezone).time : null
+const deadlineLabel = (task, timezone) => { const time = deadlineTime(task); return time ? `${task.dueDate} ${time}${task.dueTimezone !== timezone ? `（${task.dueTimezone}）` : ''}` : task.dueDate }
+// The person's own one-time reminder inside the coach notice window replaces the coach deadline notice (no double notification).
+const deadlineCoveredByReminder = (task, rules, from, end) => (Array.isArray(rules) ? rules : []).some(rule => rule && rule.kind === 'once' && rule.targetId === task.id && (rule.enabled || rule.sentCount > 0) && typeof rule.nextAt === 'string' && rule.nextAt >= from && rule.nextAt <= end)
 const calendarFactual = (title, from, to) => `公式カレンダーの変更で予定日を変更: ${title} ${from ?? '未設定'}→${to ?? '未設定'}`
 const replanFactual = count => `予定日を過ぎた未完了が${count}件あります`
 const slippedCount = (tasks, day) => (Array.isArray(tasks) ? tasks : []).filter(task => task && !task.deletedAt && task.status === 'open' && !task.backburner && typeof task.scheduledDate === 'string' && task.scheduledDate && task.scheduledDate < day).length
-const factsDigest = task => createHash('sha256').update(JSON.stringify(['deadline_near', task.title, task.dueDate, task.scheduledDate ?? null])).digest('hex')
+const factsDigest = task => { const time = deadlineTime(task); return createHash('sha256').update(JSON.stringify(['deadline_near', task.title, task.dueDate, task.scheduledDate ?? null, ...(time ? [time] : [])])).digest('hex') }
 const shiftDay = (day, days) => { const date = new Date(`${day}T12:00:00Z`); date.setUTCDate(date.getUTCDate() + days); return date.toISOString().slice(0, 10) }
 const triggerOff = { deadlineNear: { enabled: false, leadDays: 1 }, calendarChange: { enabled: false }, replanPrompt: { enabled: false }, aiText: false }
 const isDeadline = intent => intent.purpose === 'deadline_near' && intent.target?.kind === 'task' && intent.ruleId === `deadline:${intent.target.id}`
@@ -45,7 +50,9 @@ function validateOSNotification(context, payload, now = new Date().toISOString()
       if (isDeadline(intent)) {
         // Re-derived from the DB: still open, same revision and real deadline, inside the person's lead window.
         if (!triggers.deadlineNear?.enabled || !Number.isInteger(triggers.deadlineNear.leadDays) || typeof task.dueDate !== 'string' || task.dueDate !== intent.ruleWindow || intent.ruleRevision !== `deadline:${task.revision}:${task.dueDate}` || local.day > task.dueDate || local.day < shiftDay(task.dueDate, -triggers.deadlineNear.leadDays)) return null
-        factual = deadlineFactual(task.title, task.dueDate); savedAIFacts = factsDigest(task)
+        // A timed deadline is over at dueAt; the person's own reminder in the same window is the only notice.
+        if (task.dueAt && !(Date.parse(now) < Date.parse(task.dueAt)) || deadlineCoveredByReminder(task, settings.reminderState?.rules, intent.notBefore, intent.expiresAt)) return null
+        factual = deadlineFactual(task.title, deadlineLabel(task, policy.timezone)); savedAIFacts = factsDigest(task)
       } else if (isCalendar(intent)) {
         const [, revision, from, to] = String(intent.ruleRevision).split(':'), date = value => value === '-' ? null : value
         if (!triggers.calendarChange?.enabled || String(task.revision) !== revision || (task.scheduledDate ?? null) !== date(to)) return null

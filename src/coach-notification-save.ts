@@ -66,7 +66,7 @@ async function currentGuard(settings: Settings, intent: CoachNotificationIntent,
   let facts: string | null = null
   if (isDeadlineIntent(intent) || isCalendarIntent(intent) || isReplanIntent(intent)) {
     const state = coachNotificationStateFor(settings), task = intent.target.kind === 'task' ? await db.tasks.get(intent.target.id) : undefined
-    const derived = triggerGuardState(intent, task, isReplanIntent(intent) ? await db.tasks.toArray() : [], coachTriggersOf(state), state.policy.timezone, at)!
+    const derived = triggerGuardState(intent, task, isReplanIntent(intent) ? await db.tasks.toArray() : [], coachTriggersOf(state), state.policy.timezone, at, settings.reminderState?.rules)!
     target = derived.target; ruleState = derived.rule
     if (task?.dueDate && isDeadlineIntent(intent)) facts = await Dexie.waitFor(factsDigest(deadlineFacts(task)))
   }

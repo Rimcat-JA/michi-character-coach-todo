@@ -10,8 +10,11 @@ export type CoachSplitParse = { kind: 'split'; parts: CoachSplitPart[] } | { kin
 /** Each value is the person's own number or an app default the person explicitly confirmed. */
 export type SplitPointOrigin = 'human' | 'app_default' | 'app_default_confirmed'
 export type CoachSplitProposal = { id: string; taskId: string; parentRevision: number; parentPoints: number; instruction: string; parts: { name: string; title: string; points: number; origin: SplitPointOrigin }[] }
-/** Recurrence wording goes to the routine (周期) flow with its own approvals, never to a task ChangeSet. */
-export const recurrencePattern = /毎日|毎週|毎月|毎年|隔週|第\d+(?:営業日|週)|月末|営業日|曜日ごと|毎朝|毎晩/
+/**
+ * Recurrence wording goes to the routine (周期) flow with its own approvals, never to a task ChangeSet. It covers the phrases the routine
+ * assistant can ground (N週ごと・隔月・第N曜日・最終平日・前回の完了からN日後 …); a lone weekday such as 「金曜に移して」 stays a task move.
+ */
+export const recurrencePattern = /毎日|毎週|毎月|毎年|隔週|隔月|毎朝|毎晩|月末|営業日|稼働日|曜日ごと|第\s*\d+\s*(?:週|平日|[日月火水木金土]曜)|(?:最終|最後の)\s*(?:[日月火水木金土]曜|平日)|毎\s*[日月火水木金土]曜|\d+\s*(?:日|週間?|か月|ヶ月|カ月|ヵ月|ケ月|年)\s*(?:ごと|毎|おき|に\s*[1１一]\s*(?:回|度))|完了(?:して(?:から)?|から|後|の)\s*\d+\s*(?:日|週間?)|\bevery\s+(?:day|week|month|year|other\s+week|\d+\s+(?:days|weeks))\b|\b(?:daily|weekly|monthly|yearly|annually|biweekly)\b/i
 export function consultationKind(text: string, openTitles: string[] = []): 'routine' | 'split' | 'clarify' | 'task' {
   // Recurrence words inside a quoted or existing task title name the target, not a new cycle.
   let rest = text.normalize('NFKC').replace(/[「『"“][^」』"”]{1,300}[」』"”]/g, '')

@@ -1,4 +1,4 @@
-import { addDays, type Settings, type Task, type TaskDependency, type TimeBlock } from './domain'
+import { addDays, taskDueTime, type Settings, type Task, type TaskDependency, type TimeBlock } from './domain'
 import { dayCapacity } from './planning'
 import { timeBlockCapacity } from './calendar-planning'
 import { slippedTasks } from './coach-facts'
@@ -6,8 +6,8 @@ import { changePolicyFor, prepareTaskChanges, type PreparedChangeSet } from './c
 import { COACH_MEDIATED_REASONS } from './automation-policy'
 
 export type ReplanSituation = 'slipped' | 'overload' | 'selfReport'
-/** Only scheduledDate is ever proposed. dueDate, points, status and new tasks are out of reach by construction. */
-export type ReplanCandidate = { taskId: string; title: string; revision: number; situations: ReplanSituation[]; from: string | null; to: string | null; dueDate: string | null; reason: string | null }
+/** Only scheduledDate is ever proposed. dueDate/dueAt, points, status and new tasks are out of reach by construction; dueTime is shown only. */
+export type ReplanCandidate = { taskId: string; title: string; revision: number; situations: ReplanSituation[]; from: string | null; to: string | null; dueDate: string | null; dueTime?: string; reason: string | null }
 export type ReplanSummary = { today: string; slipped: number; todayCount: number; plannedMinutes: number; plannedPoints: number; minutesLimit: number; pointsLimit: number; overloaded: boolean; candidates: ReplanCandidate[] }
 export type ReplanInput = { tasks: Task[]; dependencies: TaskDependency[]; blocks: TimeBlock[]; settings: Pick<Settings, 'dailyMinutes' | 'dailyPoints'>; today: string; selfReport?: boolean; horizonDays?: number }
 const order = (a: Task, b: Task) => (a.dueDate ?? '9999-12-31').localeCompare(b.dueDate ?? '9999-12-31') || b.importance - a.importance || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)
@@ -32,7 +32,7 @@ export function replanCandidates({ tasks, dependencies, blocks, settings, today,
   if (selfReport) for (const task of todays) if (!situations.has(task.id)) add(task, 'selfReport')
   const projected = open.map(task => ({ ...task })), tomorrow = addDays(today, 1), candidates: ReplanCandidate[] = []
   for (const task of open.filter(item => situations.has(item.id)).sort(order)) {
-    const base = { taskId: task.id, title: task.title, revision: task.revision, situations: situations.get(task.id)!, from: task.scheduledDate, dueDate: task.dueDate }
+    const base = { taskId: task.id, title: task.title, revision: task.revision, situations: situations.get(task.id)!, from: task.scheduledDate, dueDate: task.dueDate, ...(taskDueTime(task) ? { dueTime: taskDueTime(task)! } : {}) }
     if (dependencies.some(edge => edge.taskId === task.id && (byId.get(edge.dependsOnId)?.status !== 'completed' || byId.get(edge.dependsOnId)?.deletedAt))) { candidates.push({ ...base, to: null, reason: '前提タスクが未完了' }); continue }
     const first = [tomorrow, task.availableFrom, task.deferredUntil ?? null].filter((value): value is string => Boolean(value)).sort().at(-1)!
     const last = task.dueDate ?? addDays(today, horizonDays)

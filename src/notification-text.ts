@@ -8,10 +8,15 @@ const newObligation = /ついでに|あわせて|併せて|追加で|新しく|�
 const relativeDate = /明日|明後日|あさって|今日|本日|昨日|来週|今週|来月|今月|週末|月末|年内/
 const url = /https?:|www\.|[a-z0-9-]+\.(?:com|net|org|jp|io|ai|dev|app)\b/i
 const deadlineState = /過ぎ|切れ|超過|遅れ|遅延|期限(?:は|が)?(?:なし|ありません|ない)|延長|猶予/
-/** Whole renderings of the deadline itself (ISO, 年月日, 月日, M/D, with or without leading zeros), longest first. */
+/** Whole renderings of the deadline itself (ISO, 年月日, 月日, M/D, with or without leading zeros, plus its clock time when timed), longest first. */
 function allowedDates(facts: NotificationFacts) {
   const [year, month, day] = facts.dueDate.split('-'), values = new Set([facts.dueDate])
   for (const m of new Set([month, String(Number(month))])) for (const d of new Set([day, String(Number(day))])) for (const value of [`${year}年${m}月${d}日`, `${m}月${d}日`, `${m}/${d}`]) values.add(value)
+  if (facts.dueTime) {
+    // A timed deadline may also be written with its own clock time (17:00 / 17時 / 17時00分), nothing else.
+    const [hour, minute] = facts.dueTime.split(':')
+    for (const h of new Set([hour, String(Number(hour))])) { values.add(`${h}:${minute}`); values.add(`${h}時${minute}分`); if (minute === '00') values.add(`${h}時`) }
+  }
   return [...values].sort((a, b) => b.length - a.length)
 }
 /**

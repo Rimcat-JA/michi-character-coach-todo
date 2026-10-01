@@ -164,11 +164,12 @@ const plain = (value, keys) => Boolean(value && typeof value === 'object' && !Ar
 /** Notification wording only: facts of an already-reserved notification in, one sentence out (automatic budget). */
 async function notificationTextWithOpenRouter({ model, facts, character }) {
   if (!validModel(model)) throw new Error('モデルIDを確認してください')
-  if (!plain(facts, ['purpose', 'title', 'dueDate', 'scheduledDate']) || facts.purpose !== 'deadline_near' || typeof facts.title !== 'string' || !facts.title.trim() || facts.title.length > 300 || !validDay(facts.dueDate) || facts.scheduledDate !== null && !validDay(facts.scheduledDate)) throw new Error('通知の事実が不正です')
+  const timed = Boolean(facts && typeof facts === 'object' && Object.hasOwn(facts, 'dueTime'))
+  if (!plain(facts, ['purpose', 'title', 'dueDate', 'scheduledDate', ...(timed ? ['dueTime'] : [])]) || timed && (typeof facts.dueTime !== 'string' || !/^([01]\d|2[0-3]):[0-5]\d$/.test(facts.dueTime)) || facts.purpose !== 'deadline_near' || typeof facts.title !== 'string' || !facts.title.trim() || facts.title.length > 300 || !validDay(facts.dueDate) || facts.scheduledDate !== null && !validDay(facts.scheduledDate)) throw new Error('通知の事実が不正です')
   if (!plain(character, ['pronoun', 'tone', 'detail', 'coachingStyle', 'avoidPhrases']) || !['私', '僕', 'わたし'].includes(character.pronoun) || !['gentle', 'direct', 'playful'].includes(character.tone) || !['brief', 'standard', 'thorough'].includes(character.detail) || !['encouraging', 'practical', 'reflective'].includes(character.coachingStyle) || !Array.isArray(character.avoidPhrases) || character.avoidPhrases.length > 10 || character.avoidPhrases.some(phrase => typeof phrase !== 'string' || phrase.length > 40)) throw new Error('キャラクター設定が不正です')
   const body = await openRouterCompletion('chat', { model, max_tokens: 200, reasoning: { effort: 'low' }, messages: [
-    { role: 'system', content: `あなたはToDoアプリの通知文を書くコーチです。入力JSONの事実だけを使い、日本語の通知文を一文（200字以内・改行なし）で返してください。タスク名はそのまま含め、期限の日付は入力の表記どおりに書きます。新しい作業・義務・提案を加えない、「変更しました」「完了しました」など実行や変更を主張しない、今日・明日などの相対的な日付・URL・別のタスクを書かないでください。文体だけ調整: 一人称=${character.pronoun}、口調=${character.tone}、支援方法=${character.coachingStyle}。` },
-    { role: 'user', content: JSON.stringify({ purpose: facts.purpose, title: facts.title, dueDate: facts.dueDate, scheduledDate: facts.scheduledDate }) }
+    { role: 'system', content: `あなたはToDoアプリの通知文を書くコーチです。入力JSONの事実だけを使い、日本語の通知文を一文（200字以内・改行なし）で返してください。タスク名はそのまま含め、期限の日付（dueTimeがあればその時刻も）は入力の表記どおりに書きます。新しい作業・義務・提案を加えない、「変更しました」「完了しました」など実行や変更を主張しない、今日・明日などの相対的な日付・URL・別のタスクを書かないでください。文体だけ調整: 一人称=${character.pronoun}、口調=${character.tone}、支援方法=${character.coachingStyle}。` },
+    { role: 'user', content: JSON.stringify({ purpose: facts.purpose, title: facts.title, dueDate: facts.dueDate, ...(timed ? { dueTime: facts.dueTime } : {}), scheduledDate: facts.scheduledDate }) }
   ] }, { automatic: true })
   const answer = body?.choices?.[0]?.message?.content
   if (typeof answer !== 'string' || !answer.trim() || answer.length > 2000) throw new Error('通知文を受け取れませんでした')
