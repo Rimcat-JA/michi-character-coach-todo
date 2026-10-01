@@ -14,13 +14,13 @@ export function ConnectionStatusPanel({ coverage, capabilities }: { coverage: Co
   return <section className="card setting-section connection-status" aria-label="連携と取得範囲">
     <div className="setting-heading"><div><h2>連携と取得範囲</h2><p>この端末に本人が取り込んだ範囲だけを表示します。外部サービスの全履歴を取得したとは表示しません。外部アカウントの接続・新着同期はこの版では未接続です。</p></div></div>
     <div className="table-scroll"><table className="connection-capabilities"><thead><tr><th>サービス</th>{(Object.keys(capabilityLabels) as CapabilityKey[]).map(key => <th key={key}>{capabilityLabels[key]}</th>)}<th>既知の取得範囲</th></tr></thead>
-      <tbody>{capabilities.map(row => <tr key={row.provider}><th scope="row">{row.label}</th>{(Object.keys(capabilityLabels) as CapabilityKey[]).map(key => <td key={key} data-capability={key} data-state={row.capabilities[key].state} title={row.capabilities[key].reason}>{stateLabels[row.capabilities[key].state]}{key === 'incoming_events' && row.capabilities[key].state === 'unsupported' ? '（新着同期: 未接続）' : ''}</td>)}<td>{row.maxKnownCoverage ? `${row.maxKnownCoverage.fromDate}〜${row.maxKnownCoverage.toDate}（${row.conversations}件、欠落あり得る）` : '取込なし'}</td></tr>)}</tbody></table></div>
+      <tbody>{capabilities.map(row => <tr key={row.provider}><th scope="row">{row.label}</th>{(Object.keys(capabilityLabels) as CapabilityKey[]).map(key => <td key={key} data-capability={key} data-state={row.capabilities[key].state} title={row.capabilities[key].reason}>{stateLabels[row.capabilities[key].state]}{key === 'incoming_events' && row.capabilities[key].state === 'unsupported' ? '（新着同期: 未接続）' : ''}</td>)}<td>{row.maxKnownCoverage ? `${row.maxKnownCoverage.fromDate}〜${row.maxKnownCoverage.toDate}（${row.conversations}件、欠落あり得る）` : row.selections ? '' : '取込なし'}{row.selections ? `${row.maxKnownCoverage ? ' · ' : ''}選択した引用${row.selections}件（範囲なし）` : ''}</td></tr>)}</tbody></table></div>
     <h3>会話ごとの取得範囲</h3>
     {coverage.length === 0 && <p className="muted">保存期限内の取込済み会話・予定ファイルはありません。</p>}
     {coverage.map(item => <article className="setting-line" key={item.key} data-coverage={item.key}><div>
       <strong>{item.label}</strong><small> · {capabilities.find(row => row.provider === item.provider)?.label ?? item.provider} · 方式 {methodLabels[item.method]} · 取込{item.sources}件</small>
-      <p>取得済み（和集合）：{item.segments.map(segment => `${segment.fromDate}〜${segment.toDate}`).join('、')}</p>
-      <p>{item.gaps.length ? <span role="note">欠落期間：{item.gaps.map(gap => `${gap.fromDate}〜${gap.toDate}`).join('、')}（この期間の依頼の有無は不明）</span> : '取得範囲内の欠落：なし（範囲外と未取込の期間は未確認）'}</p>
+      {item.selectionOnly ? <p>選択した引用のみ（範囲・欠落の概念なし）・取込日：{item.segments.map(segment => segment.fromDate === segment.toDate ? segment.fromDate : `${segment.fromDate}〜${segment.toDate}`).join('、')}</p> : <><p>取得済み（和集合）：{item.segments.map(segment => `${segment.fromDate}〜${segment.toDate}`).join('、')}</p>
+      <p>{item.gaps.length ? <span role="note">欠落期間：{item.gaps.map(gap => `${gap.fromDate}〜${gap.toDate}`).join('、')}（この期間の依頼の有無は不明）</span> : '取得範囲内の欠落：なし（範囲外と未取込の期間は未確認）'}</p></>}
       <small>最終取込確認 {when(item.lastCheckedAt)} · 新着同期: 未接続 · 保持期限 {item.earliestRetention ? `最短 ${when(item.earliestRetention)}` : '期限なし'}{item.unlimitedRetention && item.earliestRetention ? `（期限なし ${item.unlimitedRetention}件）` : ''}</small>
     </div></article>)}
   </section>

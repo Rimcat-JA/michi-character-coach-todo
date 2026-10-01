@@ -1,12 +1,14 @@
 import type { ChatSourceRef, CoachConversation, CoachMessage } from './chat-history'
 
+/** 25 explicit selections (task, goal, 3 check-ins, 10 sources, 10 memories) plus up to 5 sources a task's evidence brings. */
+export const maxChatSourceRefs = 30
 function fail(): never { throw new Error('バックアップのコーチ会話が不正です') }
 function object(value: unknown, keys: string[], optional: string[] = []): Record<string, unknown> { if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).some(key => !keys.includes(key) && !optional.includes(key)) || keys.some(key => !Object.hasOwn(value, key))) fail(); return value as Record<string, unknown> }
 const string = (value: unknown, max: number, empty = false): value is string => typeof value === 'string' && value.length <= max && (empty || value.trim().length > 0)
 const integer = (value: unknown, min = 1): value is number => Number.isSafeInteger(value) && (value as number) >= min
 function timestamp(value: unknown): asserts value is string { if (!string(value, 30) || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value) || !Number.isFinite(Date.parse(value)) || new Date(value).toISOString() !== value) fail() }
 function sources(value: unknown): ChatSourceRef[] {
-  if (!Array.isArray(value) || value.length > 25) fail()
+  if (!Array.isArray(value) || value.length > maxChatSourceRefs) fail()
   const ids = new Set<string>()
   for (const raw of value) {
     const row = object(raw, ['kind', 'id', 'revision', 'digest', 'permissionRevision'])

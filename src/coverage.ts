@@ -7,10 +7,12 @@ export type CoverageMethod = 'manual-import' | 'ics-file' | 'csv-file'
 export type ConversationCoverage = {
   key: string; kind: 'conversation' | 'calendar'; provider: SourceProvider | 'calendar'; label: string; method: CoverageMethod; sources: number
   segments: CoverageRange[]; gaps: CoverageRange[]; lastCheckedAt: string | null; earliestRetention: string | null; unlimitedRetention: number; complete: false
+  /** Web/.eml quotes the owner picked one by one: grouped under a fixed label, with no conversation range or gaps. */
+  selectionOnly?: true
 }
 export type CapabilityState = 'available' | 'needs_auth' | 'needs_scope' | 'policy_blocked' | 'unsupported' | 'degraded'
 export type CapabilityKey = 'manual_import' | 'history_backfill' | 'incoming_events' | 'edits' | 'deletions' | 'send' | 'user_auth' | 'policy_status'
-export type ProviderCapability = { provider: SourceProvider | 'calendar'; label: string; capabilities: Record<CapabilityKey, { state: CapabilityState; reason: string }>; maxKnownCoverage: CoverageRange | null; conversations: number }
+export type ProviderCapability = { provider: SourceProvider | 'calendar'; label: string; capabilities: Record<CapabilityKey, { state: CapabilityState; reason: string }>; maxKnownCoverage: CoverageRange | null; conversations: number; selections: number }
 
 /** Union of imported day ranges; a day touching the previous range counts as contiguous. */
 export function mergeCoverage(ranges: CoverageRange[]): { segments: CoverageRange[]; gaps: CoverageRange[] } {
@@ -25,13 +27,18 @@ export function mergeCoverage(ranges: CoverageRange[]): { segments: CoverageRang
 }
 const latest = (values: (string | null)[]) => values.filter((value): value is string => Boolean(value)).sort().pop() ?? null
 const earliest = (values: (string | null)[]) => values.filter((value): value is string => Boolean(value)).sort()[0] ?? null
+/** Web selections and local .eml quotes (web-capture-import) share a fixed label but are unrelated captures. */
+export const selectionOnly = (source: Pick<ContextSource, 'provider' | 'externalId'>) => source.provider === 'other' && /^(web|eml):/.test(source.externalId ?? '')
 const live = (source: ContextSource, ownerId: string, now: number) => source.ownerId === ownerId && !source.deletedAt && (source.retentionUntil === null || Date.parse(source.retentionUntil) > now)
 
+// Capture days of selection-only rows are listed as segments; the days between unrelated captures are not gaps.
+function selectionRange(rows: ContextSource[]) { const merged = mergeCoverage(rows.map(row => ({ fromDate: row.coverage.fromDate, toDate: row.coverage.toDate }))); return selectionOnly(rows[0]) ? { segments: merged.segments, gaps: [] } : merged }
 /** Per-conversation coverage of what the owner imported. It never claims a complete external history. */
 export function conversationCoverage(sources: ContextSource[], ownerId: string, now = Date.now()): ConversationCoverage[] {
   const groups = new Map<string, ContextSource[]>()
-  for (const source of sources) if (source.provider !== 'local' && live(source, ownerId, now)) { const key = JSON.stringify([source.provider, source.conversation ?? '']); groups.set(key, [...(groups.get(key) ?? []), source]) }
-  return [...groups.entries()].map(([key, rows]) => ({ key, kind: 'conversation' as const, provider: rows[0].provider, label: rows[0].conversation ?? '会話名未設定', method: 'manual-import' as const, sources: rows.length, ...mergeCoverage(rows.map(row => ({ fromDate: row.coverage.fromDate, toDate: row.coverage.toDate }))), lastCheckedAt: latest(rows.map(row => row.coverage.lastCheckedAt)), earliestRetention: earliest(rows.map(row => row.retentionUntil)), unlimitedRetention: rows.filter(row => row.retentionUntil === null).length, complete: false as const })).sort((left, right) => left.provider.localeCompare(right.provider) || left.label.localeCompare(right.label))
+  for (const source of sources) if (source.provider !== 'local' && !selectionOnly(source) && live(source, ownerId, now)) { const key = JSON.stringify([source.provider, source.conversation ?? '']); groups.set(key, [...(groups.get(key) ?? []), source]) }
+  for (const source of sources) if (selectionOnly(source) && live(source, ownerId, now)) { const key = JSON.stringify([source.provider, source.conversation ?? '', 'selection']); groups.set(key, [...(groups.get(key) ?? []), source]) }
+  return [...groups.entries()].map(([key, rows]) => ({ key, kind: 'conversation' as const, provider: rows[0].provider, label: rows[0].conversation ?? '会話名未設定', method: 'manual-import' as const, sources: rows.length, ...selectionRange(rows), lastCheckedAt: latest(rows.map(row => row.coverage.lastCheckedAt)), earliestRetention: earliest(rows.map(row => row.retentionUntil)), unlimitedRetention: rows.filter(row => row.retentionUntil === null).length, complete: false as const, ...(selectionOnly(rows[0]) ? { selectionOnly: true as const } : {}) })).sort((left, right) => left.provider.localeCompare(right.provider) || left.label.localeCompare(right.label))
 }
 export function calendarCoverage(state: CalendarRulesState | null | undefined, now = Date.now()): ConversationCoverage[] {
   if (!state) return []
@@ -51,8 +58,8 @@ const notConnected = 'unsupported_on_this_runtime: この単独版には外部pr
 /** Capability table for the standalone build: every network capability is unsupported; only manual import exists. */
 export function providerCapabilities(coverage: ConversationCoverage[]): ProviderCapability[] {
   return providerLabels.map(([provider, label, manual]) => {
-    const rows = coverage.filter(item => item.provider === provider), segments = rows.flatMap(item => item.segments)
-    return { provider, label, conversations: rows.length, maxKnownCoverage: segments.length ? { fromDate: segments.map(item => item.fromDate).sort()[0], toDate: segments.map(item => item.toDate).sort().pop()! } : null, capabilities: {
+    const rows = coverage.filter(item => item.provider === provider), segments = rows.filter(item => !item.selectionOnly).flatMap(item => item.segments)
+    return { provider, label, conversations: rows.filter(item => !item.selectionOnly).length, selections: rows.filter(item => item.selectionOnly).reduce((sum, item) => sum + item.sources, 0), maxKnownCoverage: segments.length ? { fromDate: segments.map(item => item.fromDate).sort()[0], toDate: segments.map(item => item.toDate).sort().pop()! } : null, capabilities: {
       manual_import: { state: 'available', reason: manual },
       history_backfill: { state: 'unsupported', reason: `${notConnected}。APIによる過去履歴の取得はしません` },
       incoming_events: { state: 'unsupported', reason: `新着同期: 未接続（${notConnected}）` },

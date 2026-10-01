@@ -2,10 +2,10 @@ import 'fake-indexeddb/auto'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { db, ensureSettings } from './db'
-import { deleteSource } from './source-library'
+import { defaultSourcePermissions, deleteSource, importLocalSource } from './source-library'
 import { emptyCalendarRulesState } from './calendar-rules-validation'
 import type { ScheduleSource } from './calendar-resolver'
-import { calendarCoverage, conversationCoverage, mergeCoverage, providerCapabilities } from './coverage'
+import { calendarCoverage, conversationCoverage, mergeCoverage, providerCapabilities, selectionOnly } from './coverage'
 import { ConnectionStatusPanel } from './ConnectionStatusView'
 import { importWorkSlack } from './source-quote-fixtures'
 
@@ -47,5 +47,19 @@ describe('K11 会話ごとの取得範囲とproviderの能力表示', () => {
       expect(row.capabilities.incoming_events.reason).toContain('unsupported_on_this_runtime')
     }
     expect(capabilities.find(row => row.provider === 'calendar')!.maxKnownCoverage).toEqual({ fromDate: '2026-09-01', toDate: '2026-10-31' })
+  })
+  it('無関係なWeb引用・.eml引用を別の日に取り込んでも欠落期間や既知の取得範囲を作らず、会話の取込は従来どおり欠落を示す', async () => {
+    // Same provider/label/externalId shape that web-capture-import.ts stores; synthetic pages and mails only.
+    const capture = (kind: 'web' | 'eml', date: string) => importLocalSource({ title: `${kind}の選択引用${date}`, provider: 'other', externalId: `${kind}:${date}`, conversation: kind === 'web' ? '本人が選んだWeb引用' : '本人が選んだローカルメール', author: null, sourceUrl: kind === 'web' ? 'https://example.invalid/page' : null, date, fromDate: date, toDate: date, text: `選択した引用${date}`, permissions: defaultSourcePermissions(), allowedModels: [], retentionUntil: null })
+    for (const date of ['2026-09-02', '2026-09-25']) { await capture('web', date); await capture('eml', date) }
+    await importWorkSlack({ fromDate: '2026-09-01', toDate: '2026-09-10' }); await importWorkSlack({ fromDate: '2026-09-20', toDate: '2026-10-01' })
+    const owner = (await db.settings.get('main'))!.profileId, coverage = conversationCoverage(await db.contextSources.toArray(), owner), capabilities = providerCapabilities(coverage)
+    const picked = coverage.filter(item => item.selectionOnly)
+    expect(picked.map(item => [item.label, item.sources, item.gaps, item.segments])).toEqual([['本人が選んだWeb引用', 2, [], [{ fromDate: '2026-09-02', toDate: '2026-09-02' }, { fromDate: '2026-09-25', toDate: '2026-09-25' }]], ['本人が選んだローカルメール', 2, [], [{ fromDate: '2026-09-02', toDate: '2026-09-02' }, { fromDate: '2026-09-25', toDate: '2026-09-25' }]]].sort((left, right) => (left[0] as string).localeCompare(right[0] as string)))
+    expect(capabilities.find(row => row.provider === 'other')).toMatchObject({ maxKnownCoverage: null, conversations: 0, selections: 4 })
+    expect(selectionOnly({ provider: 'other', externalId: 'C-1' })).toBe(false)
+    const markup = renderToStaticMarkup(<ConnectionStatusPanel coverage={coverage} capabilities={capabilities} />)
+    expect(markup).toContain('選択した引用のみ（範囲・欠落の概念なし）・取込日：2026-09-02、2026-09-25'); expect(markup).toContain('選択した引用4件（範囲なし）')
+    expect(markup.match(/欠落期間：/g)).toHaveLength(1); expect(markup).toContain('欠落期間：2026-09-11〜2026-09-19'); expect(markup).not.toContain('2026-09-03〜2026-09-24')
   })
 })

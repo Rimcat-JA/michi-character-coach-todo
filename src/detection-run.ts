@@ -3,7 +3,7 @@ import { canonicalJSON, contentDigest } from './canonical'
 import { changePolicyFor } from './change-set'
 import { newTaskInput } from './commands'
 import { emptyScore, uid, type Settings } from './domain'
-import { normalizeSourceText, readSource, sourceSpans, sourceDb as db } from './source-library'
+import { normalizeSourceText, readSource, recordSourceSent, sourceSpans, sourceDb as db } from './source-library'
 import { applyAssistedTasks, prepareAssistedTasks, type PreparedAssistedTasks } from './task-assist'
 import { detectionClaims, detectionDeliveryMode, detectionSemanticsPassed, inspectDetectionOutput, parseDetectionOutput, parseDetectionVerification, type DetectionChange, type DetectionOutput, type DetectionRequest, type DetectionVerification } from './detection-contract'
 import { loadCalendarRulesState } from './calendar-rules-save'
@@ -79,7 +79,8 @@ export async function prepareDetectionFromUI(sourceId:string,expectedRevision:nu
 }
 export async function detectObligationsForSource(prepared:PreparedDetection,transport:DetectionTransport):Promise<DetectionRun>{
   if(preparedRegistry.get(prepared.id)!==prepared)throw new Error('この検出操作を本人の画面から準備してください')
-  await assertCurrent(prepared,prepared.model)
+  // The body-free send record is written before the source spans leave, so a failed reply still counts as a possible provider copy.
+  await db.transaction('rw',[db.settings,db.contextSources,db.contextSnapshots,db.audits],async()=>{await assertCurrent(prepared,prepared.model);await recordSourceSent({id:prepared.source.sourceId,latestRevision:prepared.source.snapshotRevision,permissionRevision:prepared.source.permissionRevision},prepared.model,'source-detection')})
   const output=parseDetectionOutput(await transport.detect({model:prepared.model,request:structuredClone(prepared.request)}))
   await assertCurrent(prepared,prepared.model)
   const inspection=inspectDetectionOutput(output,prepared.request)

@@ -1,12 +1,13 @@
 import { db } from './db'
-import { uid, type Task } from './domain'
+import { uid, type Audit, type CommandReceipt, type Task } from './domain'
 import type { ContextSource } from './source-library'
 
 export type TaskSourceEvidence = { id: string; ownerId: string; datasetId: string; taskId: string; sourceId: string; snapshotRevision: number; permissionRevision: number; spanId: string; quote: string; quoteSha256: string; supports: string[]; runId: string; candidateId: string; createdAt: string }
 export type LegacyDetectionNotes = { detector: string; verifier: string; basis: string; state: string; citations: { sourceId: string; revision: number; spanId: string; quote: string }[]; dueRaw: string | null }
 export type LegacyNotesState = 'none' | 'exact' | 'edited'
 export type TaskEvidenceDisplay = { quotes: (TaskSourceEvidence & { sourceTitle: string })[]; erasedSourceIds: string[]; deletedSourceIds: string[]; legacy: LegacyNotesState }
-export type LegacyMigrationResult = { migrated: number; movedQuotes: number; erasedQuotes: number; review: number }
+export type LegacyMigrationResult = { migrated: number; movedQuotes: number; erasedQuotes: number; review: number; scrubbedReceipts: number }
+export type LegacyReviewTask = { id: string; state: Exclude<LegacyNotesState, 'none'> }
 
 // Exact shape written by detection-run.ts before evidence rows existed (one span per citation line).
 export const legacyDetectionHeader = '資料から検出し本人が確認する候補。検出='
@@ -62,46 +63,100 @@ function approvedDetections(audits: { id: string; operation: string; detail: str
   }
   return byTask
 }
+/** Notes the app itself wrote for the task: inputs[index] of the bulk_create receipt that created it. */
+function receiptNotes(commands: CommandReceipt[], taskId: string): string | null {
+  for (const row of commands) {
+    try {
+      const ids: unknown = JSON.parse(row.resultId), index = Array.isArray(ids) ? ids.indexOf(taskId) : -1
+      if (index < 0) continue
+      const hash = JSON.parse(row.hash) as { operation?: unknown; inputs?: { notes?: unknown }[] }, notes = hash.operation === 'bulk_create' && Array.isArray(hash.inputs) ? hash.inputs[index]?.notes : null
+      if (typeof notes === 'string') return notes
+    } catch { /* Single-task receipts and plain hashes are not bulk_create receipts. */ }
+  }
+  return null
+}
+const fitsApproval = (parsed: LegacyDetectionNotes | null, approval: ApprovedDetection) => parsed && parsed.detector === approval.detectorModel && parsed.citations.every(citation => citation.sourceId === approval.sourceId) ? parsed : null
+// Quote fragments are scrubbed only from rows the app generated; owner-authored records (completion, correction, ChangeSet) lose only the verbatim legacy block.
+const machineAudit = (row: Audit) => row.operation === 'score.ai_attributes' || /^(detection|assist|egress)\./.test(row.operation)
+const machineCommand = (row: CommandReceipt) => row.key.startsWith('assist:')
+type LegacyCopies = { approval: ApprovedDetection; parsed: LegacyDetectionNotes; exact: boolean; blocks: string[]; quotes: string[]; after: string }
+/** Legacy copies tied to a task: its current exact notes and/or the original block in its creation receipt. */
+function legacyCopies(task: Task, approval: ApprovedDetection | undefined, commands: CommandReceipt[]): LegacyCopies | null {
+  if (!approval) return null
+  const exact = legacyNotesState(task.notes) === 'exact' ? fitsApproval(parseLegacyDetectionNotes(task.notes), approval) : null
+  const receipt = receiptNotes(commands, task.id), original = receipt === null ? null : fitsApproval(parseLegacyDetectionNotes(receipt), approval)
+  const parsed = exact ?? original
+  if (!parsed) return null
+  const blocks = [...new Set([...(exact ? [task.notes] : []), ...(original ? [receipt!] : [])])]
+  // The due phrase is not a standalone secret: short phrases also occur in owner-written records and leave only as part of the whole block.
+  const quotes = [...new Set([...(exact?.citations ?? []), ...(original?.citations ?? [])].map(citation => citation.quote))]
+  return { approval, parsed, exact: Boolean(exact), blocks, quotes, after: detectionProvenanceNotes(parsed.detector, parsed.verifier, parsed.basis, parsed.state, approval.runId) }
+}
+/** Runs inside a transaction that covers commands and audits. Returns the number of rows rewritten. */
+async function scrubTaskCopies(taskId: string, copies: LegacyCopies): Promise<number> {
+  let changed = 0
+  const scrub = (text: string, quotes: string[]) => copies.blocks.reduce((value, before) => scrubLegacyCopies(value, before, copies.after, quotes), text)
+  for (const row of await db.commands.toArray()) if (row.hash.includes(taskId) || row.resultId.includes(taskId)) {
+    const quotes = machineCommand(row) ? copies.quotes : [], hash = scrub(row.hash, quotes), resultId = scrub(row.resultId, quotes)
+    if (hash !== row.hash || resultId !== row.resultId) { await db.commands.put({ ...row, hash, resultId }); changed++ }
+  }
+  for (const row of await db.audits.toArray()) if (row.taskId === taskId || row.detail.includes(taskId)) {
+    const detail = scrub(row.detail, machineAudit(row) ? copies.quotes : [])
+    if (detail !== row.detail) { await db.audits.put({ ...row, detail }); changed++ }
+  }
+  return changed
+}
+/** Inside deleteSource's transaction: machine-made receipt/audit copies of legacy notes citing this source. Task notes are never changed here. */
+export async function scrubLegacySourceCopies(sourceId: string): Promise<number> {
+  const approved = approvedDetections(await db.audits.toArray()), commands = await db.commands.toArray()
+  let total = 0
+  for (const approval of approved.values()) if (approval.sourceId === sourceId) {
+    const task = await db.tasks.get(approval.taskId), copies = task ? legacyCopies(task, approval, commands) : null
+    if (!copies) continue
+    const rows = await scrubTaskCopies(approval.taskId, copies)
+    if (rows) await db.audits.add({ id: uid(), taskId: approval.taskId, operation: 'task.source_quote_migrated', at: new Date().toISOString(), detail: JSON.stringify({ sourceId, runId: approval.runId, movedToEvidence: 0, erased: 0, receiptsOnly: true, rows }) })
+    total += rows
+  }
+  return total
+}
 let migration: Promise<LegacyMigrationResult> | null = null
-/** One-way and idempotent: exact machine blocks move to evidence (live source) or are erased; edited notes stay. */
+/** One-way and idempotent: exact machine blocks move to evidence (live source) or are erased; edited notes stay.
+ * The app's own copies (creation receipt, AI audits) are found from the approval audit and scrubbed even when the owner changed the notes. */
 export async function migrateLegacyDetectionNotes(): Promise<LegacyMigrationResult> {
   if (migration) return migration
   migration = (async () => {
-    const result: LegacyMigrationResult = { migrated: 0, movedQuotes: 0, erasedQuotes: 0, review: 0 }
+    const result: LegacyMigrationResult = { migrated: 0, movedQuotes: 0, erasedQuotes: 0, review: 0, scrubbedReceipts: 0 }
     const settings = await db.settings.get('main')
     if (!settings) return result
-    const approved = approvedDetections(await db.audits.toArray()), now = Date.now()
+    const approved = approvedDetections(await db.audits.toArray()), commands = await db.commands.toArray(), now = Date.now()
     for (const task of await db.tasks.toArray()) {
       const state = legacyNotesState(task.notes)
       if (state === 'edited') result.review++
-      const approval = approved.get(task.id), parsed = state === 'exact' ? parseLegacyDetectionNotes(task.notes) : null
-      if (!approval || !parsed || parsed.detector !== approval.detectorModel || parsed.citations.some(citation => citation.sourceId !== approval.sourceId)) { if (state === 'exact') result.review++; continue }
-      const source = await db.contextSources.get(approval.sourceId), digests = await Promise.all(parsed.citations.map(citation => quoteDigest(citation.quote)))
-      const before = task.notes, after = detectionProvenanceNotes(parsed.detector, parsed.verifier, parsed.basis, parsed.state, approval.runId), secrets = [...parsed.citations.map(citation => citation.quote), ...(parsed.dueRaw ? [parsed.dueRaw] : [])]
+      const copies = legacyCopies(task, approved.get(task.id), commands)
+      if (state === 'exact' && !copies?.exact) result.review++
+      if (!copies) continue
+      const { approval, parsed } = copies, source = copies.exact ? await db.contextSources.get(approval.sourceId) : undefined, digests = copies.exact ? await Promise.all(parsed.citations.map(citation => quoteDigest(citation.quote))) : []
       const changed = await db.transaction('rw', [db.tasks, db.audits, db.commands, db.taskSourceEvidence, db.contextSources, db.contextSnapshots, db.settings], async () => {
         const current = await db.tasks.get(task.id), owner = await db.settings.get('main')
-        if (!current || current.notes !== before || !owner || owner.profileId !== settings.profileId || owner.datasetId !== settings.datasetId) return null
-        const live = await db.contextSources.get(approval.sourceId), usable = sourceEvidenceUsable(live, owner.profileId, now) && live!.permissionRevision === source?.permissionRevision
+        if (!current || current.notes !== task.notes || !owner || owner.profileId !== settings.profileId || owner.datasetId !== settings.datasetId) return null
         let moved = 0
-        for (const [index, citation] of parsed.citations.entries()) {
-          const snapshot = usable ? await db.contextSnapshots.get(`${citation.sourceId}:${citation.revision}`) : undefined
-          if (!snapshot || snapshot.ownerId !== owner.profileId || !snapshot.spans.some(span => span.id === citation.spanId && span.text.includes(citation.quote))) continue
-          await db.taskSourceEvidence.put({ id: `legacy:${task.id}:${index}`, ownerId: owner.profileId, datasetId: owner.datasetId, taskId: task.id, sourceId: citation.sourceId, snapshotRevision: citation.revision, permissionRevision: live!.permissionRevision, spanId: citation.spanId, quote: citation.quote, quoteSha256: digests[index], supports: [], runId: approval.runId, candidateId: approval.candidateId, createdAt: new Date().toISOString() })
-          moved++
+        if (copies.exact) {
+          const live = await db.contextSources.get(approval.sourceId), usable = sourceEvidenceUsable(live, owner.profileId, now) && live!.permissionRevision === source?.permissionRevision
+          for (const [index, citation] of parsed.citations.entries()) {
+            const snapshot = usable ? await db.contextSnapshots.get(`${citation.sourceId}:${citation.revision}`) : undefined
+            if (!snapshot || snapshot.ownerId !== owner.profileId || !snapshot.spans.some(span => span.id === citation.spanId && span.text.includes(citation.quote))) continue
+            await db.taskSourceEvidence.put({ id: `legacy:${task.id}:${index}`, ownerId: owner.profileId, datasetId: owner.datasetId, taskId: task.id, sourceId: citation.sourceId, snapshotRevision: citation.revision, permissionRevision: live!.permissionRevision, spanId: citation.spanId, quote: citation.quote, quoteSha256: digests[index], supports: [], runId: approval.runId, candidateId: approval.candidateId, createdAt: new Date().toISOString() })
+            moved++
+          }
+          await db.tasks.put({ ...current, notes: copies.after })
         }
-        await db.tasks.put({ ...current, notes: after })
-        for (const row of await db.commands.toArray()) if (row.hash.includes(task.id) || row.resultId.includes(task.id)) {
-          const hash = scrubLegacyCopies(row.hash, before, after, secrets), resultId = scrubLegacyCopies(row.resultId, before, after, secrets)
-          if (hash !== row.hash || resultId !== row.resultId) await db.commands.put({ ...row, hash, resultId })
-        }
-        for (const row of await db.audits.toArray()) if (row.taskId === task.id || row.detail.includes(task.id)) {
-          const detail = scrubLegacyCopies(row.detail, before, after, secrets)
-          if (detail !== row.detail) await db.audits.put({ ...row, detail })
-        }
-        await db.audits.add({ id: uid(), taskId: task.id, operation: 'task.source_quote_migrated', at: new Date().toISOString(), detail: JSON.stringify({ sourceId: approval.sourceId, runId: approval.runId, movedToEvidence: moved, erased: parsed.citations.length - moved }) })
+        const rows = await scrubTaskCopies(task.id, copies)
+        if (!copies.exact && !rows) return null
+        await db.audits.add({ id: uid(), taskId: task.id, operation: 'task.source_quote_migrated', at: new Date().toISOString(), detail: JSON.stringify(copies.exact ? { sourceId: approval.sourceId, runId: approval.runId, movedToEvidence: moved, erased: parsed.citations.length - moved } : { sourceId: approval.sourceId, runId: approval.runId, movedToEvidence: 0, erased: 0, receiptsOnly: true, rows }) })
         return moved
       })
       if (changed === null) continue
+      if (!copies.exact) { result.scrubbedReceipts++; continue }
       result.migrated++; result.movedQuotes += changed; result.erasedQuotes += parsed.citations.length - changed
     }
     return result
@@ -111,8 +166,9 @@ export async function migrateLegacyDetectionNotes(): Promise<LegacyMigrationResu
 
 /** Called inside the source library's purge transaction. */
 export async function purgeTaskSourceEvidence(sourceId: string): Promise<number> { return db.taskSourceEvidence.where('sourceId').equals(sourceId).delete() }
-export function legacyReviewTasks(tasks: Task[], sourceId: string): Task[] {
-  return tasks.filter(task => legacyNotesState(task.notes) !== 'none' && task.notes.includes(`[${sourceId} 内容版`))
+/** 'exact' = unmigrated machine block, 'edited' = the owner's own text; both stay for the owner to review. */
+export function legacyReviewTasks(tasks: Task[], sourceId: string): LegacyReviewTask[] {
+  return tasks.flatMap(task => { const state = legacyNotesState(task.notes); return state !== 'none' && task.notes.includes(`[${sourceId} 内容版`) ? [{ id: task.id, state }] : [] })
 }
 
 export async function taskEvidenceDisplay(task: Task): Promise<TaskEvidenceDisplay> {
@@ -136,7 +192,7 @@ export function validateTaskSourceEvidenceRecords(rows: unknown, taskIds: Set<st
   for (const raw of rows as unknown[]) {
     if (!raw || typeof raw !== 'object' || Array.isArray(raw) || Object.keys(raw).length !== evidenceKeys.length || evidenceKeys.some(key => !Object.hasOwn(raw, key))) fail()
     const row = raw as Record<string, unknown>
-    if (!text(row.id) || ids.has(row.id as string) || row.ownerId !== ownerId || row.datasetId !== datasetId || !taskIds.has(row.taskId as string) || !sourceIds.has(row.sourceId as string) || !Number.isSafeInteger(row.snapshotRevision) || (row.snapshotRevision as number) < 1 || !Number.isSafeInteger(row.permissionRevision) || (row.permissionRevision as number) < 1 || !text(row.spanId) || !text(row.quote, 2000) || typeof row.quoteSha256 !== 'string' || !/^[a-f0-9]{64}$/.test(row.quoteSha256) || !Array.isArray(row.supports) || row.supports.length > 6 || row.supports.some(item => !text(item, 30)) || !text(row.runId) || !text(row.candidateId) || !timestamp(row.createdAt)) fail()
+    if (!text(row.id) || ids.has(row.id as string) || row.ownerId !== ownerId || row.datasetId !== datasetId || !taskIds.has(row.taskId as string) || !sourceIds.has(row.sourceId as string) || !Number.isSafeInteger(row.snapshotRevision) || (row.snapshotRevision as number) < 1 || !Number.isSafeInteger(row.permissionRevision) || (row.permissionRevision as number) < 1 || !text(row.spanId) || typeof row.quote !== 'string' || row.quote.length === 0 || row.quote.length > 2000 || typeof row.quoteSha256 !== 'string' || !/^[a-f0-9]{64}$/.test(row.quoteSha256) || !Array.isArray(row.supports) || row.supports.length > 6 || row.supports.some(item => !text(item, 30)) || !text(row.runId) || !text(row.candidateId) || !timestamp(row.createdAt)) fail()
     ids.add(row.id as string)
   }
 }

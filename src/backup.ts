@@ -11,7 +11,7 @@ import { clearRoutineAssistanceAuthority } from './routine-assist-save'
 import { clearCompletionReconfirmationAuthority } from './completion-reconfirmation'
 import { invalidateExternalConnection } from './external-connection'
 import { restoreCoachNotificationState } from './coach-notifications'
-import { deleteSource, purgeExpiredDetectionCandidates, purgeExpiredSources } from './source-library'
+import { applyCurrentSourceConsent, deleteSource, purgeExpiredDetectionCandidates, purgeExpiredSources, purgeRestoredSourceDerived, withoutTouchedSourceRows } from './source-library'
 import { migrateLegacyDetectionNotes, restorableTaskSourceEvidence, verifyTaskSourceEvidenceDigests } from './task-source-evidence'
 import { purgeExpiredMemories } from './coach-memory'
 import { purgeExpiredConversations } from './chat-history'
@@ -103,10 +103,11 @@ export async function restoreBackup(snapshot: Snapshot) {
   await verifyCSVOriginalDigests(snapshot.calendarRules ?? [])
   await verifyAchievementDigests(snapshot.achievementEvidence ?? [], snapshot.achievementExports ?? [])
   await verifyTaskSourceEvidenceDigests(snapshot.taskSourceEvidence)
-  // Source erasures made on this device after the backup was taken are re-applied, never undone.
-  const erasedHere = new Set((await db.contextSources.toArray()).filter(source => source.deletedAt).map(source => source.id))
   const names = snapshot.containers === undefined ? [...new Set(snapshot.tasks.map(task => task.project.trim()).filter(Boolean))] : []
   const at = new Date().toISOString(), ownerId = snapshot.settings[0].profileId
+  // Source erasures, revocations and earlier expiries made on this device are applied to the rows before the write, so the original is never restored.
+  const consent = applyCurrentSourceConsent(snapshot.contextSources ?? [], await db.contextSources.toArray(), ownerId, at), touched = [...consent.erased, ...consent.revised]
+  const sourceRows = { ...withoutTouchedSourceRows({ contextSnapshots: snapshot.contextSnapshots, sourceSummaries: snapshot.sourceSummaries, sourceArtifacts: snapshot.sourceArtifacts, coachMessages: snapshot.coachMessages, coachMemories: snapshot.coachMemories }, consent), ...(snapshot.contextSources || consent.sources.length ? { contextSources: consent.sources } : {}) }
   const legacyContainers = names.map(name => ({ id: crypto.randomUUID(), parentId: null, kind: 'project' as const, name, ownerId, revision: 1, createdAt: at, updatedAt: at, deletedAt: null }))
   const byName = new Map(legacyContainers.map(container => [container.name, container.id]))
   // Erasures and earlier CSV deadlines chosen since the backup was taken are re-applied, never undone.
@@ -114,9 +115,9 @@ export async function restoreBackup(snapshot: Snapshot) {
   const icsClean = redactExpiredICSRecords({ calendarRules: ceiled, calendarEvents: snapshot.calendarEvents ?? [], audits: snapshot.audits, commands: snapshot.commands }, at)
   const csvClean = redactExpiredCSVRecords(icsClean, at)
   const clean = { ...csvClean, expiredSourceIds: [...new Set([...icsClean.expiredSourceIds, ...csvClean.expiredSourceIds])] }
-  const restorable: Snapshot = { ...snapshot, taskSourceEvidence: restorableTaskSourceEvidence(snapshot.taskSourceEvidence, snapshot.contextSources, ownerId, erasedHere, Date.parse(at)), achievementExports: restoreAchievementExports(snapshot.achievementExports ?? [], at), calendarRules: clean.calendarRules, calendarEvents: clean.calendarEvents, audits: clean.audits, commands: clean.commands.filter(command => !command.key.startsWith('filebridge:scope:')), settings: snapshot.settings.map(settings => {
+  const restorable: Snapshot = { ...snapshot, ...sourceRows, taskSourceEvidence: restorableTaskSourceEvidence(snapshot.taskSourceEvidence, consent.sources, ownerId, new Set(consent.erased), Date.parse(at)), achievementExports: restoreAchievementExports(snapshot.achievementExports ?? [], at), calendarRules: clean.calendarRules, calendarEvents: clean.calendarEvents, audits: clean.audits, commands: clean.commands.filter(command => !command.key.startsWith('filebridge:scope:')), settings: snapshot.settings.map(settings => {
     let next = settings.notificationState ? { ...settings, notificationState: restoreCoachNotificationState(settings.notificationState, settings.profileId, settings.datasetId, at) } : settings
-    if (clean.expiredSourceIds.length) {
+    if (clean.expiredSourceIds.length || touched.length) {
       const policy = changePolicyFor(next)
       if (!Number.isSafeInteger(policy.epoch + 1) || !Number.isSafeInteger(policy.sourcePermissionRevision + 1)) throw new Error('資料の権限版が上限に達しています')
       next = { ...next, changePolicy: { ...policy, epoch: policy.epoch + 1, sourcePermissionRevision: policy.sourcePermissionRevision + 1 } }
@@ -139,6 +140,8 @@ export async function restoreBackup(snapshot: Snapshot) {
     await Promise.all([db.taskSourceEvidence.clear(), db.tasks.clear(), db.assessments.clear(), db.completions.clear(), db.ledger.clear(), db.routines.clear(), db.sessions.clear(), db.commands.clear(), db.audits.clear(), db.settings.clear(), db.containers.clear(), db.checklistItems.clear(), db.labelGroups.clear(), db.labelDefinitions.clear(), db.savedTemplates.clear(), db.taskNotes.clear(), db.taskComments.clear(), db.taskAttachments.clear(), db.taskDependencies.clear(), db.planningBuckets.clear(), db.timeBlocks.clear(), db.calendarEvents.clear(), db.rollovers.clear(), db.themeRules.clear(), db.smartLists.clear(), db.focusSelections.clear(), db.habits.clear(), db.habitLogs.clear(), db.goals.clear(), db.goalCheckIns.clear(), db.trackerDefinitions.clear(), db.trackerEntries.clear(), db.dayNotes.clear(), db.pomodoroCycles.clear(), db.reviewRecords.clear(), db.tripBundles.clear(), db.coachMemories.clear(), db.memoryTombstones.clear(), db.contextSources.clear(), db.contextSnapshots.clear(), db.sourceSummaries.clear(), db.sourceArtifacts.clear(), db.coachConversations.clear(), db.coachMessages.clear(), db.calendarRules.clear(), db.achievementPolicies.clear(), db.achievementEvidence.clear(), db.achievementExports.clear()])
     await db.tasks.bulkAdd(prepared.tasks); await db.assessments.bulkAdd(prepared.assessments); await db.completions.bulkAdd(prepared.completions); await db.ledger.bulkAdd(prepared.ledger)
     await db.routines.bulkAdd(prepared.routines); await db.sessions.bulkAdd(prepared.sessions); await db.commands.bulkAdd(prepared.commands); await db.audits.bulkAdd(prepared.audits); await db.settings.bulkAdd(prepared.settings); await db.containers.bulkAdd(prepared.containers ?? []); await db.checklistItems.bulkAdd(prepared.checklistItems ?? []); await db.labelGroups.bulkAdd(prepared.labelGroups ?? []); await db.labelDefinitions.bulkAdd(prepared.labelDefinitions ?? []); await db.savedTemplates.bulkAdd(prepared.savedTemplates ?? []); await db.taskNotes.bulkAdd(prepared.taskNotes ?? []); await db.taskComments.bulkAdd(prepared.taskComments ?? []); await db.taskAttachments.bulkAdd(attachments); await db.taskDependencies.bulkAdd(prepared.taskDependencies ?? []); await db.planningBuckets.bulkAdd(prepared.planningBuckets ?? []); await db.timeBlocks.bulkAdd(prepared.timeBlocks ?? []); await db.calendarEvents.bulkAdd(prepared.calendarEvents ?? []); await db.rollovers.bulkAdd(prepared.rollovers ?? []); await db.themeRules.bulkAdd(prepared.themeRules ?? []); await db.smartLists.bulkAdd(prepared.smartLists ?? []); await db.focusSelections.bulkAdd(prepared.focusSelections ?? []); await db.habits.bulkAdd(prepared.habits ?? []); await db.habitLogs.bulkAdd(prepared.habitLogs ?? []); await db.goals.bulkAdd(prepared.goals ?? []); await db.goalCheckIns.bulkAdd(prepared.goalCheckIns ?? []); await db.trackerDefinitions.bulkAdd(prepared.trackerDefinitions ?? []); await db.trackerEntries.bulkAdd(prepared.trackerEntries ?? []); await db.dayNotes.bulkAdd(prepared.dayNotes ?? []); await db.pomodoroCycles.bulkAdd(prepared.pomodoroCycles ?? []); await db.reviewRecords.bulkAdd(prepared.reviewRecords ?? []); await db.tripBundles.bulkAdd(prepared.tripBundles ?? []); await db.coachMemories.bulkAdd(prepared.coachMemories ?? []); await db.memoryTombstones.bulkAdd(prepared.memoryTombstones ?? []); await db.contextSources.bulkAdd(prepared.contextSources ?? []); await db.contextSnapshots.bulkAdd(prepared.contextSnapshots ?? []); await db.sourceSummaries.bulkAdd(prepared.sourceSummaries ?? []); await db.sourceArtifacts.bulkAdd(prepared.sourceArtifacts ?? []); await db.coachConversations.bulkAdd(prepared.coachConversations ?? []); await db.coachMessages.bulkAdd(prepared.coachMessages ?? []); await db.calendarRules.bulkAdd(prepared.calendarRules ?? []); await db.achievementPolicies.bulkAdd(prepared.achievementPolicies ?? []); await db.achievementEvidence.bulkAdd(prepared.achievementEvidence ?? []); await db.achievementExports.bulkAdd(prepared.achievementExports ?? []); await db.taskSourceEvidence.bulkAdd(prepared.taskSourceEvidence ?? [])
+    // Memories, notifications and pending turns derived from these sources are purged by the same rules as a deletion, in this transaction.
+    for (const source of (prepared.contextSources ?? []).filter(row => touched.includes(row.id))) await purgeRestoredSourceDerived(source, at)
   })
 
   clearChangeSetAuthority()
@@ -155,6 +158,7 @@ export async function restoreBackup(snapshot: Snapshot) {
   await purgeExpiredCalendarOriginals()
   await purgeExpiredCSVOriginals()
   await purgeExpiredDetectionCandidates()
-  for (const id of erasedHere) { const source = await db.contextSources.get(id); if (source && !source.deletedAt && source.ownerId === ownerId) await deleteSource(id, source.revision) }
+  // No-op safety net: the erasures were already written by the restore transaction.
+  for (const id of consent.erased) { const source = await db.contextSources.get(id); if (source && !source.deletedAt && source.ownerId === ownerId) await deleteSource(id, source.revision) }
   await migrateLegacyDetectionNotes()
 }

@@ -11,12 +11,14 @@ const labels: Record<keyof SourcePermissions, string> = { acquire: '取得・閲
 function PermissionFields({ value, onChange }: { value: SourcePermissions; onChange: (next: SourcePermissions) => void }) {
   return <div className="feature-toggle-grid">{permissionKeys.map(key => <label key={key}><input type="checkbox" aria-label={labels[key]} checked={value[key]} onChange={event => onChange({ ...value, [key]: event.target.checked })} />{labels[key]}</label>)}</div>
 }
-const erasedLabels: [keyof SourceDeletionReport['erased'], string][] = [['original', '原文（保存本文）'], ['summaries', 'AI要約'], ['caches', 'cache・取込元データ'], ['embeddings', 'embedding'], ['candidates', '検出候補'], ['memories', '資料由来の記憶'], ['aiReplies', '資料を参照したAI返信'], ['taskQuotes', 'タスク内の資料引用']]
-function DeletionReport({ report, onClose }: { report: SourceDeletionReport; onClose: () => void }) {
+const erasedLabels: [keyof SourceDeletionReport['erased'], string][] = [['original', '原文（保存本文）'], ['summaries', 'AI要約'], ['caches', 'cache・取込元データ'], ['embeddings', 'embedding'], ['candidates', '検出候補'], ['memories', '資料由来の記憶'], ['aiReplies', '資料を参照したAI返信'], ['taskQuotes', 'タスク内の資料引用'], ['legacyCopies', '旧形式メモの受領記録・監査の複写']]
+export function DeletionReport({ report, onClose }: { report: SourceDeletionReport; onClose: () => void }) {
+  const unmigrated = report.reviewTasks.filter(task => task.state === 'exact').length, edited = report.reviewTasks.length - unmigrated
   return <div className="source-deletion-report" role="dialog" aria-label="資料の削除結果"><h3>資料を削除しました</h3>
     <ul>{erasedLabels.map(([key, label]) => <li key={key}>{label}：{report.erased[key]}件を消去</li>)}</ul>
-    {report.reviewTaskIds.length > 0 && <p role="alert">旧形式の引用を本人が編集したメモのタスク{report.reviewTaskIds.length}件は、本人の文として消さずに残しました。資料由来の可能性があるため外部へは送りません。タスク編集画面で確認してください。</p>}
-    <p>{report.sentModels.length ? `外部AIへ送信済みの内容（要約・検出・会話: モデル ${report.sentModels.join('、')}）は提供先から回収できません。` : 'この端末に残る記録では、この資料を外部AIへ送った履歴はありません。記録のない送信の有無は確認できません。'}</p>
+    {unmigrated > 0 && <p role="alert">旧形式の機械生成メモ（未移行）{unmigrated}件は、次回起動時の移行まで残ります。資料由来のため外部へは送りません。</p>}
+    {edited > 0 && <p role="alert">旧形式の引用を本人が編集したメモのタスク{edited}件は、本人の文として消さずに残しました。資料由来の可能性があるため外部へは送りません。タスク編集画面で確認してください。</p>}
+    <p>{report.sentModels.length ? `この資料の本文・引用を外部AIへ送信した記録があります（要約・検出・会話、送信を試みた記録を含む: モデル ${report.sentModels.join('、')}）。提供先へ渡った内容は回収できません。` : 'この資料の外部AI送信記録は見つかりませんでした。送信済みの内容がある場合、提供先から回収できません。'}</p>
     <p className="muted">タスクの題名・期限・点数・完了実績・台帳は変更していません。資料の行は題名を伏せた削除記録として残り、この端末で古いバックアップを復元しても再び削除します。</p>
     <button className="secondary-button" onClick={onClose}>閉じる</button></div>
 }

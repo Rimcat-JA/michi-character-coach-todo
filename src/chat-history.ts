@@ -5,7 +5,8 @@ import { changePolicyFor } from './change-set'
 import { uid, validateDate, type Settings } from './domain'
 import { selectedGoalContext, selectedTaskContext } from './ai'
 import { memoryForSelectedChat, purgeExpiredMemories } from './coach-memory'
-import { purgeExpiredSources } from './source-library'
+import { purgeExpiredSources, recordSourceSent } from './source-library'
+import { maxChatSourceRefs } from './chat-history-validation'
 import { loadTaskEgress, recordEgressAudit, type TaskEgress } from './egress-policy'
 import { defaultCoachConversationRetention } from './retention-defaults'
 
@@ -15,6 +16,7 @@ export type CoachMessage = { id: string; conversationId: string; ownerId: string
 export type CoachTurn = { conversationId: string; userMessageId: string; ownerId: string; datasetId: string; mode: 'local' | 'ai'; model: string | null; policyEpoch: number; sourcePermissionRevision: number; selectedSources: ChatSourceRef[]; selectedContext: string | null }
 export type CoachTurnInput = { text: string; mode: 'local' | 'ai'; taskId?: string | null; goalId?: string | null; sourceIds?: string[]; memoryIds?: string[]; expectedContextDigest?: string }
 
+export { maxChatSourceRefs }
 const textLimit = 10000
 const activeTurns = new Map<string, string>()
 export function clearCoachTurnAuthority(): void { activeTurns.clear() }
@@ -91,6 +93,8 @@ async function selectedContext(input: CoachTurnInput, current: Settings): Promis
     parts.push(`本人が選んだ記憶 (${memory.kind === 'explicit' ? '本人が明示したメモ' : '推測・未確認、事実として断定しない'}): ${memory.text}`)
   }
   const unique = refs.filter((ref, index) => refs.findIndex(other => other.kind === ref.kind && other.id === ref.id) === index)
+  // One limit for storage and backups: refs bind the reply to what was sent, so they are never trimmed.
+  if (unique.length > maxChatSourceRefs) throw new Error('選択した資料・記憶が多すぎます。資料か記憶の選択を減らしてください')
   return { refs: unique, context: parts.join('\n\n').slice(0, 6000) || null, checkInBodies, taskEgress }
 }
 function sameRefs(left: ChatSourceRef[], right: ChatSourceRef[]) { return JSON.stringify(left) === JSON.stringify(right) }
@@ -133,6 +137,7 @@ export async function beginCoachTurn(id: string, expectedRevision: number, input
     // Clear only the submitted draft. A newer/different draft remains available.
     const clearDraft = row.draft === input.text
     await db.coachConversations.put({ ...row, revision: nextRevision(row.revision), ...(clearDraft ? { draft: '', draftRevision: nextRevision(row.draftRevision) } : {}), pendingMessageId: userMessageId, updatedAt: at })
+    if (input.mode === 'ai') for (const ref of prepared.refs) if (ref.kind === 'library') await recordSourceSent({ id: ref.id, latestRevision: ref.revision, permissionRevision: ref.permissionRevision! }, current.aiModel!, 'coach-chat')
     if (input.mode === 'ai' && fresh.taskEgress && input.taskId) await recordEgressAudit({ kind: 'ai-model', route: 'coach-chat', model: current.aiModel ?? null }, [{ taskId: input.taskId, egress: fresh.taskEgress }])
     return { conversationId: id, userMessageId, ownerId: current.profileId, datasetId: current.datasetId, mode: input.mode, model: input.mode === 'ai' ? current.aiModel! : null, policyEpoch: policy.epoch, sourcePermissionRevision: policy.sourcePermissionRevision, selectedSources: prepared.refs, selectedContext: prepared.context }
   })
