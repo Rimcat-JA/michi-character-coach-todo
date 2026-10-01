@@ -28,7 +28,7 @@ async function fixture(callback, overrides = {}) {
     assert.equal(path.dirname(resolved), path.resolve(await fs.realpath(os.tmpdir())))
     assert.ok(path.basename(resolved).startsWith('michi-filebridge-'))
     assert.equal(await fs.realpath(resolved), resolved)
-    await fs.rm(resolved, { recursive: true, force: true })
+    await fs.rm(resolved, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
   }
 }
 
