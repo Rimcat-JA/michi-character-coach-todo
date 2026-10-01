@@ -44,8 +44,8 @@ export type Assessment = { id: string; taskId: string; score: ScoreInput; result
   { origin: 'human' | 'routine'; instruction?: never } |
   { origin: 'user_instruction_via_agent'; instruction: AssessmentInstruction }
 )
-export type Completion = { id: string; taskId: string; originalAt: string; currentAt: string | null; localDate?: string; timezone?: string; originalPoints: number | null; netPoints: number | null; lastConfirmedPoints?: number | null; allocationAssessmentId?: string; scoreState: 'pending' | 'confirmed'; title: string; project: string }
-export type LedgerEntry = { id: string; completionId: string; taskId: string; kind: 'award' | 'adjust' | 'reverse' | 'restore'; delta: number; at: string; reason: string }
+export type Completion = { id: string; taskId: string; originalAt: string; currentAt: string | null; localDate?: string; timezone?: string; originalPoints: number | null; netPoints: number | null; lastConfirmedPoints?: number | null; allocationAssessmentId?: string; reconfirmedAssessmentId?: string; scoreState: 'pending' | 'confirmed'; title: string; project: string }
+export type LedgerEntry = { id: string; completionId: string; taskId: string; kind: 'award' | 'adjust' | 'reverse' | 'restore'; delta: number; at: string; reason: string; assessmentId?: string }
 export type Routine = { id: string; title: string; cadence: 'daily' | 'weekly' | 'monthly' | 'after_completion'; interval: number; weekdays: number[]; monthDay: number; startDate: string; endDate: string | null; excludedDates?: string[]; afterTaskId: string | null; score: ScoreInput; project: string; active: boolean; revision: number; createdAt: string }
 export type WorkSession = { id: string; taskId: string; startedAt: string; endedAt: string; minutes: number; revision?: number; corrections?: { startedAt: string; endedAt: string; minutes: number; reason: string; at: string }[] }
 export type PomodoroCycle = { id: string; taskId: string; startedAt: string; finishedAt: string; targetMinutes: number; elapsedMinutes: number }

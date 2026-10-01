@@ -4,6 +4,7 @@ import { clearDetectionAuthority } from './detection-run'
 import { clearCoachTurnAuthority } from './chat-history'
 import { clearCalendarRulesAuthority } from './calendar-rules-save'
 import { clearRoutineAssistanceAuthority } from './routine-assist-save'
+import { clearCompletionReconfirmationAuthority } from './completion-reconfirmation'
 import { invalidateExternalConnection } from './external-connection'
 
 export async function updateAIConnection(enabled: boolean, model?: string) {
@@ -21,5 +22,6 @@ export async function updateAIConnection(enabled: boolean, model?: string) {
   clearCoachTurnAuthority()
   clearCalendarRulesAuthority()
   clearRoutineAssistanceAuthority()
+  clearCompletionReconfirmationAuthority()
   await invalidateExternalConnection()
 }
