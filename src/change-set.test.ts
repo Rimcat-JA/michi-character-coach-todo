@@ -1,9 +1,14 @@
 import 'fake-indexeddb/auto'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { db, ensureSettings } from './db'
-import { createTask, newTaskInput, updateTask } from './commands'
+import { completeTask, createTask, newTaskInput, updateTask } from './commands'
 import { emptyScore, type Settings } from './domain'
 import { contentDigest } from './canonical'
+import { confirmTaskInstructionFromUI } from './task-user-instruction'
+import { applyTripBundle } from './trip-bundle-save'
+import { prepareTripBundle } from './trip-bundles'
+import { createReminder, dispatchDueReminders } from './reminders'
+import { setCoachNotificationPolicy } from './coach-notification-save'
 import { applyChangeSet, approveChangeSetFromUI, cancelChangeSet, changePolicyFor, clearChangeSetAuthority, decideChangePolicy, defaultChangePolicy, prepareTaskChanges, setChangePolicyFromUI, type ChangeContext, type ChangePolicy, type PreparedChangeSet, type TaskChangeRequest, type UIChangeApproval } from './change-set'
 
 let owner:ChangeContext,coach:ChangeContext,taskId:string
@@ -44,9 +49,10 @@ describe('common ChangeSet approval and local application',()=>{
   })
 
   it('rejects approved=true, material permission claims and all unsupported protected mutations',async()=>{
-    for(const patch of [{manualPoints:30},{dueDate:'2026-10-09'},{status:'completed'},{score:{mode:'formula'}},{approved:true},{policyEpoch:100},{notes:'更新',ownerId:'other'}]) {
+    for(const patch of [{status:'completed'},{score:{mode:'formula'}},{approved:true},{policyEpoch:100},{notes:'更新',ownerId:'other'}]) {
       await expect(prepare(patch as TaskChangeRequest['patch'])).rejects.toMatchObject({code:'UNSUPPORTED_FIELD'})
     }
+    for(const patch of [{manualPoints:30},{dueDate:'2026-10-09'},{title:'未許可'}])await expect(prepare(patch)).rejects.toMatchObject({code:'UNAUTHORIZED'})
     await expect(prepareTaskChanges([{taskId,expectedRevision:1,patch:{notes:'更新'},approved:true} as TaskChangeRequest],coach)).rejects.toMatchObject({code:'INVALID_INPUT'})
     expect((await db.tasks.get(taskId))?.effectivePoints).toBe(25)
   })
@@ -137,7 +143,7 @@ describe('common ChangeSet approval and local application',()=>{
 
   it('keeps digest verification alive in an outer transaction and commits task plus both receipts',async()=>{
     const prepared=await prepare(),grant=await approve(prepared)
-    const receipt=await db.transaction('rw',db.tasks,db.settings,db.commands,db.audits,async()=>{
+    const receipt=await db.transaction('rw',[db.tasks,db.settings,db.commands,db.audits,db.assessments,db.tripBundles,db.containers],async()=>{
       const applied=await applyChangeSet(prepared,grant,coach,'outer-success')
       await db.commands.add({key:'outer:success',hash:applied.digest,resultId:JSON.stringify(applied),at:applied.appliedAt})
       return applied
@@ -151,7 +157,7 @@ describe('common ChangeSet approval and local application',()=>{
 
   it('rolls back task, audit and nested receipts when the enclosing transaction fails',async()=>{
     const prepared=await prepare(),grant=await approve(prepared)
-    await expect(db.transaction('rw',db.tasks,db.settings,db.commands,db.audits,async()=>{
+    await expect(db.transaction('rw',[db.tasks,db.settings,db.commands,db.audits,db.assessments,db.tripBundles,db.containers],async()=>{
       const applied=await applyChangeSet(prepared,grant,coach,'outer-failure')
       await db.commands.add({key:'outer:failure',hash:applied.digest,resultId:JSON.stringify(applied),at:applied.appliedAt})
       throw new Error('synthetic enclosing transaction failure')
@@ -224,7 +230,7 @@ describe('common ChangeSet approval and local application',()=>{
     const preparing=prepareTaskChanges([request],coach)
     Object.assign(request.patch,{dueDate:'2026-10-10',notes:'差替え'})
     const prepared=await preparing
-    expect(prepared.changes[0].after).toEqual({notes:'正しい変更',scheduledDate:'2026-10-01'})
+    expect(prepared.changes[0].after).toMatchObject({notes:'正しい変更',scheduledDate:'2026-10-01',dueDate:null,manualPoints:25,title:'手動作成'})
     await applyChangeSet(prepared,await approve(prepared),coach,'captured')
     expect((await db.tasks.get(taskId))?.dueDate).toBeNull()
   })
@@ -242,5 +248,109 @@ describe('common ChangeSet approval and local application',()=>{
     await cancelChangeSet(prepared,owner)
     await expect(applyChangeSet(prepared,grant,coach,'cancelled')).rejects.toMatchObject({code:'UNVERIFIED_CHANGE_SET'})
     expect((await db.tasks.get(taskId))?.revision).toBe(1)
+  })
+})
+
+describe('explicit protected field proxy edits',()=>{
+  const expanded=(context:ChangeContext):ChangeContext=>({...context,allowedFields:['title','notes','scheduledDate','dueDate','manualPoints']})
+  async function candidate(patch:TaskChangeRequest['patch'],actor:ChangeContext=expanded(coach)){
+    const task=(await db.tasks.get(taskId))!,requests=[{taskId,expectedRevision:task.revision,patch}]
+    const instruction=await confirmTaskInstructionFromUI({message:'本人が25ptから30pt等の表示値を指定',referenceDate:'2026-10-01',timezone:'Asia/Tokyo',changes:requests},expanded(owner),humanClick())
+    return prepareTaskChanges(requests,actor,'本人指示による代理編集',instruction)
+  }
+  const confirm=(prepared:PreparedChangeSet)=>approveChangeSetFromUI(prepared,expanded(owner),humanClick(),prepared.changes.flatMap(change=>change.fields.filter(field=>field==='manualPoints'||field==='dueDate')))
+  async function stored(){return{tasks:await db.tasks.toArray(),assessments:await db.assessments.toArray(),completions:await db.completions.toArray(),ledger:await db.ledger.toArray(),commands:await db.commands.toArray(),audits:await db.audits.toArray(),settings:await db.settings.toArray()}}
+  it('binds manual25→30 to native instruction and final approval before appending proxy assessment',async()=>{
+    const before=await stored(),prepared=await candidate({manualPoints:30})
+    expect(await stored()).toEqual(before)
+    expect(prepared.instruction!.changes[0]).toMatchObject({patch:{manualPoints:30},scoreBefore:{mode:'manual',manualPoints:25},expectedRevision:1})
+    await expect(applyChangeSet(prepared,null,expanded(coach),'without-final')).rejects.toMatchObject({code:'HUMAN_APPROVAL_REQUIRED'})
+    await expect(approveChangeSetFromUI(prepared,expanded(owner),humanClick())).rejects.toMatchObject({code:'PROTECTED_FIELD_APPROVAL_REQUIRED'})
+    const grant=await confirm(prepared);expect(await stored()).toEqual(before)
+    const receipt=await applyChangeSet(prepared,grant,expanded(coach),'points30')
+    const task=(await db.tasks.get(taskId))!,assessment=(await db.assessments.get(task.assessmentId))!
+    expect(task).toMatchObject({revision:2,score:{mode:'manual',manualPoints:30},effectivePoints:30,status:'open'})
+    expect(assessment).toMatchObject({origin:'user_instruction_via_agent',result:{effective:30},instruction:{id:prepared.instruction!.id,digest:prepared.instruction!.digest,actorId:coach.principal.id,actorKind:'coach',model:'model/A',taskRevision:1,approvedBy:owner.ownerId}})
+    expect(await db.assessments.count()).toBe(2);expect(await db.assessments.get(before.assessments[0].id)).toEqual(before.assessments[0]);expect(await db.ledger.count()).toBe(0)
+    expect(await applyChangeSet(prepared,grant,expanded(coach),'points30')).toEqual(receipt)
+    expect(await applyChangeSet(prepared,grant,expanded(coach),'other-retry')).toEqual(receipt)
+    expect(await db.assessments.count()).toBe(2)
+  })
+  it('refuses unsupported autonomy, substituted instruction values and old grants',async()=>{
+    const actor=expanded(coach)
+    for(const patch of [{manualPoints:36},{dueDate:'2026-10-07'},{title:'自主的な改名'}])await expect(prepareTaskChanges([{taskId,expectedRevision:1,patch}],actor)).rejects.toMatchObject({code:'USER_INSTRUCTION_REQUIRED'})
+    const prepared=await candidate({manualPoints:30}),grant=await confirm(prepared),altered=structuredClone(prepared);altered.changes[0].after.manualPoints=31
+    await expect(applyChangeSet(altered,grant,actor,'substitute')).rejects.toMatchObject({code:'DIGEST_MISMATCH'})
+    clearChangeSetAuthority();await expect(applyChangeSet(prepared,grant,actor,'after-clear')).rejects.toMatchObject({code:'UNVERIFIED_CHANGE_SET'})
+    expect((await db.tasks.get(taskId))!.score.manualPoints).toBe(25)
+  })
+  it('does not expand an old automatic notes/schedule policy into new field authority',async()=>{
+    const legacy={...defaultChangePolicy(),taskUpdate:'auto_within_bounds' as const};delete legacy.fieldRules;await setPolicy(legacy)
+    expect(changePolicyFor((await db.settings.get('main'))!).fieldRules).toEqual({title:'require_approval',dueDate:'require_approval',manualPoints:'require_approval'})
+    for(const patch of [{title:'本人が指定した名前'},{dueDate:'2026-10-07'},{manualPoints:30}]){const prepared=await candidate(patch);expect(decideChangePolicy(prepared,legacy).status).toBe('awaiting_approval');await expect(applyChangeSet(prepared,null,expanded(coach),`auto-${Object.keys(patch)[0]}`)).rejects.toMatchObject({code:'HUMAN_APPROVAL_REQUIRED'})}
+    await setPolicy({fieldRules:{manualPoints:'deny'}});await expect(candidate({manualPoints:30})).rejects.toMatchObject({code:'CHANGES_STOPPED'})
+  })
+  it('separates real deadline and schedule and requires both protected checks',async()=>{
+    const prepared=await candidate({title:'正式な名前',dueDate:'2026-10-05',manualPoints:30})
+    await expect(approveChangeSetFromUI(prepared,expanded(owner),humanClick(),['manualPoints'])).rejects.toMatchObject({code:'PROTECTED_FIELD_APPROVAL_REQUIRED'})
+    await applyChangeSet(prepared,await confirm(prepared),expanded(coach),'deadline-points')
+    expect(await db.tasks.get(taskId)).toMatchObject({title:'正式な名前',dueDate:'2026-10-05',scheduledDate:'2026-10-01',effectivePoints:30})
+  })
+  it('records explicit manual0 and a visible score mode transition without converting AI estimates',async()=>{
+    const original=(await db.tasks.get(taskId))!;await updateTask(taskId,1,{...original,score:emptyScore()})
+    const prepared=await candidate({manualPoints:0})
+    expect(prepared.changes[0]).toMatchObject({before:{manualPoints:null},after:{manualPoints:0},scoreBefore:{mode:'unset'},scoreAfter:{mode:'manual',manualPoints:0}})
+    await applyChangeSet(prepared,await confirm(prepared),expanded(coach),'manual0');expect((await db.tasks.get(taskId))!.effectivePoints).toBe(0)
+  })
+  it('preserves all existing completion and ledger snapshots when completed manual25 is edited to30',async()=>{
+    await completeTask(taskId,1);const completions=await db.completions.toArray(),ledger=await db.ledger.toArray()
+    const prepared=await candidate({title:'完了後の整理',manualPoints:30});await applyChangeSet(prepared,await confirm(prepared),expanded(coach),'completed-edit')
+    expect((await db.tasks.get(taskId))!).toMatchObject({status:'completed',effectivePoints:30})
+    expect(await db.completions.toArray()).toEqual(completions);expect(await db.ledger.toArray()).toEqual(ledger);expect(ledger[0].delta).toBe(25)
+  })
+  it('rolls back appended assessment, task, audit, notification cancellation and receipts on late failure',async()=>{
+    const clock=new Date(2026,9,1,11);await db.settings.update('main',{notifications:true});await setCoachNotificationPolicy({timezone:Intl.DateTimeFormat().resolvedOptions().timeZone})
+    await createReminder('once',taskId,clock.toISOString(),['os'],new Date(2026,9,1,10));await dispatchDueReminders(clock)
+    const prepared=await candidate({manualPoints:30}),grant=await confirm(prepared),before=await stored()
+    vi.spyOn(db.audits,'add').mockRejectedValueOnce(new Error('late audit failure'))
+    await expect(applyChangeSet(prepared,grant,expanded(coach),'late-fail')).rejects.toThrow('late audit failure');expect(await stored()).toEqual(before)
+    await applyChangeSet(prepared,grant,expanded(coach),'late-fail')
+    expect((await db.settings.get('main'))!.notificationState!.intents[0].deliveries[0].state).toBe('canceled');expect(await db.assessments.count()).toBe(2)
+  })
+  it('allows retry with the same unconsumed grant after an enclosing transaction rolls back',async()=>{
+    const prepared=await candidate({manualPoints:30}),grant=await confirm(prepared),before=await stored()
+    await expect(db.transaction('rw',[db.tasks,db.settings,db.commands,db.audits,db.assessments,db.tripBundles,db.containers],async()=>{await applyChangeSet(prepared,grant,expanded(coach),'outer-point');throw new Error('outer rollback')})).rejects.toThrow('outer rollback')
+    expect(await stored()).toEqual(before);await applyChangeSet(prepared,grant,expanded(coach),'outer-point');expect(await db.assessments.count()).toBe(2)
+  })
+  it('rejects direct reassignment of common-trip allocated points despite a native instruction',async()=>{
+    const attrs={minutes:15,travelMinutes:0,difficulty:0,uncertainty:0,coordination:0,physical:0,outing:true}
+    const current=(await db.tasks.get(taskId))!;await updateTask(taskId,1,{...current,score:{...emptyScore(),mode:'formula',...attrs}})
+    const proposal=await prepareTripBundle(await db.tasks.toArray(),{title:'本人の共通外出',travelMinutes:15,members:[{taskId,attributes:{minutes:15,difficulty:0,uncertainty:0,coordination:0,physical:0}}]});await applyTripBundle(proposal,[])
+    const before=await stored();await expect(candidate({manualPoints:30})).rejects.toThrow('直接変更');expect(await stored()).toEqual(before)
+  })
+  it('requires current owner/dataset/AI/revision and records human overrides without hiding model provenance',async()=>{
+    const actor={...expanded(coach),fieldOrigins:{manualPoints:'human_override' as const}},prepared=await candidate({manualPoints:30},actor),grant=await confirm(prepared)
+    await expect(applyChangeSet(prepared,grant,{...actor,ownerId:'other'},'foreign')).rejects.toMatchObject({code:'UNAUTHORIZED'})
+    await db.settings.update('main',{aiEnabled:false});await expect(applyChangeSet(prepared,grant,actor,'ai-off')).rejects.toMatchObject({code:'POLICY_CHANGED'});await db.settings.update('main',{aiEnabled:true})
+    await applyChangeSet(prepared,grant,actor,'override');const audit=(await db.audits.toArray()).find(row=>row.operation==='changeset.update')!
+    expect(JSON.parse(audit.detail)).toMatchObject({principal:{kind:'coach',model:'model/A'},fieldOrigins:{manualPoints:'human_override'},origin:'user_instruction_via_agent'})
+    const modelB={...expanded(coach),principal:{id:'model-B',kind:'coach' as const,model:'model/B'}}
+    const next=await candidate({manualPoints:35},modelB);await applyChangeSet(next,await confirm(next),modelB,'modelB');expect(await db.assessments.count()).toBe(3)
+  })
+  it('rejects foreign container ACL, stale task revision and source permission cancellation for protected edits',async()=>{
+    const prepared=await candidate({manualPoints:30}),grant=await confirm(prepared)
+    await setPolicy({sourcePermissionRevision:1});await expect(applyChangeSet(prepared,grant,expanded(coach),'source-cancel')).rejects.toMatchObject({code:'SOURCE_PERMISSION_CHANGED'})
+    const fresh=await candidate({manualPoints:30}),newGrant=await confirm(fresh),task=(await db.tasks.get(taskId))!
+    await updateTask(taskId,1,{...task,notes:'本人が先に編集'});await expect(applyChangeSet(fresh,newGrant,expanded(coach),'stale-point')).rejects.toMatchObject({code:'CONFLICT'})
+    await db.containers.add({id:'foreign-container',parentId:null,kind:'project',name:'他人の領域',ownerId:'other-owner',revision:1,createdAt:new Date().toISOString(),updatedAt:new Date().toISOString(),deletedAt:null});await db.tasks.update(taskId,{containerId:'foreign-container'})
+    await expect(candidate({manualPoints:30})).rejects.toMatchObject({code:'UNAUTHORIZED'});expect((await db.tasks.get(taskId))!.effectivePoints).toBe(25)
+  })
+  it('does not reinterpret a formula score or changed current point state as a confirmed manual instruction',async()=>{
+    const task=(await db.tasks.get(taskId))!;await updateTask(taskId,1,{...task,score:{...emptyScore(),mode:'formula',manualPoints:25,minutes:30,travelMinutes:0,difficulty:0,uncertainty:0,coordination:0,physical:0,outing:false}})
+    const prepared=await candidate({manualPoints:30});expect(prepared.changes[0]).toMatchObject({effectivePointsBefore:4,scoreBefore:{mode:'formula',manualPoints:25},scoreAfter:{mode:'manual',manualPoints:30}})
+    await applyChangeSet(prepared,await confirm(prepared),expanded(coach),'formula-to-manual');expect((await db.tasks.get(taskId))!).toMatchObject({effectivePoints:30,score:{mode:'manual',minutes:30}})
+    const requests=[{taskId,expectedRevision:3,patch:{manualPoints:35}}],instruction=await confirmTaskInstructionFromUI({message:'30ptを35ptへ',referenceDate:'2026-10-01',timezone:'Asia/Tokyo',changes:requests},expanded(owner),humanClick())
+    await db.tasks.update(taskId,{score:{...(await db.tasks.get(taskId))!.score,manualPoints:31},effectivePoints:31})
+    await expect(prepareTaskChanges(requests,expanded(coach),'確認値差替え',instruction)).rejects.toMatchObject({code:'CONFLICT'})
   })
 })

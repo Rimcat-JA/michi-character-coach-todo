@@ -171,7 +171,7 @@ export function createFileBridgeController(gateway:FileBridgeGateway) {
       leases.set(prepared.id,freeze(structuredClone(lease)))
       let receipt:FileBridgeApplicationReceipt
       try{
-        receipt=await db.transaction('rw',[db.tasks,db.assessments,db.commands,db.audits,db.containers,db.settings,db.labelGroups,db.labelDefinitions],async()=>{
+        receipt=await db.transaction('rw',[db.tasks,db.assessments,db.commands,db.audits,db.containers,db.settings,db.labelGroups,db.labelDefinitions,db.tripBundles],async()=>{
           await verifyPrepared(prepared);await assertCurrent(prepared)
           if(Date.parse(lease.expiresAt)<=Date.now())rejectFileBridge('EXPIRED')
           const command=prepared.entry.prepared.command,key=fileBridgeReceiptKey(command.command_id),existing=await db.commands.get(key)

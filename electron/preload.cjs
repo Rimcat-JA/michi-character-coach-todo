@@ -56,6 +56,33 @@ contextBridge.exposeInMainWorld('michiLocalActions', {
   invalidate: () => ipcRenderer.invoke('michi:localaction-invalidate')
 })
 
+let nativeGitHubPublishProof = null
+window.addEventListener('click', event => {
+  if (!event.isTrusted || !(event.target instanceof Element)) return
+  const button = event.target.closest('button[data-github-publish-configure],button[data-github-publish-approve]')
+  if (!button || button.disabled) return
+  const kind = button.hasAttribute('data-github-publish-configure') ? 'configure' : 'approve'
+  const reference = button.getAttribute(`data-github-publish-${kind}`) ?? ''
+  const proof = { nonce: crypto.randomUUID(), kind, reference }
+  nativeGitHubPublishProof = { ...proof, at: Date.now() }
+  ipcRenderer.send('michi:githubpublish-native-proof', proof)
+}, true)
+function githubPublishNativeCall(method, kind, reference, request) {
+  const proof = nativeGitHubPublishProof; nativeGitHubPublishProof = null
+  if (!proof || proof.kind !== kind || proof.reference !== reference || Date.now() - proof.at > 5000) return Promise.reject(new Error('本人の確認ボタンから操作してください'))
+  return ipcRenderer.invoke(`michi:githubpublish-${method}`, { request, proofNonce: proof.nonce })
+}
+contextBridge.exposeInMainWorld('michiGitHubAchievements', {
+  status: () => ipcRenderer.invoke('michi:githubpublish-status'),
+  inspectConfiguration: request => githubPublishNativeCall('inspectConfiguration', 'configure', 'inspect', request),
+  configure: request => githubPublishNativeCall('configure', 'configure', request?.reference, request),
+  publish: request => githubPublishNativeCall('publish', 'approve', request?.exportId, request),
+  reconcile: request => ipcRenderer.invoke('michi:githubpublish-reconcile', request),
+  disconnect: () => githubPublishNativeCall('disconnect', 'configure', 'disconnect', undefined),
+  recordReceipt: request => ipcRenderer.invoke('michi:githubpublish-recordReceipt', request),
+  invalidate: () => ipcRenderer.invoke('michi:githubpublish-invalidate')
+})
+
 contextBridge.exposeInMainWorld('michiAI', {
   status: () => ipcRenderer.invoke('michi:ai-status'),
   saveKey: value => ipcRenderer.invoke('michi:ai-save-key', value),

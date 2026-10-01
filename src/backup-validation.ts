@@ -24,6 +24,8 @@ import { validateChatHistoryRecords } from './chat-history-validation'
 import type { CalendarRulesState } from './calendar-resolver'
 import { validateCalendarRulesRecords } from './calendar-rules-validation'
 import { validateCoachNotificationState } from './coach-notifications'
+import type { AchievementPolicy, AchievementEvidence, AchievementExport } from './achievements'
+import { validateAchievementRecords } from './achievements-validation'
 
 export type Snapshot = {
   format: 'coachbundle'; version: 1; exportedAt: string
@@ -64,6 +66,9 @@ export type Snapshot = {
   coachConversations?: CoachConversation[]
   coachMessages?: CoachMessage[]
   calendarRules?: CalendarRulesState[]
+  achievementPolicies?: AchievementPolicy[]
+  achievementEvidence?: AchievementEvidence[]
+  achievementExports?: AchievementExport[]
 }
 
 const tableNames = ['tasks', 'assessments', 'completions', 'ledger', 'routines', 'sessions', 'commands', 'audits', 'settings'] as const
@@ -182,7 +187,13 @@ export function validateSnapshot(input: unknown): asserts input is Snapshot {
 
   for (const raw of tables.assessments) {
     const assessment = raw as Assessment
-    if (!taskIds.has(assessment.taskId) || !timestamp(assessment.createdAt) || !['human', 'routine'].includes(assessment.origin) || assessment.ruleVersion !== 'v1' || !record(assessment.result) || !record(assessment.score) || !['unset', 'manual', 'formula', 'allocated'].includes(assessment.score.mode as string)) throw new Error('評価履歴が不正です')
+    if (!taskIds.has(assessment.taskId) || !timestamp(assessment.createdAt) || !['human', 'routine', 'user_instruction_via_agent'].includes(assessment.origin) || assessment.ruleVersion !== 'v1' || !record(assessment.result) || !record(assessment.score) || !['unset', 'manual', 'formula', 'allocated'].includes(assessment.score.mode as string)) throw new Error('評価履歴が不正です')
+    if (assessment.origin === 'user_instruction_via_agent') {
+      const instruction = assessment.instruction, settings = tables.settings[0], task = (tables.tasks as Task[]).find(row => row.id === assessment.taskId)
+      const keys = ['id', 'digest', 'ownerId', 'datasetId', 'actorId', 'actorKind', 'model', 'taskRevision', 'approvedBy']
+      const identity = (value: unknown) => filled(value) && value.length <= 200 && value.trim() === value && ![...value].some(char => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127)
+      if (!record(instruction) || Object.keys(instruction).length !== keys.length || keys.some(key => !Object.hasOwn(instruction, key)) || !identity(instruction.id) || typeof instruction.digest !== 'string' || !/^[a-f0-9]{64}$/.test(instruction.digest) || !identity(instruction.ownerId) || !identity(instruction.datasetId) || instruction.ownerId !== settings.profileId || instruction.datasetId !== settings.datasetId || instruction.approvedBy !== instruction.ownerId || !identity(instruction.actorId) || !['coach', 'external-agent'].includes(instruction.actorKind) || !(instruction.model === null || typeof instruction.model === 'string' && /^[\w~./:-]{3,120}$/.test(instruction.model)) || !Number.isSafeInteger(instruction.taskRevision) || instruction.taskRevision < 1 || !task || instruction.taskRevision > task.revision || assessment.score.mode !== 'manual' || assessment.score.manualPoints === null) throw new Error('本人指示による評価履歴が不正です')
+    } else if (Object.hasOwn(assessment, 'instruction')) throw new Error('評価履歴の指示情報が不正です')
     const calculated = calculateScore(assessment.score)
     if (calculated.effective !== assessment.result.effective || calculated.lower !== assessment.result.lower || calculated.upper !== assessment.result.upper) throw new Error('評価履歴のポイントが一致しません')
   }
@@ -358,6 +369,7 @@ export function validateSnapshot(input: unknown): asserts input is Snapshot {
   if (settings.changePolicy !== undefined) validateChangePolicy(settings.changePolicy)
   if (settings.notificationState !== undefined) validateCoachNotificationState(settings.notificationState, settings.profileId, settings.datasetId)
   validateSourceRecords(input.contextSources, input.contextSnapshots, input.sourceSummaries, input.sourceArtifacts, settings.profileId, settings.changePolicy)
+  validateAchievementRecords(input.achievementPolicies ?? [], input.achievementEvidence ?? [], input.achievementExports ?? [], tables.tasks as Task[], tables.completions as Completion[], attachments, notes, [settings])
   validateChatHistoryRecords(input.coachConversations, input.coachMessages, settings.profileId)
   validateCalendarRulesRecords(input.calendarRules ?? [], input.tasks as Task[], (input.calendarEvents ?? []) as CalendarEvent[], input.settings as Settings[])
   if (input.tripBundles !== undefined) {

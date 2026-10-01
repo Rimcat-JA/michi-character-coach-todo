@@ -1,0 +1,21 @@
+import { calculateScore, emptyScore, type Assessment, type Completion, type LedgerEntry, type Settings, type Task } from './domain'
+import { achievementTextHash, type AchievementEvidence, type AchievementFacts, type AchievementPolicy, type AchievementPublicSelection } from './achievements'
+import type { GitHubGatewayStatus } from './github-publish-types'
+
+export const achievementTestTime = '2026-10-01T03:00:00.000Z'
+export const achievementTestGateway: GitHubGatewayStatus = {
+  state: 'ready', configurationId: 'cccccccc-1234-4234-8234-cccccccccccc', authorizationRevision: 1, notice: 'synthetic test only',
+  repository: { repositoryId: 42, owner: 'test-owner', name: 'test-achievements', defaultBranch: 'main', visibility: 'public', headSha: 'a'.repeat(40), protected: false, empty: false, ownerVerified: true, canPush: true, observedAt: achievementTestTime },
+}
+export const achievementTestSelection: AchievementPublicSelection = { title: '公開用の題名', body: '本人が選んだ公開説明です。', evidenceIds: ['evidence-id'], includePastCompletion: false, correctionReason: '' }
+export async function achievementTestFacts(points: number | null = 40, mode: 'manual' | 'formula' = 'manual'): Promise<AchievementFacts> {
+  const settings: Settings = { id: 'main', profileId: 'owner-id', datasetId: 'dddddddd-1234-4234-8234-dddddddddddd', createdAt: achievementTestTime, coachName: 'コーチ', dailyMinutes: 180, dailyPoints: 80, notifications: false, aiEnabled: false, automation: 'A1', lastBackupAt: null }
+  const score = points === null ? emptyScore() : mode === 'manual' ? { ...emptyScore(), mode: 'manual' as const, manualPoints: points } : { ...emptyScore(), mode: 'formula' as const, minutes: 100, travelMinutes: 0, difficulty: 0, uncertainty: 0, coordination: 0, physical: 0, outing: false }
+  const task: Task = { id: 'private-task-id', generationKey: 'private-generation-id', routineId: null, title: '秘密の顧客の内部名', notes: '秘密のメモ', project: '非公開分類', labels: [], scheduledDate: null, dueDate: null, targetDate: null, reviewDate: null, availableFrom: null, importance: 1, score, effectivePoints: points, assessmentId: 'assessment-id', status: 'completed', revision: 2, createdAt: achievementTestTime, updatedAt: achievementTestTime, deletedAt: null }
+  const completion: Completion = { id: 'private-completion-id', taskId: task.id, originalAt: achievementTestTime, currentAt: achievementTestTime, localDate: '2026-10-01', timezone: 'Asia/Tokyo', originalPoints: points, netPoints: points, scoreState: points === null ? 'pending' : 'confirmed', title: task.title, project: task.project }
+  const assessments: Assessment[] = [{ id: 'assessment-id', taskId: task.id, score, result: calculateScore(score), createdAt: achievementTestTime, origin: 'human', ruleVersion: 'v1' }]
+  const ledger: LedgerEntry[] = points === null ? [] : [{ id: 'ledger-id', taskId: task.id, completionId: completion.id, kind: 'award', delta: points, at: achievementTestTime, reason: '完了' }]
+  const policy: AchievementPolicy = { id: 'repository:42', ownerId: settings.profileId, datasetId: settings.datasetId, repositoryId: 42, repository: achievementTestGateway.repository!, configurationId: 'cccccccc-1234-4234-8234-cccccccccccc', authorizationRevision: 1, revision: 1, enabled: true, threshold: 40, allowedCategoryIds: [], allowedEvidenceKinds: ['artifact_file', 'user_statement'], requireAttachment: true, publishMode: 'review_every_time', effectiveAt: achievementTestTime, createdAt: achievementTestTime, updatedAt: achievementTestTime }
+  const evidence: AchievementEvidence[] = [{ id: 'evidence-id', ownerId: settings.profileId, datasetId: settings.datasetId, taskId: task.id, completionId: completion.id, revision: 1, kind: 'artifact_file', status: 'ready', verification: 'attachment_present', origin: { kind: 'task_attachment', id: 'private-attachment-id', sha256: await achievementTextHash('秘密の添付内容'), size: new TextEncoder().encode('秘密の添付内容').length, mediaType: 'text/plain', originalText: null }, publicText: '公開用に編集した証拠の説明', publicSha256: await achievementTextHash('公開用に編集した証拠の説明'), publicRevision: 1, publicReviewed: true, createdAt: achievementTestTime, updatedAt: achievementTestTime }]
+  return { settings, task, completion, assessments, ledger, policy, evidence, containers: [] }
+}

@@ -99,6 +99,22 @@
 .heatmap-day.points { background: #8c77cf; color: white; }
 .heatmap-day.unsynced { background: repeating-linear-gradient(45deg, #e3e3e3 0, #e3e3e3 3px, #fff 3px, #fff 6px); }
 .heatmap-detail { display: flex; justify-content: space-between; gap: 12px; border-top: 1px solid var(--border, #e0e3e8); padding: 9px 0; }
+.achievements-view { margin-top: 20px; min-width: 0; overflow-wrap: anywhere; }
+.achievements-view h3 { margin: 24px 0 12px; }
+.achievements-view h4 { margin: 20px 0 10px; }
+.achievements-view label { display: flex; flex-direction: column; gap: 7px; margin: 14px 0; font-size: 13px; }
+.achievements-view label:has(input[type="checkbox"]) { flex-direction: row; align-items: flex-start; gap: 9px; line-height: 1.6; }
+.achievements-view input:not([type="checkbox"]), .achievements-view textarea, .achievements-view select { box-sizing: border-box; width: 100%; max-width: 100%; min-width: 0; padding: 10px 12px; border: 1px solid var(--border, #e0e3e8); border-radius: 8px; font: inherit; background: var(--card-bg, white); color: inherit; }
+.achievements-view textarea { min-height: 100px; resize: vertical; }
+.achievements-view input[type="checkbox"] { flex: 0 0 auto; margin-top: 4px; accent-color: #7560d5; }
+.achievements-view button { max-width: 100%; margin: 6px 8px 8px 0; padding: 9px 13px; border: 1px solid var(--border, #e0e3e8); border-radius: 8px; background: var(--card-bg, white); color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.achievements-view button:disabled { cursor: default; opacity: .55; }
+.achievements-view details { margin: 14px 0; padding: 12px; border: 1px solid var(--border, #e0e3e8); border-radius: 9px; }
+.achievements-view summary { cursor: pointer; line-height: 1.6; }
+.achievements-view fieldset { min-width: 0; margin: 16px 0; padding: 12px; border: 1px solid var(--border, #e0e3e8); border-radius: 9px; }
+.achievements-view pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+.achievements-view table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.achievements-view th, .achievements-view td { text-align: left; padding: 9px 7px; border-bottom: 1px solid var(--border, #e0e3e8); }
 @media (max-width: 700px) { .point-heatmap { grid-template-columns: repeat(7, minmax(0, 1fr)); } }
 .print-overlay { position: fixed; inset: 0; overflow: auto; z-index: 1000; background: rgba(20, 24, 34, .6); padding: 24px; }
 .print-sheet { max-width: 1000px; margin: 0 auto; padding: 24px; background: white; color: #20242b; border-radius: 12px; }

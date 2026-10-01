@@ -5,6 +5,7 @@ import type { CoachMemory, MemoryTombstone } from './coach-memory'
 import type { ContextSource, ContextSnapshot, SourceSummary, SourceArtifact } from './source-library'
 import type { CalendarRulesState } from './calendar-resolver'
 import type { CoachConversation, CoachMessage } from './chat-history'
+import type { AchievementPolicy, AchievementEvidence, AchievementExport } from './achievements'
 import type { Assessment, Audit, CalendarEvent, ChecklistItem, CommandReceipt, Completion, Container, DayNote, FocusProjectSelection, Goal, GoalCheckIn, Habit, HabitLog, LabelDefinition, LabelGroup, LedgerEntry, PlanningBucket, PomodoroCycle, RolloverEntry, Routine, SavedTemplate, Settings, SmartList, Task, TaskAttachment, TaskComment, TaskDependency, TaskNote, ThemeRule, TimeBlock, TrackerDefinition, TrackerEntry, WorkSession } from './domain'
 
 export const db = new Dexie('character-coach-v1') as Dexie & {
@@ -52,6 +53,9 @@ export const db = new Dexie('character-coach-v1') as Dexie & {
   calendarRules: EntityTable<CalendarRulesState, 'id'>
   coachConversations: EntityTable<CoachConversation, 'id'>
   coachMessages: EntityTable<CoachMessage, 'id'>
+  achievementPolicies: EntityTable<AchievementPolicy, 'id'>
+  achievementEvidence: EntityTable<AchievementEvidence, 'id'>
+  achievementExports: EntityTable<AchievementExport, 'id'>
 }
 db.version(1).stores({
   tasks: 'id, &generationKey, status, scheduledDate, dueDate, project, routineId, deletedAt, updatedAt',
@@ -184,6 +188,7 @@ db.version(19).stores({ coachMemories: 'id, ownerId, kind, deletedAt', memoryTom
 db.version(20).stores({ contextSources: 'id, ownerId, provider, latestRevision, deletedAt', contextSnapshots: 'id, sourceId, ownerId, revision', sourceSummaries: 'id, sourceId, ownerId, sourceRevision, permissionRevision', sourceArtifacts: 'id, sourceId, ownerId, kind' })
 db.version(21).stores({ coachConversations: 'id, ownerId, deletedAt, updatedAt', coachMessages: 'id, conversationId, ownerId, [conversationId+sequence], replyTo, createdAt' })
 db.version(22).stores({ calendarRules: 'id, ownerId, datasetId, revision' })
+db.version(23).stores({ achievementPolicies: 'id,&repositoryId,ownerId,datasetId,revision', achievementEvidence: 'id,ownerId,datasetId,taskId,completionId,status', achievementExports: 'id,&[repositoryId+completionId],ownerId,datasetId,completionId,state' })
 
 export async function ensureSettings() {
   const current = await db.settings.get('main')
