@@ -1,15 +1,21 @@
 import { addDays, emptyScore, validateDate } from './domain'
 import { canonicalJSON } from './canonical'
-import { calendarRuleEditorDefinition } from './calendar-rule-editor'
+import { calendarRuleEditorDefinition, followSeriesClock, rebaseFutureCount } from './calendar-rule-editor'
 import { validateCalendarRulesState } from './calendar-rules-validation'
-import type { CalendarChangeScope, CalendarRule, CalendarRulesState } from './calendar-resolver'
+import { defaultUnfinishedPolicy, type CalendarChangeScope, type CalendarRule, type CalendarRuleTrigger, type CalendarRulesState, type RecurrenceUnfinishedPolicy } from './calendar-resolver'
+import { canonicalRRule, parseRRule, serializeRRule } from './rrule'
+import { deadlineClock, groundRecurrencePhrase, RecurrencePhraseError, type RecurrencePattern } from './recurrence-phrase'
+import type { AmbiguousTimePolicy, NonexistentTimePolicy } from './zoned-time'
 
 export type RoutineAssistSelection = {
   contextId: string; bindingId: string; calendarId: string; activityId: string | null
   timezone: string; validFrom: string; validTo: string; time: string
   stepKind: 'task' | 'event'; durationMinutes: number | null
   scheduledOffsetDays: number; dueOffsetDays: number | null
+  /** Owner-chosen clock deadline and DST / unfinished-occurrence choices; absent means none / the shown defaults. */
+  dueTime?: string | null; nonexistentTime?: NonexistentTimePolicy; ambiguousTime?: AmbiguousTimePolicy; unfinishedPolicy?: RecurrenceUnfinishedPolicy
 }
+const optionalSelectionKeys = ['dueTime', 'nonexistentTime', 'ambiguousTime', 'unfinishedPolicy'] as const
 export type RoutineAssistInput = {
   message: string; referenceDate: string; targetRuleId: string | null; expectedRuleRevision: number | null
   selection: RoutineAssistSelection; scope: CalendarChangeScope
@@ -31,7 +37,12 @@ export function validateRoutineAssistSelection(input: RoutineAssistInput, state:
   if (typeof input.message !== 'string' || !input.message.trim() || input.message.length > 4000) throw new Error('周期の本人指示は1〜4000文字で入力してください')
   day(input.referenceDate)
   const selection = input.selection
-  exact(selection, ['contextId', 'bindingId', 'calendarId', 'activityId', 'timezone', 'validFrom', 'validTo', 'time', 'stepKind', 'durationMinutes', 'scheduledOffsetDays', 'dueOffsetDays'])
+  if (!record(selection)) throw new Error('周期補助の項目が不正です')
+  exact(selection, ['contextId', 'bindingId', 'calendarId', 'activityId', 'timezone', 'validFrom', 'validTo', 'time', 'stepKind', 'durationMinutes', 'scheduledOffsetDays', 'dueOffsetDays', ...optionalSelectionKeys.filter(key => Object.hasOwn(selection, key))])
+  if (selection.dueTime !== undefined && selection.dueTime !== null && (typeof selection.dueTime !== 'string' || !/^([01]\d|2[0-3]):[0-5]\d$/.test(selection.dueTime) || selection.stepKind !== 'task' || selection.dueOffsetDays === null)) throw new Error('締め切り時刻は締め切り日のあるタスクだけに指定してください')
+  if (selection.nonexistentTime !== undefined && !['skip', 'next_valid'].includes(selection.nonexistentTime)) throw new Error('夏時間でない時刻の扱いを選択してください')
+  if (selection.ambiguousTime !== undefined && !['earlier', 'later'].includes(selection.ambiguousTime)) throw new Error('夏時間で二度ある時刻の扱いを選択してください')
+  if (selection.unfinishedPolicy !== undefined && !['keep_all', 'keep_latest', 'generate_after_completion'].includes(selection.unfinishedPolicy)) throw new Error('未完了の回の扱いを選択してください')
   id(selection.contextId); id(selection.bindingId); id(selection.calendarId)
   if (selection.activityId !== null) id(selection.activityId)
   day(selection.validFrom); day(selection.validTo)
@@ -81,19 +92,51 @@ function quote(value: unknown, message: string, label: string): string {
   if (typeof value !== 'string' || !value.trim() || value.length > 2000 || !message.includes(value)) throw new Error(`${label}が本人の原文と一致しません`)
   return value
 }
+function readable(text: string) { try { groundRecurrencePhrase(deadlineClock(text).rest); return true } catch { return false } }
 function explicitIntent(message: string) {
   const text = message.normalize('NFKC')
-  if (/しないで|設定しない|繰り返さない|不要|仮に|もし|例えば|例として|取消し|取り消し/.test(text)) throw new Error('必要な周期を設定する明示指示を確認してください')
+  if (/しないで|設定しない|繰り返さない|不要|仮に|もし|例えば|例として|取消し|取り消し|\bnot\b|\bdon'?t\b|\bnever\b|\bif\b/i.test(text)) throw new Error('必要な周期を設定する明示指示を確認してください')
   if (/以外|除く|除外|\bexcept\b|\bexcluding\b/i.test(text)) throw new Error('周期の除外条件は省略できません。本人の手動設定で確認してください')
   if (/履歴|過去|以前|先月|やっていた|していた|しただけ|回やった|回行った/.test(text) && !/にして|設定して|作って|変更して|繰り返して|今後|これから/.test(text)) throw new Error('過去の頻度だけでは将来の必要な系列を作りません')
-  if (!/毎週|毎月|営業日|活動|出勤|授業|会議|開始|終了/.test(text)) throw new Error('明示された周期または活動からの指定を確認してください')
-  if (/毎日|隔週|隔月|\d+\s*(?:日|週|か月|ヶ月)ごと|毎月\s*\d+\s*日/.test(text)) throw new Error('未対応の周期を一部だけ省略できません。本人の手動設定で確認してください')
-  if (Number(/毎週/.test(text)) + Number(/毎月|月の|月末/.test(text)) + Number(/開始|終了/.test(text)) > 1) throw new Error('複数の周期や基準を一つに省略できません。使用する周期を一つ指定してください')
-  if (/曜(?:日)?\s*(?:か|または|あるいは|もしくは)|営業日\s*(?:か|または|あるいは|もしくは)|(?:毎週|毎月).*(?:あるいは|または|もしくは)/.test(text)) throw new Error('周期の選択肢を一つに確認してください')
-  if (/(?:期限|締め?切り|締切).*(?:[0-2]?\d時|\d{1,2}:\d{2})|(?:[0-2]?\d時|\d{1,2}:\d{2}).*(?:まで|期限|締め?切り|締切)/.test(text)) throw new Error('時刻付きの本当の締め切りは周期補助で日付へ省略できません。原文を確認して手動入力してください')
+  // Wording the deterministic reader accepts (e.g. English weekdays) is as explicit as the Japanese keywords.
+  if (!/毎週|毎月|毎日|毎年|隔週|隔月|営業日|稼働日|活動|出勤|授業|会議|開始|終了|完了|月末|第\s*\d|最終|最後の|\d+\s*(?:日|週間?|か月|ヶ月|カ月|ヵ月)\s*(?:ごと|毎|に\s*[1一]\s*(?:回|度))|毎[日月火水木金土]曜/.test(text) && !readable(text)) throw new Error('明示された周期または活動からの指定を確認してください')
+  if (Number(/毎週|毎日|毎年|隔週|毎[日月火水木金土]曜/.test(text)) + Number(/毎月(?!曜|[日月火水木金土]曜)|月の|月末|隔月/.test(text)) + Number(/開始|終了/.test(text)) + Number(/完了(?:して|から|後|の)\s*\d/.test(text)) > 1) throw new Error('複数の周期や基準を一つに省略できません。使用する周期を一つ指定してください')
+  if (/曜(?:日)?\s*(?:か|または|あるいは|もしくは)|営業日\s*(?:か|または|あるいは|もしくは)|(?:毎週|毎月).*(?:あるいは|または|もしくは)|\bor\b|\beither\b/i.test(text)) throw new Error('周期の選択肢を一つに確認してください')
 }
-function validateGroundedTrigger(trigger: CalendarRule['trigger'], raw: string, selection: RoutineAssistSelection) {
-  const text = raw.normalize('NFKC')
+/** The trigger's own clock; an activity-relative trigger has none. */
+export function routineTriggerTime(trigger: CalendarRuleTrigger): string | null {
+  return trigger.kind === 'activity_relative' ? null : trigger.kind === 'rrule' ? trigger.dtstart.slice(11) : trigger.time
+}
+/** Shown beside the start-date choice; DTSTART = validFrom fixes the first matching date and the interval phase (RFC 5545). */
+export const routineAssistStartNote = '繰り返し規則は有効開始日を起点（DTSTART）にし、曜日・日付の指定があるときは起点以降で最初に一致する日が最初の回です。隔週・隔月などの間隔も起点の週・月から数えます（ずらしたいときは有効開始日を最初の回にしたい週・月の日にしてください）。既存の規則を編集するときは、その規則の起点・除外・追加の回・回数を保ちます。完了起点の周期は有効開始日を最初の回にします。上の時刻を予定時刻にし、過去の回をまとめて通知しません。'
+/** The target rule's current trigger and, for a "from this date onward" change, the base rule whose COUNT the edition continues. */
+export type RoutineAssistPrevious = { trigger?: CalendarRuleTrigger; future?: { base: CalendarRule; fromDate: string } }
+export function routineAssistPrevious(input: Pick<RoutineAssistInput, 'targetRuleId' | 'scope'>, state: CalendarRulesState): RoutineAssistPrevious {
+  const old = state.rules.find(value => value.id === input.targetRuleId)
+  return old ? { trigger: calendarRuleEditorDefinition(old).trigger, ...(input.scope?.kind === 'this_and_future' ? { future: { base: old, fromDate: input.scope.fromDate } } : {}) } : {}
+}
+/** RRULE and completion-relative triggers take their start, DST and unfinished choices from the owner's selection, never from a model.
+ * Editing a rule of the same kind keeps what the grammar cannot state: its start, added/excluded dates, COUNT/UNTIL and earlier choices. */
+export function routineAssistTrigger(pattern: RecurrencePattern, selection: RoutineAssistSelection, previous: RoutineAssistPrevious = {}): CalendarRuleTrigger {
+  const before = previous.trigger
+  if (pattern.kind === 'rrule') {
+    if (before?.kind !== 'rrule') return { kind: 'rrule', dtstart: `${selection.validFrom}T${selection.time}`, rrule: canonicalRRule(pattern.rrule), rdates: [], exdates: [], nonexistentTime: selection.nonexistentTime ?? 'skip', ambiguousTime: selection.ambiguousTime ?? 'earlier' }
+    const spec = parseRRule(pattern.rrule), kept = parseRRule(before.rrule), carried = spec.count === null && spec.until === null && (kept.count !== null || kept.until !== null), oldTime = before.dtstart.slice(11)
+    const trigger: CalendarRuleTrigger = { kind: 'rrule', dtstart: `${before.dtstart.slice(0, 10)}T${selection.time}`, rrule: canonicalRRule(serializeRRule(carried ? { ...spec, count: kept.count, until: kept.until } : spec)), rdates: followSeriesClock(before.rdates, oldTime, selection.time), exdates: followSeriesClock(before.exdates, oldTime, selection.time), nonexistentTime: selection.nonexistentTime ?? before.nonexistentTime, ambiguousTime: selection.ambiguousTime ?? before.ambiguousTime }
+    return carried && previous.future ? rebaseFutureCount(previous.future.base, trigger, previous.future.fromDate)?.trigger ?? trigger : trigger
+  }
+  if (pattern.kind === 'completion_relative') return { kind: 'completion_relative', firstDate: before?.kind === 'completion_relative' ? before.firstDate : selection.validFrom, time: selection.time, afterDays: pattern.afterDays, unfinishedPolicy: selection.unfinishedPolicy ?? (before?.kind === 'completion_relative' ? before.unfinishedPolicy : defaultUnfinishedPolicy) }
+  if (pattern.kind === 'weekly') return { kind: 'weekly', weekdays: pattern.weekdays, time: selection.time }
+  return { kind: 'monthly_business', ordinal: pattern.ordinal, from: pattern.from, time: selection.time }
+}
+/** Deterministic reading of the owner's own recurrence wording; used to prefill the manual form and to check model candidates. */
+export function groundedRoutinePattern(text: string): RecurrencePattern {
+  try { return groundRecurrencePhrase(deadlineClock(text).rest) } catch (error) { if (error instanceof RecurrencePhraseError) throw new Error(`${error.message}。本人の手動設定で確認してください`); throw error }
+}
+function validateGroundedTrigger(trigger: CalendarRule['trigger'], raw: string, selection: RoutineAssistSelection, previousDueTime: string | null = null, previous: RoutineAssistPrevious = {}) {
+  const deadline = deadlineClock(raw), text = deadline.rest
+  // A quoted clock deadline is kept only as the owner's selected deadline time, never folded into a date or the series time.
+  if (deadline.time !== null && deadline.time !== (selection.dueTime ?? previousDueTime)) throw new Error('時刻付きの本当の締め切りは周期補助で日付へ省略できません。原文の時刻を締め切り時刻として本人が選択してください')
   if (/時半|時\s*\d+(?!\d|分)|(?:時(?:\s*\d+分)?|:\d{2})(?:頃|ころ|ごろ|くらい|前|後|以降)|(?:朝|夜|晩|夕方|昼)\s*\d+時|\b\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?)\b/i.test(text)) throw new Error('この時刻表現は省略できません。24時間表記で本人が確認してください')
   const explicitTimes: string[] = []
   for (const match of text.matchAll(/(\d+):(\d+)/g)) {
@@ -108,16 +151,18 @@ function validateGroundedTrigger(trigger: CalendarRule['trigger'], raw: string, 
     explicitTimes.push(`${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`)
   }
   if (explicitTimes.length > 1 || explicitTimes.some(time => !/^([01]\d|2[0-3]):[0-5]\d$/.test(time) || time !== selection.time)) throw new Error('原文の現地時刻と本人選択が一致しません。時刻を省略せず確認してください')
+  if (trigger.kind === 'rrule' || trigger.kind === 'completion_relative') {
+    const pattern = groundedRoutinePattern(text)
+    if (canonicalJSON(routineAssistTrigger(pattern, selection, previous)) !== canonicalJSON(trigger)) throw new Error(pattern.kind === trigger.kind ? '候補の周期が本人の原文と一致しません' : '候補の周期の種類が本人の原文と一致しません')
+    return
+  }
   if (trigger.kind === 'weekly') {
-    if (!/毎週/.test(text) || trigger.time !== selection.time || !Array.isArray(trigger.weekdays) || !trigger.weekdays.length || trigger.weekdays.some(day => !Number.isInteger(day) || day < 0 || day > 6) || new Set(trigger.weekdays).size !== trigger.weekdays.length) throw new Error('毎週の曜日・時刻が明示された周期と一致しません')
-    const names = ['日', '月', '火', '水', '木', '金', '土'], found = new Set<number>()
-    for (const match of text.matchAll(/([日月火水木金土])(?:曜(?:日)?|(?=[・、,と][日月火水木金土]曜)|(?<=毎週[日月火水木金土]?))/g)) found.add(names.indexOf(match[1]))
-    // Compact lists such as 月・水曜 are also explicit.
-    const list = text.match(/毎週\s*([日月火水木金土](?:[・、,と][日月火水木金土])*)曜/)
-    if (list) for (const name of list[1].split(/[・、,と]/)) found.add(names.indexOf(name))
-    if (canonicalJSON([...found].sort()) !== canonicalJSON([...trigger.weekdays].sort())) throw new Error('候補の曜日が本人の原文と一致しません')
+    if (trigger.time !== selection.time || !Array.isArray(trigger.weekdays) || !trigger.weekdays.length || trigger.weekdays.some(day => !Number.isInteger(day) || day < 0 || day > 6) || new Set(trigger.weekdays).size !== trigger.weekdays.length) throw new Error('毎週の曜日・時刻が明示された周期と一致しません')
+    // The weekdays are exactly those the deterministic reader finds (毎週月・水曜, 毎月曜, every Monday and Wednesday).
+    const pattern = groundedRoutinePattern(text)
+    if (pattern.kind !== 'weekly' || canonicalJSON([...pattern.weekdays].sort()) !== canonicalJSON([...trigger.weekdays].sort())) throw new Error('候補の曜日が本人の原文と一致しません')
   } else if (trigger.kind === 'monthly_business') {
-    if (!/毎月|月の|月末/.test(text) || !/営業日|稼働日/.test(text) || trigger.time !== selection.time || !Number.isInteger(trigger.ordinal) || trigger.ordinal < 1 || trigger.ordinal > 31 || !['start', 'end'].includes(trigger.from)) throw new Error('毎月の営業日順位・時刻が明示された周期と一致しません')
+    if (!/毎月|月の|月末|最終(?:の)?(?:営業日|稼働日)|最後の(?:営業日|稼働日)/.test(text) || !/営業日|稼働日/.test(text) || trigger.time !== selection.time || !Number.isInteger(trigger.ordinal) || trigger.ordinal < 1 || trigger.ordinal > 31 || !['start', 'end'].includes(trigger.from)) throw new Error('毎月の営業日順位・時刻が明示された周期と一致しません')
     if (/営業日(?:前|後)/.test(text)) throw new Error('営業日からの追加日数は手動で確認してください')
     if ([...text.matchAll(/第\s*(\d+)\s*(?:営業日|稼働日)/g)].length > 1) throw new Error('複数の営業日順位を一つに省略できません')
     const ordinal = /最終(?:の)?(?:営業日|稼働日)/.test(text) ? 1 : Number(text.match(/第\s*(\d+)\s*(?:営業日|稼働日)/)?.[1])
@@ -125,6 +170,9 @@ function validateGroundedTrigger(trigger: CalendarRule['trigger'], raw: string, 
     if (trigger.ordinal !== ordinal || trigger.from !== from) throw new Error('候補の営業日順位が本人の原文と一致しません')
   } else if (trigger.kind === 'activity_relative') {
     if (selection.activityId === null || trigger.activityId !== selection.activityId || !['start', 'end'].includes(trigger.edge)) throw new Error('本人が選択した活動以外は周期の基準にできません')
+    let other: RecurrencePattern | null = null
+    try { other = groundRecurrencePhrase(text) } catch { other = null }
+    if (other) throw new Error('活動からの相対指定と別の周期を一つにまとめられません')
     const edge = /終了/.test(text) ? 'end' : /開始/.test(text) ? 'start' : null
     if (!edge || edge !== trigger.edge || /開始/.test(text) && /終了/.test(text)) throw new Error('活動の開始か終了かを原文で指定してください')
     const days = [...text.matchAll(/([+-]?\d+)\s*日\s*(前|後)?/g)], minutes = [...text.matchAll(/([+-]?\d+)\s*分\s*(前|後)?/g)]
@@ -133,6 +181,9 @@ function validateGroundedTrigger(trigger: CalendarRule['trigger'], raw: string, 
     const offsetDays = /翌日/.test(text) ? 1 : amount(days), offsetMinutes = amount(minutes)
     if (trigger.offsetDays !== offsetDays || trigger.offsetMinutes !== offsetMinutes) throw new Error('活動からの相対日数・分数が本人の原文と一致しません')
   } else throw new Error('この周期表現は手動で確認してください')
+  // Weekly and business-day candidates must also be the single period the grammar reads; extra periods are refused.
+  const pattern = trigger.kind === 'activity_relative' ? null : groundedRoutinePattern(text)
+  if (pattern && canonicalJSON(routineAssistTrigger(pattern, selection, previous)) !== canonicalJSON(trigger)) throw new Error('候補の周期が本人の原文の唯一の周期と一致しません')
 }
 export function validateRoutineInstructionPeriod(input: RoutineAssistInput, allowSubset = false) {
   const text = input.message.normalize('NFKC'), selection = input.selection
@@ -173,10 +224,15 @@ export function parseRoutineAssistAnswer(answer: string, input: RoutineAssistInp
   if (parsed.trigger.kind === 'weekly') exact(parsed.trigger, ['kind', 'weekdays', 'time'])
   else if (parsed.trigger.kind === 'monthly_business') exact(parsed.trigger, ['kind', 'ordinal', 'from', 'time'])
   else if (parsed.trigger.kind === 'activity_relative') exact(parsed.trigger, ['kind', 'activityId', 'edge', 'offsetDays', 'offsetMinutes'])
+  else if (parsed.trigger.kind === 'rrule') { exact(parsed.trigger, ['kind', 'rrule']); if (typeof parsed.trigger.rrule !== 'string') throw new Error('RRULEの形式が不正です') }
+  else if (parsed.trigger.kind === 'completion_relative') { exact(parsed.trigger, ['kind', 'afterDays']); integer(parsed.trigger.afterDays, 1, 3650) }
   else throw new Error('この周期は本人の手動設定で確認してください')
-  const trigger = parsed.trigger as CalendarRule['trigger']
-  validateGroundedTrigger(trigger, recurrence, input.selection)
-  validateGroundedTrigger(trigger, input.message, input.selection)
+  // The model only names the rule; start, DST and unfinished choices are filled from the owner's selection.
+  const previousTrigger = routineAssistPrevious(input, state)
+  const trigger = parsed.trigger.kind === 'rrule' ? routineAssistTrigger({ kind: 'rrule', rrule: String(parsed.trigger.rrule) }, input.selection, previousTrigger) : parsed.trigger.kind === 'completion_relative' ? routineAssistTrigger({ kind: 'completion_relative', afterDays: Number(parsed.trigger.afterDays) }, input.selection, previousTrigger) : parsed.trigger as CalendarRule['trigger']
+  const target = state.rules.find(value => value.id === input.targetRuleId), previousDueTime = target ? calendarRuleEditorDefinition(target).steps[0].dueTime ?? null : null
+  validateGroundedTrigger(trigger, recurrence, input.selection, previousDueTime, previousTrigger)
+  validateGroundedTrigger(trigger, input.message, input.selection, previousDueTime, previousTrigger)
   const points = requestedPoints(input.message)
   if (parsed.manual_points !== points) throw new Error('モデルの点数候補が本人の具体的な指定と一致しません')
   const old = state.rules.find(value => value.id === input.targetRuleId), previous = old ? calendarRuleEditorDefinition(old) : null
@@ -184,7 +240,7 @@ export function parseRoutineAssistAnswer(answer: string, input: RoutineAssistInp
   const title = parsed.title_quote === null && previous ? previous.title : quote(parsed.title_quote, input.message, '作業名の引用').trim()
   if (!title || title.length > 300) throw new Error('周期の作業名は1〜300文字です')
   const selection = input.selection
-  const steps = previous ? structuredClone(previous.steps) : [{ key: 'main', title, kind: selection.stepKind, scheduledOffsetDays: selection.scheduledOffsetDays, dueOffsetDays: selection.dueOffsetDays, score: selection.stepKind === 'task' ? emptyScore() : null, durationMinutes: selection.durationMinutes }]
+  const steps: CalendarRule['steps'] = previous ? structuredClone(previous.steps) : [{ key: 'main', title, kind: selection.stepKind, scheduledOffsetDays: selection.scheduledOffsetDays, dueOffsetDays: selection.dueOffsetDays, score: selection.stepKind === 'task' ? emptyScore() : null, durationMinutes: selection.durationMinutes, ...(selection.dueTime ? { dueTime: selection.dueTime } : {}) }]
   if (!previous) steps[0].title = title
   if (points !== null) { if (steps[0].kind !== 'task') throw new Error('占有予定へ必要ポイントは設定しません'); steps[0].score = { ...steps[0].score!, mode: 'manual', manualPoints: points } }
   const candidate: RoutineAssistCandidate = { input: structuredClone(input), definition: { title, enabled: previous?.enabled ?? true, trigger: structuredClone(trigger), steps }, notices: previous ? ['既存のステップ・点数・完了実績を保持します。本人が指定した変更だけを確認します。'] : ['未指定のポイント・期限・準備作業は追加しません。'] }
@@ -198,22 +254,24 @@ export function validateRoutineAssistCandidate(candidate: RoutineAssistCandidate
   const rule: CalendarRule = { id: old?.id ?? 'routine-assist-preview', contextId: selection.contextId, bindingId: selection.bindingId, calendarId: selection.calendarId, originBasis: 'user_instruction', validFrom: selection.validFrom, validTo: selection.validTo, revision: 1, ...structuredClone(candidate.definition) }
   const proposed = { ...structuredClone(state), rules: state.rules.filter(value => value.id !== old?.id).concat(rule), instances: [] }
   validateCalendarRulesState(proposed, state.ownerId, state.datasetId)
-  if (candidate.definition.trigger.kind === 'activity_relative' && candidate.definition.trigger.activityId !== selection.activityId || candidate.definition.trigger.kind !== 'activity_relative' && candidate.definition.trigger.time !== selection.time) throw new Error('周期候補の基準活動・時刻が本人選択と一致しません')
+  const trigger = candidate.definition.trigger
+  if (trigger.kind === 'activity_relative' && trigger.activityId !== selection.activityId || trigger.kind !== 'activity_relative' && routineTriggerTime(trigger) !== selection.time) throw new Error('周期候補の基準活動・時刻が本人選択と一致しません')
+  if ((trigger.kind === 'rrule' || trigger.kind === 'completion_relative') && canonicalJSON(trigger) !== canonicalJSON(routineAssistTrigger(trigger.kind === 'rrule' ? { kind: 'rrule', rrule: trigger.rrule } : { kind: 'completion_relative', afterDays: trigger.afterDays }, selection, routineAssistPrevious(input, state)))) throw new Error('繰り返しの開始・夏時間・未完了の扱いが本人選択と一致しません')
   if (old) {
     const previous = calendarRuleEditorDefinition(old)
     if (candidate.definition.enabled !== previous.enabled) throw new Error('周期補助で未指示の停止・再開を行いません')
     if (candidate.definition.steps.length !== previous.steps.length || candidate.definition.steps.some((step, index) => step.key !== previous.steps[index].key || index > 0 && canonicalJSON(step) !== canonicalJSON(previous.steps[index]))) throw new Error('周期補助で未指示のステップを追加・削除・変更できません')
     const before = previous.steps[0], after = candidate.definition.steps[0]
-    if (before.title !== after.title || before.kind !== after.kind || before.scheduledOffsetDays !== after.scheduledOffsetDays || before.dueOffsetDays !== after.dueOffsetDays || before.durationMinutes !== after.durationMinutes) throw new Error('既存の作業・予定・期限は周期変更だけで上書きしません')
+    if (before.title !== after.title || before.kind !== after.kind || before.scheduledOffsetDays !== after.scheduledOffsetDays || before.dueOffsetDays !== after.dueOffsetDays || before.durationMinutes !== after.durationMinutes || (before.dueTime ?? null) !== (after.dueTime ?? null)) throw new Error('既存の作業・予定・期限は周期変更だけで上書きしません')
     const oldScore = before.score, newScore = after.score
     if (oldScore && newScore && canonicalJSON({ ...oldScore, mode: newScore.mode, manualPoints: newScore.manualPoints }) !== canonicalJSON(newScore)) throw new Error('周期補助で既存の採点属性を変更できません')
-  } else if (candidate.definition.steps.length !== 1 || candidate.definition.steps[0].title !== candidate.definition.title || candidate.definition.steps[0].kind !== selection.stepKind || candidate.definition.steps[0].scheduledOffsetDays !== selection.scheduledOffsetDays || candidate.definition.steps[0].dueOffsetDays !== selection.dueOffsetDays || candidate.definition.steps[0].durationMinutes !== selection.durationMinutes) throw new Error('新しい系列の手順が本人選択と一致しません')
+  } else if (candidate.definition.steps.length !== 1 || candidate.definition.steps[0].title !== candidate.definition.title || candidate.definition.steps[0].kind !== selection.stepKind || candidate.definition.steps[0].scheduledOffsetDays !== selection.scheduledOffsetDays || candidate.definition.steps[0].dueOffsetDays !== selection.dueOffsetDays || candidate.definition.steps[0].durationMinutes !== selection.durationMinutes || (candidate.definition.steps[0].dueTime ?? null) !== (selection.dueTime ?? null)) throw new Error('新しい系列の手順が本人選択と一致しません')
 }
 /** Called again at native confirmation; a model candidate cannot mint specified values. */
 export function validateOwnerRoutineAssistCandidate(candidate: RoutineAssistCandidate, state: CalendarRulesState) {
   validateRoutineAssistCandidate(candidate, state); explicitIntent(candidate.input.message); validateRoutineInstructionPeriod(candidate.input)
-  validateGroundedTrigger(candidate.definition.trigger, candidate.input.message, candidate.input.selection)
   const old = state.rules.find(value => value.id === candidate.input.targetRuleId), previous = old ? calendarRuleEditorDefinition(old) : null
+  validateGroundedTrigger(candidate.definition.trigger, candidate.input.message, candidate.input.selection, previous?.steps[0].dueTime ?? null, routineAssistPrevious(candidate.input, state))
   const requested = requestedPoints(candidate.input.message), score = previous?.steps[0].score ?? (candidate.input.selection.stepKind === 'task' ? emptyScore() : null)
   const expected = requested === null ? score : score ? { ...score, mode: 'manual', manualPoints: requested } : null
   if (canonicalJSON(candidate.definition.steps[0].score) !== canonicalJSON(expected) || requested !== null && expected === null) throw new Error('確認候補の点数が本人の指定または保持する既存値と一致しません')

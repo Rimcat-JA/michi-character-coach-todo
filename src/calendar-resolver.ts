@@ -1,5 +1,7 @@
 import { canonicalJSON, contentDigest } from './canonical'
 import { addDays, emptyScore, validateDate, validateScore, type ScoreInput } from './domain'
+import { expandRRule, parseRRule, rruleSeriesLimit } from './rrule'
+import { resolveZonedLocalTime, type AmbiguousTimePolicy, type NonexistentTimePolicy } from './zoned-time'
 
 export type CalendarContext = { id: string; name: string; domain: 'education' | 'work' | 'other'; timezone: string; validFrom: string; validTo: string; revision: number }
 export type ParticipationBinding = { id: string; contextId: string; personId: string; personRef: string | null; activityIds: string[]; weekdays: number[]; validFrom: string; validTo: string; confirmed: boolean; revision: number }
@@ -24,22 +26,37 @@ export type ScheduleFact = FactBase & (
   { kind: 'roster_assignment'; activityId: string; externalId: string; personRef: string; published: boolean; status: 'scheduled' | 'cancelled'; startAt: string; endAt: string } |
   { kind: 'external_event'; activityId: string; externalId: string; status: 'scheduled' | 'cancelled'; startAt: string; endAt: string; timezone: string; allDay: boolean; title: string }
 )
-export type CalendarRuleStep = { key: string; title: string; kind: 'task' | 'event'; scheduledOffsetDays: number; dueOffsetDays: number | null; score: ScoreInput | null; durationMinutes: number | null }
-export type CalendarRule = { id: string; contextId: string; bindingId: string; calendarId: string; title: string; originBasis: 'user_instruction' | 'user_approved_rule'; enabled: boolean; validFrom: string; validTo: string; revision: number; steps: CalendarRuleStep[]; trigger:
+/** dueTime (HH:mm) is optional and only stored when the person set a clock deadline, so older rules keep their digest. */
+export type CalendarRuleStep = { key: string; title: string; kind: 'task' | 'event'; scheduledOffsetDays: number; dueOffsetDays: number | null; score: ScoreInput | null; durationMinutes: number | null; dueTime?: string }
+export type RecurrenceUnfinishedPolicy = 'keep_all' | 'keep_latest' | 'generate_after_completion'
+/** Design 5.4: keep_all unless the person chooses otherwise; past occurrences are never notified in bulk. */
+export const defaultUnfinishedPolicy: RecurrenceUnfinishedPolicy = 'keep_all'
+/** dtstart, RDATE and EXDATE are local wall date-times (YYYY-MM-DDTHH:mm) in the rule context's IANA time zone. */
+export type RRuleCalendarTrigger = { kind: 'rrule'; dtstart: string; rrule: string; rdates: string[]; exdates: string[]; nonexistentTime: NonexistentTimePolicy; ambiguousTime: AmbiguousTimePolicy }
+export type CompletionRelativeTrigger = { kind: 'completion_relative'; firstDate: string; time: string; afterDays: number; unfinishedPolicy: RecurrenceUnfinishedPolicy }
+export type CalendarRuleTrigger =
   { kind: 'weekly'; weekdays: number[]; time: string } |
   { kind: 'monthly_business'; ordinal: number; from: 'start' | 'end'; time: string } |
-  { kind: 'activity_relative'; activityId: string; edge: 'start' | 'end'; offsetDays: number; offsetMinutes: number }
-; editions?: CalendarRuleEdition[] }
+  { kind: 'activity_relative'; activityId: string; edge: 'start' | 'end'; offsetDays: number; offsetMinutes: number } |
+  RRuleCalendarTrigger | CompletionRelativeTrigger
+export type CalendarRule = { id: string; contextId: string; bindingId: string; calendarId: string; title: string; originBasis: 'user_instruction' | 'user_approved_rule'; enabled: boolean; validFrom: string; validTo: string; revision: number; steps: CalendarRuleStep[]; trigger: CalendarRuleTrigger; editions?: CalendarRuleEdition[] }
 export type CalendarRuleEdition = { id: string; revision: number; scope: CalendarChangeScope; definition: Pick<CalendarRule, 'title' | 'enabled' | 'steps' | 'trigger'> }
 export type FactRef = { sourceId: string; factId: string; revision: number }
-export type ResolvedCalendarSpec = { generationKey: string; triggerKey: string; stepKey: string; contextId: string; bindingId: string; activityId: string | null; ruleId: string | null; kind: 'task' | 'event'; title: string; scheduledDate: string | null; dueDate: string | null; score: ScoreInput | null; startAt: string | null; endAt: string | null; eventKind: 'class' | 'meeting' | 'other' | null; timezone: string; sourceRefs: FactRef[]; originBasis: 'activity' | CalendarRule['originBasis'] }
+/** dueAt (UTC) is present only for a clock deadline; dueDate stays its local date in the context time zone. */
+export type ResolvedCalendarSpec = { generationKey: string; triggerKey: string; stepKey: string; contextId: string; bindingId: string; activityId: string | null; ruleId: string | null; kind: 'task' | 'event'; title: string; scheduledDate: string | null; dueDate: string | null; score: ScoreInput | null; startAt: string | null; endAt: string | null; eventKind: 'class' | 'meeting' | 'other' | null; timezone: string; sourceRefs: FactRef[]; originBasis: 'activity' | CalendarRule['originBasis']; dueAt?: string }
 export type CalendarInstance = { generationKey: string; entityId: string; entityRevision: number; status: 'active' | 'cancelled'; spec: ResolvedCalendarSpec }
 export type CalendarRulesState = { id: 'main'; ownerId: string; datasetId: string; revision: number; contexts: CalendarContext[]; bindings: ParticipationBinding[]; calendars: BusinessCalendar[]; activities: CalendarActivity[]; sources: ScheduleSource[]; facts: ScheduleFact[]; rules: CalendarRule[]; instances: CalendarInstance[] }
 export type ResolverConflict = { key: string; contextId: string; reason: string; sourceRefs: FactRef[] }
-export type ResolverResult = { occurrences: ResolvedCalendarSpec[]; cancellations: { generationKey: string; reason: string; sourceRefs: FactRef[] }[]; conflicts: ResolverConflict[]; blockedSeries: string[]; coveredSeries: string[] }
-export type CurrentCalendarEntity = { generationKey: string; entityId: string; revision: number; status: 'active' | 'cancelled'; completed: boolean; edited: boolean; started: boolean; spec: ResolvedCalendarSpec }
+export type CalendarTruncation = { series: string; limit: number; omitted: number; firstOmittedDate: string; reason: string }
+export type ResolverNotice = { key: string; contextId: string; reason: string }
+export type ResolverResult = { occurrences: ResolvedCalendarSpec[]; cancellations: { generationKey: string; reason: string; sourceRefs: FactRef[] }[]; conflicts: ResolverConflict[]; blockedSeries: string[]; coveredSeries: string[]; truncatedSeries: CalendarTruncation[]; notices: ResolverNotice[] }
+/** completedAt is the current completion instant; completion-relative series use it to place the next occurrence. */
+export type CurrentCalendarEntity = { generationKey: string; entityId: string; revision: number; status: 'active' | 'cancelled'; completed: boolean; edited: boolean; started: boolean; spec: ResolvedCalendarSpec; completedAt?: string | null }
+/** Completion progress of existing occurrences, keyed by generation key. completedDate is local to the occurrence's time zone. */
+export type CalendarProgress = Record<string, { completedDate: string | null; scheduledDate: string | null }>
+export type CalendarResolveOptions = { progress?: CalendarProgress; today?: string }
 export type CalendarChangeScope = { kind: 'all_uncompleted' } | { kind: 'this_and_future'; fromDate: string } | { kind: 'this_instance'; generationKey: string }
-export type CalendarChangePlan = { stateRevision: number; ownerId: string; datasetId: string; from: string; to: string; scope: CalendarChangeScope; creates: ResolvedCalendarSpec[]; updates: { before: CurrentCalendarEntity; after: ResolvedCalendarSpec }[]; cancels: { before: CurrentCalendarEntity; reason: string; sourceRefs: FactRef[] }[]; conflicts: ResolverConflict[]; skippedCompleted: number; unchanged: number; digest: string }
+export type CalendarChangePlan = { stateRevision: number; ownerId: string; datasetId: string; from: string; to: string; scope: CalendarChangeScope; creates: ResolvedCalendarSpec[]; updates: { before: CurrentCalendarEntity; after: ResolvedCalendarSpec }[]; cancels: { before: CurrentCalendarEntity; reason: string; sourceRefs: FactRef[] }[]; conflicts: ResolverConflict[]; skippedCompleted: number; unchanged: number; truncatedSeries: CalendarTruncation[]; notices: ResolverNotice[]; digest: string }
 
 const dayOfWeek = (date: string) => new Date(`${date}T12:00:00Z`).getUTCDay()
 const inRange = (date: string, from: string, to: string) => date >= from && date <= to
@@ -53,6 +70,7 @@ function wallParts(at: number, timezone: string) {
   return { date: `${p.year}-${p.month}-${p.day}`, time: `${p.hour}:${p.minute}`, utc: Date.UTC(Number(p.year), Number(p.month) - 1, Number(p.day), Number(p.hour), Number(p.minute)) }
 }
 export const calendarDateAt = (at: string, timezone: string) => wallParts(Date.parse(at), timezone).date
+export const calendarTimeAt = (at: string, timezone: string) => wallParts(Date.parse(at), timezone).time
 function shiftCalendarDays(at: string, days: number, timezone: string) {
   if (days === 0) return { at, reason: null }
   const wall = wallParts(Date.parse(at), timezone)
@@ -125,13 +143,56 @@ function csvSourceNeedsReview(state: CalendarRulesState, source: ScheduleSource,
   })
 }
 
-export function resolveCalendarOccurrences(state: CalendarRulesState, from: string, to: string, retainedKeys: string[] = []): ResolverResult {
-  const evaluatedAt = new Date().toISOString()
+const versionOf = (base: CalendarRule, index: number): CalendarRule => index < 0 ? base : { ...base, ...base.editions![index].definition }
+const primaryStepKey = (rule: Pick<CalendarRule, 'steps'>) => rule.steps.find(step => step.kind === 'task')?.key ?? rule.steps[0]?.key ?? 'main'
+/** editionDate (the base date) picks the version that places the item; contentDate (the item's own date) picks the version that governs its content. */
+type ChainItem = { index: number; key: string; date: string; time: string; editionDate: string; contentDate: string; superseded: boolean }
+const daysBetween = (from: string, to: string) => Math.round((Date.parse(`${to}T12:00:00Z`) - Date.parse(`${from}T12:00:00Z`)) / 86400000)
+/** Completion-relative identity is the chain position, so undo/re-completion moves the same next item instead of adding one. */
+function completionChain(base: CalendarRule, today: string, progress: CalendarProgress): ChainItem[] {
+  const editions = base.editions ?? [], stepKey = primaryStepKey(base), generation = (key: string) => `calendar:rule:${base.id}:${key}:${stepKey}`
+  const pick = (key: string, date: string) => chosenEdition(base, generation(key), key, date)
+  let firstIndex: number | null = null
+  for (let index = editions.length - 1; index >= -1; index--) { const rule = versionOf(base, index); if (rule.trigger.kind === 'completion_relative' && pick('chain:0', rule.trigger.firstDate) === index) { firstIndex = index; break } }
+  const items: ChainItem[] = [], first = firstIndex === null ? null : versionOf(base, firstIndex)
+  if (!first || first.trigger.kind !== 'completion_relative' || !first.enabled) return items
+  items.push({ index: 0, key: 'chain:0', date: first.trigger.firstDate, time: first.trigger.time, editionDate: first.trigger.firstDate, contentDate: first.trigger.firstDate, superseded: false })
+  // Every step needs a recorded completion or a due rollover, so the walk ends by itself; the display cap applies only to the window.
+  // This bound depends on the data and only guards against corrupt completion records.
+  const bound = (Object.keys(progress).length + 1) * (Math.max(0, daysBetween(first.trigger.firstDate, today > base.validTo ? today : base.validTo)) + 2)
+  for (let index = 1; ; index++) {
+    if (index > bound) throw new Error('完了起点の系列を計算できません。完了記録を確認してください')
+    const previous = items[index - 1], previousRule = versionOf(base, pick(previous.key, previous.editionDate)), key = `chain:${index}`
+    if (previousRule.trigger.kind !== 'completion_relative') break
+    const done = progress[generation(previous.key)]?.completedDate ?? null, later = progress[generation(key)]
+    let baseDate: string, fixedDate: string | null = null, rollover = false
+    if (done) baseDate = done
+    else if (later?.completedDate && later.scheduledDate) { baseDate = previous.date; fixedDate = later.scheduledDate }
+    else if (previousRule.trigger.unfinishedPolicy !== 'generate_after_completion' && addDays(previous.date, previousRule.trigger.afterDays) <= today) { baseDate = previous.date; rollover = true }
+    else break
+    const rule = versionOf(base, pick(key, baseDate))
+    if (!rule.enabled || rule.trigger.kind !== 'completion_relative') break
+    const step = rule.steps.find(row => row.key === stepKey), date = fixedDate ? addDays(fixedDate, -(step?.scheduledOffsetDays ?? 0)) : addDays(baseDate, rule.trigger.afterDays)
+    if (date > base.validTo) break
+    // A "from this date onward" change applies by the item's own date, as the change plan's scope does.
+    const governing = versionOf(base, pick(key, date))
+    if (!governing.enabled || governing.trigger.kind !== 'completion_relative') break
+    if (rollover && previousRule.trigger.unfinishedPolicy === 'keep_latest') previous.superseded = true
+    items.push({ index, key, date, time: governing.trigger.time, editionDate: baseDate, contentDate: date, superseded: false })
+  }
+  return items
+}
+const occurrenceDate = (spec: Pick<ResolvedCalendarSpec, 'scheduledDate' | 'startAt' | 'timezone'>) => spec.scheduledDate ?? calendarDateAt(spec.startAt!, spec.timezone)
+
+export function resolveCalendarOccurrences(state: CalendarRulesState, from: string, to: string, retainedKeys: string[] = [], options: CalendarResolveOptions = {}): ResolverResult {
+  const evaluatedAt = new Date().toISOString(), progress = options.progress ?? {}
+  if (options.today !== undefined) validateDate(options.today, '基準日')
   dates(from, to)
   const versions = state.rules.flatMap(base => [{ base, editionIndex: -1, rule: base }, ...(base.editions ?? []).map((edition, editionIndex) => ({ base, editionIndex, rule: { ...base, ...edition.definition } }))])
   const offsets = versions.flatMap(({ rule }) => rule.steps.map(step => step.scheduledOffsetDays + (rule.trigger.kind === 'activity_relative' ? rule.trigger.offsetDays + Math.ceil(Math.abs(rule.trigger.offsetMinutes) / 1440) * Math.sign(rule.trigger.offsetMinutes) : 0)))
   const expandedFrom = addDays(from, -Math.max(0, ...offsets) - 1), expandedTo = addDays(to, -Math.min(0, ...offsets) + 1)
   const window = dates(expandedFrom, expandedTo, 1830), occurrences: ResolvedCalendarSpec[] = [], cancellations: ResolverResult['cancellations'] = [], conflicts: ResolverConflict[] = [], blocked = new Set<string>()
+  const truncatedSeries: CalendarTruncation[] = [], notices: ResolverNotice[] = [], chains = new Map<string, ChainItem[]>()
   const covered = [...state.activities.map(activity => `activity:${activity.id}`), ...state.rules.map(rule => `rule:${rule.id}`)]
   const activityOccurrences: ResolvedCalendarSpec[] = [], activityCancels: { activityId: string; triggerKey: string; sourceRefs: FactRef[]; reason: string }[] = []
   function conflict(key: string, contextId: string, reason: string, facts: ScheduleFact[] = []) { conflicts.push({ key, contextId, reason, sourceRefs: refs(facts) }) }
@@ -227,12 +288,14 @@ export function resolveCalendarOccurrences(state: CalendarRulesState, from: stri
     const binding = state.bindings.find(item => item.id === rule.bindingId && item.contextId === context.id)
     if (!binding?.confirmed || binding.personId !== state.ownerId) { blocked.add(`rule:${rule.id}`); conflict(`rule:${rule.id}`, context.id, 'ルールの本人適用を確認してください'); continue }
     const facts = activeFacts(state, context.id)
-    if (rule.trigger.kind !== 'weekly' && state.sources.some(source => source.contextId === context.id && source.status === 'stale' && !source.csv)) { blocked.add(`rule:${rule.id}`); conflict(`rule:${rule.id}`, rule.contextId, '資料取得が古いため、新しい回・取消を確定しません'); continue }
+    // RRULE and completion-relative series are pure owner-defined calendar math and never read business-day facts.
+    const calendarFree = rule.trigger.kind === 'rrule' || rule.trigger.kind === 'completion_relative'
+    if (rule.trigger.kind !== 'weekly' && !calendarFree && state.sources.some(source => source.contextId === context.id && source.status === 'stale' && !source.csv)) { blocked.add(`rule:${rule.id}`); conflict(`rule:${rule.id}`, rule.contextId, '資料取得が古いため、新しい回・取消を確定しません'); continue }
     // Monthly rules are reviewed over exactly the months they evaluate, not the neighbouring months of the ±1-day window.
     const stepOffsets = rule.steps.map(step => step.scheduledOffsetDays), monthlyFrom = addDays(from, -Math.max(0, ...stepOffsets)), monthlyTo = addDays(to, -Math.min(0, ...stepOffsets))
     const calendarFrom = rule.trigger.kind === 'monthly_business' ? `${monthlyFrom.slice(0, 7)}-01` : expandedFrom
     const calendarTo = rule.trigger.kind === 'monthly_business' ? new Date(Date.UTC(Number(monthlyTo.slice(0, 4)), Number(monthlyTo.slice(5, 7)), 0)).toISOString().slice(0, 10) : expandedTo
-    if (state.sources.some(source => source.contextId === context.id && source.csv && (source.csv.format === 'calendar' && source.csv.target.calendarId === rule.calendarId || source.csv.format === 'roster' && rule.trigger.kind === 'activity_relative' && source.csv.target.activityId === rule.trigger.activityId) && csvSourceNeedsReview(state, source, calendarFrom, calendarTo, evaluatedAt))) { blocked.add(`rule:${rule.id}`); conflict(`rule:${rule.id}`, rule.contextId, 'CSV資料の行の保持期限・本人適用・版を確認してください。新しい回と取消を確定しません'); continue }
+    if (!calendarFree && state.sources.some(source => source.contextId === context.id && source.csv && (source.csv.format === 'calendar' && source.csv.target.calendarId === rule.calendarId || source.csv.format === 'roster' && rule.trigger.kind === 'activity_relative' && source.csv.target.activityId === rule.trigger.activityId) && csvSourceNeedsReview(state, source, calendarFrom, calendarTo, evaluatedAt))) { blocked.add(`rule:${rule.id}`); conflict(`rule:${rule.id}`, rule.contextId, 'CSV資料の行の保持期限・本人適用・版を確認してください。新しい回と取消を確定しません'); continue }
     // editionDate is the date each version gate uses, so the step and its trigger pick the same rule version.
     const triggers: { key: string; at: string; editionDate: string; sourceRefs: FactRef[]; activityId: string | null }[] = []
     if (rule.trigger.kind === 'activity_relative') {
@@ -253,6 +316,48 @@ export function resolveCalendarOccurrences(state: CalendarRulesState, from: stri
         const wall = resolveLocalCalendarTime(date, rule.trigger.time, context.timezone)
         if (!wall.at) { blocked.add(`rule:${rule.id}`); conflict(`rule:${rule.id}:${date}`, context.id, wall.reason!); continue }
         triggers.push({ key: `anchor:${date}`, at: wall.at, editionDate: date, sourceRefs: [], activityId: null })
+      }
+    } else if (rule.trigger.kind === 'rrule') {
+      const trigger = rule.trigger
+      // Window-limited expansion; the per-series cap below reports any cut explicitly. UNTIL is checked at the instant the owner's DST choice places the occurrence.
+      const expansion = expandRRule({ dtstart: trigger.dtstart, rrule: trigger.rrule, from: expandedFrom, to: expandedTo, timezone: context.timezone, limit: rruleSeriesLimit * 4, dst: { nonexistent: trigger.nonexistentTime, ambiguous: trigger.ambiguousTime } })
+      if (expansion.truncated) truncatedSeries.push({ series: `rule:${rule.id}`, limit: rruleSeriesLimit * 4, omitted: 1, firstOmittedDate: expansion.occurrences.at(-1)!.slice(0, 10), reason: 'RRULEの展開上限を超えたため、表示期間の先の回は計算していません' })
+      // Older or imported "from this date onward" editions may have used up COUNT before their change date; say so instead of ending silently.
+      const scope = editionIndex < 0 ? null : base.editions![editionIndex].scope, spec = parseRRule(trigger.rrule)
+      if (scope?.kind === 'this_and_future' && spec.count !== null && trigger.dtstart.slice(0, 10) < scope.fromDate && expandedTo >= scope.fromDate && expandRRule({ dtstart: trigger.dtstart, rrule: spec, from: trigger.dtstart.slice(0, 10), to: addDays(scope.fromDate, -1), limit: spec.count + 1 }).occurrences.length >= spec.count) notices.push({ key: `rule:${rule.id}`, contextId: context.id, reason: `以後の変更の回数（COUNT）が変更日より前に尽きたため、${scope.fromDate}以後の回はありません` })
+      // The original occurrence date is the identity (11.7), so a time-only edit updates the same occurrence; an EXDATE therefore
+      // excludes its date even when it still carries an earlier series time. An EXDATE naming an RDATE removes only that RDATE.
+      const excludedDates = new Set(trigger.exdates.filter(value => !trigger.rdates.includes(value)).map(value => value.slice(0, 10)))
+      const kept = expansion.occurrences.filter(value => !excludedDates.has(value.slice(0, 10)) && !trigger.exdates.includes(value))
+      // An RDATE that is not already a rule occurrence keeps its own exact local date-time key.
+      const extra = trigger.rdates.filter(value => inRange(value.slice(0, 10), expandedFrom, expandedTo) && !trigger.exdates.includes(value) && !expansion.occurrences.includes(value))
+      for (const [local, key] of [...kept.map(value => [value, `anchor:${value.slice(0, 10)}`]), ...extra.map(value => [value, `rdate:${value}`])]) {
+        const date = local.slice(0, 10)
+        if (!rule.steps.some(step => chosenEdition(base, `calendar:rule:${rule.id}:${key}:${step.key}`, key, date) === editionIndex)) continue
+        const wall = resolveZonedLocalTime(date, local.slice(11), context.timezone, { nonexistent: trigger.nonexistentTime, ambiguous: trigger.ambiguousTime })
+        if (!wall.at) { notices.push({ key: `rule:${rule.id}:${key}`, contextId: context.id, reason: `${date} ${local.slice(11)}は夏時間の切替で存在しないため、本人の設定どおりこの回を作りません` }); continue }
+        if (wall.adjusted === 'shifted') notices.push({ key: `rule:${rule.id}:${key}`, contextId: context.id, reason: `${date} ${local.slice(11)}は夏時間の切替で存在しないため、切替前の時差で${calendarTimeAt(wall.at, context.timezone)}に作ります` })
+        else if (wall.kind === 'ambiguous') notices.push({ key: `rule:${rule.id}:${key}`, contextId: context.id, reason: `${date} ${local.slice(11)}は夏時間の切替で二度あるため、本人の設定どおり${wall.adjusted === 'earlier' ? '前' : '後'}の回（${calendarTimeAt(wall.at, context.timezone)}）で作ります` })
+        triggers.push({ key, at: wall.at, editionDate: date, sourceRefs: [], activityId: null })
+      }
+    } else if (rule.trigger.kind === 'completion_relative') {
+      if (!chains.has(base.id)) {
+        const today = options.today ?? calendarDateAt(evaluatedAt, context.timezone), chain = completionChain(base, today, progress)
+        chains.set(base.id, chain)
+        for (const item of chain.filter(row => row.superseded)) for (const step of base.steps) cancellations.push({ generationKey: `calendar:rule:${base.id}:${item.key}:${step.key}`, reason: '新しい回が始まったため、未完了・未着手の古い回を取消します（最新の回だけ残す設定）', sourceRefs: [] })
+        const prefix = `calendar:rule:${base.id}:chain:`, live = new Set(chain.map(item => item.index))
+        for (const key of Object.keys(progress)) {
+          const position = key.startsWith(prefix) ? /^(\d+):/.exec(key.slice(prefix.length)) : null
+          if (position && !live.has(Number(position[1]))) cancellations.push({ generationKey: key, reason: '前回の完了が取り消された、または周期が止まったため、未着手の次の回を取消します', sourceRefs: [] })
+        }
+      }
+      for (const item of chains.get(base.id)!) {
+        // Items outside the window are history; only the window and kept keys need instants and notices.
+        if (item.superseded || !inRange(item.date, expandedFrom, expandedTo) && !base.steps.some(step => retainedKeys.includes(`calendar:rule:${base.id}:${item.key}:${step.key}`))) continue
+        // Completion-relative times follow RFC 5545 (gap: offset before it; overlap: the first instant) and say so.
+        const wall = resolveZonedLocalTime(item.date, item.time, context.timezone, { nonexistent: 'next_valid', ambiguous: 'earlier' })
+        if (wall.adjusted !== 'none') notices.push({ key: `rule:${base.id}:${item.key}`, contextId: context.id, reason: `${item.date} ${item.time}は夏時間の切替で${wall.kind === 'nonexistent' ? `存在しないため、切替前の時差で${calendarTimeAt(wall.at!, context.timezone)}` : '二度あるため、前の回'}に作ります` })
+        triggers.push({ key: item.key, at: wall.at!, editionDate: item.contentDate, sourceRefs: [], activityId: null })
       }
     } else {
       const monthlyWindow = dates(monthlyFrom, monthlyTo, 1098)
@@ -284,8 +389,10 @@ export function resolveCalendarOccurrences(state: CalendarRulesState, from: stri
         if (step.score) { validateScore(step.score); if (step.score.mode === 'allocated') throw new Error('定型ステップに未承認の配分ポイントを指定できません') }
         const shifted = step.kind === 'event' ? shiftCalendarDays(trigger.at, step.scheduledOffsetDays, context.timezone) : null
         if (shifted && !shifted.at) { blocked.add(`rule:${rule.id}`); conflict(`rule:${rule.id}:${trigger.key}:${step.key}`, context.id, shifted.reason!); continue }
-        const startAt = shifted?.at ?? null
-        occurrences.push({ generationKey: `calendar:rule:${rule.id}:${trigger.key}:${step.key}`, triggerKey: trigger.key, stepKey: step.key, contextId: context.id, bindingId: rule.bindingId, activityId: trigger.activityId, ruleId: rule.id, kind: step.kind, title: step.title, scheduledDate: step.kind === 'task' ? planned : null, dueDate: step.kind === 'task' && step.dueOffsetDays !== null ? addDays(date, step.dueOffsetDays) : null, score: step.kind === 'task' ? { ...(step.score ?? emptyScore()) } : null, startAt, endAt: startAt ? new Date(Date.parse(startAt) + step.durationMinutes! * 60000).toISOString() : null, eventKind: step.kind === 'event' ? 'other' : null, timezone: context.timezone, sourceRefs: trigger.sourceRefs, originBasis: rule.originBasis })
+        const startAt = shifted?.at ?? null, dueDate = step.kind === 'task' && step.dueOffsetDays !== null ? addDays(date, step.dueOffsetDays) : null
+        const due = dueDate && step.dueTime ? resolveLocalCalendarTime(dueDate, step.dueTime, context.timezone) : null
+        if (due && !due.at) { blocked.add(`rule:${rule.id}`); conflict(`rule:${rule.id}:${trigger.key}:${step.key}`, context.id, `締め切り時刻: ${due.reason!}`); continue }
+        occurrences.push({ generationKey: `calendar:rule:${rule.id}:${trigger.key}:${step.key}`, triggerKey: trigger.key, stepKey: step.key, contextId: context.id, bindingId: rule.bindingId, activityId: trigger.activityId, ruleId: rule.id, kind: step.kind, title: step.title, scheduledDate: step.kind === 'task' ? planned : null, dueDate, score: step.kind === 'task' ? { ...(step.score ?? emptyScore()) } : null, startAt, endAt: startAt ? new Date(Date.parse(startAt) + step.durationMinutes! * 60000).toISOString() : null, eventKind: step.kind === 'event' ? 'other' : null, timezone: context.timezone, sourceRefs: trigger.sourceRefs, originBasis: rule.originBasis, ...(due?.at ? { dueAt: due.at } : {}) })
       }
     }
   }
@@ -295,9 +402,18 @@ export function resolveCalendarOccurrences(state: CalendarRulesState, from: stri
     if (previous && canonicalJSON(previous) !== canonicalJSON(spec)) { conflictingKeys.add(spec.generationKey); blocked.add(series(spec)); conflict(spec.generationKey, spec.contextId, '同じ発生回の日時・内容が矛盾しています') }
     else unique.set(spec.generationKey, spec)
   }
-  const result = [...unique.values()].filter(spec => !conflictingKeys.has(spec.generationKey) && !blocked.has(series(spec))).sort(sortSpecs)
-  if (result.length > 5000 || state.rules.some(rule => result.filter(spec => spec.ruleId === rule.id).length > 1000) || state.activities.some(activity => result.filter(spec => !spec.ruleId && spec.activityId === activity.id).length > 1000)) throw new Error('一回の展開上限を超えました。期間を短くしてください')
-  return { occurrences: result, cancellations, conflicts, blockedSeries: [...blocked].sort(), coveredSeries: covered.sort() }
+  const bySeries = new Map<string, ResolvedCalendarSpec[]>()
+  for (const spec of unique.values()) if (!conflictingKeys.has(spec.generationKey) && !blocked.has(series(spec))) bySeries.set(series(spec), [...bySeries.get(series(spec)) ?? [], spec])
+  const result: ResolvedCalendarSpec[] = []
+  // Design 5.4/11.6: at most 1,000 occurrences per series; the cut is reported, never silent, and later ones are computed when the person browses that range.
+  for (const [name, specs] of bySeries) {
+    const ordered = specs.sort((a, b) => occurrenceDate(a).localeCompare(occurrenceDate(b)) || sortSpecs(a, b))
+    if (ordered.length > rruleSeriesLimit) truncatedSeries.push({ series: name, limit: rruleSeriesLimit, omitted: ordered.length - rruleSeriesLimit, firstOmittedDate: occurrenceDate(ordered[rruleSeriesLimit]), reason: `1系列${rruleSeriesLimit}回の上限を超えたため、${occurrenceDate(ordered[rruleSeriesLimit])}以降は表示期間を移して確認してください` })
+    result.push(...ordered.slice(0, rruleSeriesLimit))
+  }
+  result.sort(sortSpecs)
+  if (result.length > 5000) throw new Error('一回の展開上限を超えました。期間を短くしてください')
+  return { occurrences: result, cancellations, conflicts, blockedSeries: [...blocked].sort(), coveredSeries: covered.sort(), truncatedSeries, notices: [...new Map(notices.map(item => [`${item.key}|${item.reason}`, item])).values()] }
 }
 
 function chosenEdition(base: CalendarRule, key: string, triggerKey: string, date: string) {
@@ -328,7 +444,11 @@ function ruleStepDroppedByPerson(state: CalendarRulesState, spec: ResolvedCalend
   }
   return [...new Set(indexes)].map(index => index < 0 ? base : { ...base, ...editions[index].definition }).every(rule => !rule.enabled || !rule.steps.some(step => step.key === spec.stepKey) || rule.trigger.kind !== 'activity_relative' || rule.trigger.activityId !== spec.activityId)
 }
-export function buildCalendarChangePlan(state: CalendarRulesState, current: CurrentCalendarEntity[], from: string, to: string, scope: CalendarChangeScope = { kind: 'all_uncompleted' }): Omit<CalendarChangePlan, 'digest'> {
+/** Completion dates are read in each occurrence's own time zone; a completed row without an instant keeps its planned date. */
+export function calendarProgress(current: CurrentCalendarEntity[]): CalendarProgress {
+  return Object.fromEntries(current.map(item => [item.generationKey, { completedDate: item.completed ? item.completedAt ? calendarDateAt(item.completedAt, item.spec.timezone) : occurrenceDate(item.spec) : null, scheduledDate: item.spec.scheduledDate }]))
+}
+export function buildCalendarChangePlan(state: CalendarRulesState, current: CurrentCalendarEntity[], from: string, to: string, scope: CalendarChangeScope = { kind: 'all_uncompleted' }, options: { today?: string } = {}): Omit<CalendarChangePlan, 'digest'> {
   if (scope.kind === 'this_and_future') validateDate(scope.fromDate, '以後の変更日')
   const creates: ResolvedCalendarSpec[] = [], updates: CalendarChangePlan['updates'] = [], cancels: CalendarChangePlan['cancels'] = []
   let skippedCompleted = 0, unchanged = 0
@@ -336,7 +456,7 @@ export function buildCalendarChangePlan(state: CalendarRulesState, current: Curr
     const date = spec.scheduledDate ?? calendarDateAt(spec.startAt!, spec.timezone)
     return inRange(date, from, to) && (scope.kind === 'all_uncompleted' || scope.kind === 'this_and_future' && date >= scope.fromDate || scope.kind === 'this_instance' && spec.generationKey === scope.generationKey)
   }
-  const resolved = resolveCalendarOccurrences(state, from, to, current.filter(item => included(item.spec)).map(item => item.generationKey)), conflicts = [...resolved.conflicts]
+  const resolved = resolveCalendarOccurrences(state, from, to, current.filter(item => included(item.spec)).map(item => item.generationKey), { progress: calendarProgress(current), ...(options.today ? { today: options.today } : {}) }), conflicts = [...resolved.conflicts]
   for (const spec of resolved.occurrences) {
     const before = current.find(item => item.generationKey === spec.generationKey)
     if (!included(spec) && (!before || !included(before.spec))) continue
@@ -352,6 +472,8 @@ export function buildCalendarChangePlan(state: CalendarRulesState, current: Curr
   }
   for (const before of current) {
     if (before.completed || before.status === 'cancelled' || !included(before.spec) || !resolved.coveredSeries.includes(series(before.spec)) || resolved.blockedSeries.includes(series(before.spec)) || resolved.occurrences.some(spec => spec.generationKey === before.generationKey)) continue
+    // An occurrence past a reported cut is unknown, not removed.
+    if (resolved.truncatedSeries.some(cut => cut.series === series(before.spec) && occurrenceDate(before.spec) >= cut.firstOmittedDate)) continue
     const explicit = resolved.cancellations.find(item => item.generationKey === before.generationKey)
     // External CSV rows are partial observations. A missing row, expired quote,
     // or changed participation never establishes a cancellation by itself. Only
@@ -361,10 +483,10 @@ export function buildCalendarChangePlan(state: CalendarRulesState, current: Curr
     if (before.edited || before.started) { conflicts.push({ key: before.generationKey, contextId: before.spec.contextId, reason: '本人編集または着手済みの回を取消す前に確認してください', sourceRefs: explicit?.sourceRefs ?? [] }); continue }
     cancels.push({ before, reason: explicit?.reason ?? '本人設定の系列・適用範囲の変更', sourceRefs: explicit?.sourceRefs ?? [] })
   }
-  const unsigned = { stateRevision: state.revision, ownerId: state.ownerId, datasetId: state.datasetId, from, to, scope, creates, updates, cancels, conflicts, skippedCompleted, unchanged }
+  const unsigned = { stateRevision: state.revision, ownerId: state.ownerId, datasetId: state.datasetId, from, to, scope, creates, updates, cancels, conflicts, skippedCompleted, unchanged, truncatedSeries: resolved.truncatedSeries, notices: resolved.notices }
   return unsigned
 }
-export async function prepareCalendarChangePlan(state: CalendarRulesState, current: CurrentCalendarEntity[], from: string, to: string, scope: CalendarChangeScope = { kind: 'all_uncompleted' }): Promise<CalendarChangePlan> {
-  const unsigned = buildCalendarChangePlan(state, current, from, to, scope)
+export async function prepareCalendarChangePlan(state: CalendarRulesState, current: CurrentCalendarEntity[], from: string, to: string, scope: CalendarChangeScope = { kind: 'all_uncompleted' }, options: { today?: string } = {}): Promise<CalendarChangePlan> {
+  const unsigned = buildCalendarChangePlan(state, current, from, to, scope, options)
   return { ...unsigned, digest: await contentDigest(unsigned) }
 }

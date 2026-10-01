@@ -3,11 +3,11 @@ import { useLiveQuery } from 'dexie-react-hooks'
 import { db } from './db'
 import type { Settings, Task } from './domain'
 import ChangeSetPreview from './ChangeSetPreview'
-import { changePolicyFor, prepareUndoFromAudit, taskChangeFields, type ChangeContext, type TaskChangeField, type UndoPreparation } from './change-set'
+import { changePolicyFor, prepareUndoFromAudit, taskChangeFields, taskChangeValueText, type ChangeContext, type TaskChangeField, type UndoPreparation } from './change-set'
 import { agentChangeHistory, undoneAuditIds } from './change-history'
 
-const labels: Record<TaskChangeField, string> = { title: 'タイトル', notes: 'メモ', scheduledDate: '予定日', dueDate: '本当の締め切り', manualPoints: '本人指定ポイント' }
-const shown = (value: unknown) => value === null || value === undefined || value === '' ? '未設定' : String(value)
+const labels: Record<TaskChangeField, string> = { title: 'タイトル', notes: 'メモ', scheduledDate: '予定日', dueDate: '本当の締め切り', dueAt: '締め切り時刻', manualPoints: '本人指定ポイント' }
+const shown = (value: unknown) => value === null || value === undefined || value === '' ? '未設定' : typeof value === 'object' ? taskChangeValueText(value as Parameters<typeof taskChangeValueText>[0]) : String(value)
 /** S21 history of agent changes with an owner-approved undo. A later edit is shown as a re-diff, never overwritten. */
 export default function ChangeHistoryView({ settings, tasks, latestOnly = false, initial = null }: { settings: Settings; tasks: Task[]; latestOnly?: boolean; initial?: UndoPreparation | null }) {
   const audits = useLiveQuery(() => db.audits.toArray(), [])

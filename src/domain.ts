@@ -14,6 +14,8 @@ export type ScoreResult = { effective: number | null; lower: number | null; uppe
 export type Task = {
   id: string; generationKey: string; routineId: string | null; title: string; notes: string
   project: string; containerId?: string | null; planBucketId?: string | null; labels: string[]; scheduledDate: string | null; dueDate: string | null
+  /** Clock deadline (UTC) and its IANA zone. When set, dueDate is its local date there (due_kind=datetime). */
+  dueAt?: string | null; dueTimezone?: string | null
   targetDate: string | null; reviewDate: string | null; availableFrom: string | null; deferredUntil?: string | null; firstScheduledDate?: string | null; snoozedUntil?: string | null
   importance: number; frog?: number | null; weight?: number | null; energyNeed?: number | null; focusNeed?: number | null; positiveFeeling?: number | null; dayHalf?: 'morning' | 'afternoon' | null; customSection?: string | null; spotlightOrder?: number | null; pinned?: boolean; backburner?: boolean; orbit?: boolean; score: ScoreInput; effectivePoints: number | null
   assessmentId: string; status: 'open' | 'completed'; revision: number
@@ -112,10 +114,34 @@ export function validateDate(date: string | null, label: string) {
   if (date === null) return
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || today(new Date(`${date}T12:00:00`)) !== date) throw new Error(`${label}は有効な日付にしてください`)
 }
+export type TaskDueKind = 'none' | 'date' | 'datetime'
+export const taskDueKind = (task: Pick<Task, 'dueDate' | 'dueAt'>): TaskDueKind => task.dueAt ? 'datetime' : task.dueDate ? 'date' : 'none'
+/** dueAt and a different dueDate can never coexist: a clock deadline's dueDate is always its local date. */
+export function validateTaskDue(task: Pick<Task, 'dueDate' | 'dueAt' | 'dueTimezone'>) {
+  const at = task.dueAt ?? null, zone = task.dueTimezone ?? null
+  if (at === null) { if (zone !== null) throw new Error('時刻のない締め切りにタイムゾーンは付けません'); return }
+  if (typeof at !== 'string' || !Number.isFinite(Date.parse(at)) || new Date(at).toISOString() !== at) throw new Error('締め切り時刻はUTCのISO形式で指定してください')
+  if (!isTimeZone(zone)) throw new Error('締め切り時刻のタイムゾーンを指定してください')
+  if (task.dueDate !== localDateAt(at, zone)) throw new Error('締め切り日と締め切り時刻の現地日付が一致しません')
+}
+/** The owner's local deadline. A clock skipped or repeated by a DST change is refused with an explanation instead of guessed. */
+export function taskDueAt(date: string, time: string, timezone: string): string {
+  if (!isTimeZone(timezone)) throw new Error('締め切りのタイムゾーンが不正です')
+  const resolved = resolveZonedLocalTime(date, time, timezone)
+  if (resolved.kind === 'nonexistent') throw new Error(`${date} ${time}は${timezone}では夏時間の切替で存在しない時刻です。別の時刻を指定してください`)
+  if (resolved.kind === 'ambiguous') throw new Error(`${date} ${time}は${timezone}では夏時間の切替で二度ある時刻です。別の時刻を指定してください`)
+  return resolved.at!
+}
+export const taskDueTime = (task: Pick<Task, 'dueAt' | 'dueTimezone'>) => task.dueAt && task.dueTimezone ? localTimeAt(task.dueAt, task.dueTimezone) : null
+export function dueText(task: Pick<Task, 'dueDate' | 'dueAt' | 'dueTimezone'>, deviceZone = Intl.DateTimeFormat().resolvedOptions().timeZone) {
+  const time = taskDueTime(task)
+  return task.dueDate ? `${task.dueDate}${time ? ` ${time}${task.dueTimezone !== deviceZone ? `（${task.dueTimezone}）` : ''}` : ''}` : ''
+}
 export function scoreText(task: Pick<Task, 'score' | 'effectivePoints'>) {
   if (task.effectivePoints !== null) return `${task.effectivePoints}pt · ${task.score.mode === 'manual' ? '手動' : task.score.mode === 'allocated' ? '配分' : '自動'}`
   if (task.score.mode === 'formula') { const r = calculateScore(task.score); return r.upper === null ? `${r.lower}pt〜 · 上限不明` : `${r.lower}–${r.upper}pt · 推定` }
   return '未設定'
 }
+import { isTimeZone, localDateAt, localTimeAt, resolveZonedLocalTime } from './zoned-time'
 import type { ChangePolicy } from './change-set'
 import type { CoachNotificationState } from './coach-notifications'

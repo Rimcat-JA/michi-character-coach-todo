@@ -122,8 +122,9 @@ export function increasedPolicyItems(previous: ChangePolicy, next: ChangePolicy)
 }
 /** Display label for an increasedPolicyItems entry. */
 export const increaseLabel = (item: string) => Object.hasOwn(OPERATION_INFO, item) ? OPERATION_INFO[item as OperationGroup].label : item
+/** A clock deadline (dueAt) is the same real-deadline operation as dueDate: approval only, never automatic. */
 export function operationsForFields(fields: readonly TaskChangeField[]): OperationGroup[] {
-  const map: Record<TaskChangeField, OperationGroup> = { title: 'task.text', notes: 'task.text', scheduledDate: 'task.schedule', dueDate: 'task.deadline', manualPoints: 'task.manual_points' }
+  const map: Record<TaskChangeField, OperationGroup> = { title: 'task.text', notes: 'task.text', scheduledDate: 'task.schedule', dueDate: 'task.deadline', dueAt: 'task.deadline', manualPoints: 'task.manual_points' }
   return [...new Set(fields.map(field => map[field]))]
 }
 /** Single-operation gate used by non-ChangeSet entrances (routine, detection, PC operations, notifications, publish). */
@@ -156,7 +157,7 @@ export function changeAuditFact(audit: Audit): ChangeAuditFact | null {
   if (audit.operation !== 'changeset.update') return null
   try {
     const detail = JSON.parse(audit.detail) as Record<string, unknown>, principal = detail.principal as ChangeAuditFact['principal'], undo = record(detail.undo) ? detail.undo as ChangeAuditFact['undo'] : null
-    const fields = Object.keys(undo?.patch ?? detail.fieldOrigins ?? {}).filter((field): field is TaskChangeField => ['title', 'notes', 'scheduledDate', 'dueDate', 'manualPoints'].includes(field))
+    const fields = Object.keys(undo?.patch ?? detail.fieldOrigins ?? {}).filter((field): field is TaskChangeField => ['title', 'notes', 'scheduledDate', 'dueDate', 'dueAt', 'manualPoints'].includes(field))
     if (!record(principal) || !['human', 'coach', 'external-agent'].includes(principal.kind)) return null
     const decision = detail.decision === 'auto' || detail.decision === 'approved' ? detail.decision : detail.approvedBy === null && principal.kind !== 'human' ? 'auto' : 'approved'
     return { auditId: audit.id, changeSetId: String(detail.changeSetId ?? ''), taskId: audit.taskId, at: audit.at, principal, decision, fields, operations: operationsForFields(fields), before: record(detail.before) ? detail.before : {}, after: record(detail.after) ? detail.after : {}, undo, undoOf: typeof detail.undoOf === 'string' ? detail.undoOf : null, reason: typeof detail.reason === 'string' ? detail.reason : '' }

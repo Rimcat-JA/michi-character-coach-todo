@@ -1,6 +1,8 @@
 import { canonicalJSON, contentDigest } from './canonical'
 import { validateDate, validateScore, type CalendarEvent, type ScoreInput, type Settings, type Task } from './domain'
 import { calendarDateAt, type CalendarRulesState, type ScheduleFact, type ScheduleSource, type ResolvedCalendarSpec } from './calendar-resolver'
+import { canonicalRRule } from './rrule'
+import { validLocalDateTime } from './zoned-time'
 
 type Row = Record<string, unknown>
 function object(value: unknown, keys: string[]): asserts value is Row {
@@ -55,7 +57,9 @@ function fact(raw: unknown, bound = true): asserts raw is ScheduleFact {
   if (value.kind === 'external_event') { id(value.externalId); choice(value.status, ['scheduled', 'cancelled']); instant(value.startAt); instant(value.endAt); zone(value.timezone); bool(value.allDay); text(value.title, 'ICS予定名'); if (String(value.startAt) >= String(value.endAt) || Date.parse(String(value.endAt)) - Date.parse(String(value.startAt)) > 7 * 86400000) throw new Error('ICS予定の順序・長さが不正です') }
 }
 function spec(value: unknown): asserts value is ResolvedCalendarSpec {
-  object(value, ['generationKey', 'triggerKey', 'stepKey', 'contextId', 'bindingId', 'activityId', 'ruleId', 'kind', 'title', 'scheduledDate', 'dueDate', 'score', 'startAt', 'endAt', 'eventKind', 'timezone', 'sourceRefs', 'originBasis'])
+  if (!value || typeof value !== 'object') throw new Error('発生回が不正です')
+  object(value, ['generationKey', 'triggerKey', 'stepKey', 'contextId', 'bindingId', 'activityId', 'ruleId', 'kind', 'title', 'scheduledDate', 'dueDate', 'score', 'startAt', 'endAt', 'eventKind', 'timezone', 'sourceRefs', 'originBasis', ...('dueAt' in value ? ['dueAt'] : [])])
+  if ('dueAt' in value) { instant(value.dueAt); zone(value.timezone); if (value.kind !== 'task' || typeof value.dueDate !== 'string' || calendarDateAt(String(value.dueAt), String(value.timezone)) !== value.dueDate) throw new Error('時刻付き締め切りと締め切り日が一致しません') }
   id(value.generationKey); id(value.triggerKey); id(value.stepKey); id(value.contextId); id(value.bindingId); if (value.activityId !== null) id(value.activityId); if (value.ruleId !== null) id(value.ruleId)
   choice(value.kind, ['task', 'event']); text(value.title, '発生回の名称'); zone(value.timezone); choice(value.originBasis, ['activity', 'user_instruction', 'user_approved_rule'])
   for (const field of ['scheduledDate', 'dueDate']) if (value[field] !== null) date(value[field])
@@ -171,11 +175,28 @@ export function validateCalendarRulesState(value: unknown, ownerId?: string, dat
     id(row.contextId); id(row.bindingId); id(row.calendarId); text(row.title, 'ルール名'); choice(row.originBasis, ['user_instruction', 'user_approved_rule']); bool(row.enabled); range(row.validFrom, row.validTo); revision(row.revision)
     array(row.steps, 100); if (!row.steps.length) throw new Error('明示された定型ステップを指定してください')
     const stepKeys = new Set<string>()
-    for (const step of row.steps) { object(step, ['key', 'title', 'kind', 'scheduledOffsetDays', 'dueOffsetDays', 'score', 'durationMinutes']); id(step.key); text(step.title, 'ステップ名'); choice(step.kind, ['task', 'event']); integer(step.scheduledOffsetDays, -366, 366); if (step.dueOffsetDays !== null) integer(step.dueOffsetDays, -366, 366); if (step.kind === 'task') { score(step.score); if (step.durationMinutes !== null) throw new Error('タスクに予定時間を付けられません') } else { integer(step.durationMinutes, 1, 10080); if (step.score !== null || step.dueOffsetDays !== null) throw new Error('予定ステップにはタスク値を付けられません') }; if (stepKeys.has(String(step.key))) throw new Error('ステップキーが重複しています'); stepKeys.add(String(step.key)) }
+    for (const step of row.steps) {
+      if (!step || typeof step !== 'object') throw new Error('定型ステップが不正です')
+      object(step, ['key', 'title', 'kind', 'scheduledOffsetDays', 'dueOffsetDays', 'score', 'durationMinutes', ...('dueTime' in step ? ['dueTime'] : [])]); id(step.key); text(step.title, 'ステップ名'); choice(step.kind, ['task', 'event']); integer(step.scheduledOffsetDays, -366, 366); if (step.dueOffsetDays !== null) integer(step.dueOffsetDays, -366, 366); if (step.kind === 'task') { score(step.score); if (step.durationMinutes !== null) throw new Error('タスクに予定時間を付けられません') } else { integer(step.durationMinutes, 1, 10080); if (step.score !== null || step.dueOffsetDays !== null) throw new Error('予定ステップにはタスク値を付けられません') }; if (stepKeys.has(String(step.key))) throw new Error('ステップキーが重複しています'); stepKeys.add(String(step.key))
+      // A clock deadline needs a deadline day; it never replaces the date (due_kind datetime).
+      if ('dueTime' in step) { clock(step.dueTime); if (step.kind !== 'task' || step.dueOffsetDays === null) throw new Error('締め切り時刻は締め切り日のあるタスクだけに設定できます') }
+    }
     if (!row.trigger || typeof row.trigger !== 'object' || !('kind' in row.trigger)) throw new Error('明示周期を指定してください')
     const trigger = row.trigger as Row
     if (trigger.kind === 'weekly') { object(trigger, ['kind', 'weekdays', 'time']); weekdays(trigger.weekdays); if (!(trigger.weekdays as number[]).length) throw new Error('周期の曜日を指定してください'); clock(trigger.time) }
     else if (trigger.kind === 'monthly_business') { object(trigger, ['kind', 'ordinal', 'from', 'time']); integer(trigger.ordinal, 1, 31); choice(trigger.from, ['start', 'end']); clock(trigger.time) }
+    else if (trigger.kind === 'rrule') {
+      object(trigger, ['kind', 'dtstart', 'rrule', 'rdates', 'exdates', 'nonexistentTime', 'ambiguousTime'])
+      if (!validLocalDateTime(trigger.dtstart)) throw new Error('繰り返しの開始日時（DTSTART）を確認してください')
+      if (typeof trigger.rrule !== 'string') throw new Error('RRULEを指定してください')
+      if (canonicalRRule(trigger.rrule) !== trigger.rrule) throw new Error('RRULEは正規化した形式で保存してください')
+      for (const [name, values] of [['RDATE', trigger.rdates], ['EXDATE', trigger.exdates]] as const) { array(values, 1000); if (values.some(value => !validLocalDateTime(value)) || new Set(values).size !== values.length || values.some((value, index) => index > 0 && String(values[index - 1]) > String(value))) throw new Error(`${name}は重複のない現地日時を昇順で指定してください`) }
+      choice(trigger.nonexistentTime, ['skip', 'next_valid']); choice(trigger.ambiguousTime, ['earlier', 'later'])
+    } else if (trigger.kind === 'completion_relative') {
+      object(trigger, ['kind', 'firstDate', 'time', 'afterDays', 'unfinishedPolicy']); date(trigger.firstDate); clock(trigger.time); integer(trigger.afterDays, 1, 3650); choice(trigger.unfinishedPolicy, ['keep_all', 'keep_latest', 'generate_after_completion'])
+      if (String(trigger.firstDate) < String(row.validFrom) || String(trigger.firstDate) > String(row.validTo)) throw new Error('完了起点の最初の回はルールの有効期間内にしてください')
+      if (!(row.steps as Row[]).some(step => step.kind === 'task')) throw new Error('完了起点の周期には完了できるタスクのステップが必要です')
+    }
     else { object(trigger, ['kind', 'activityId', 'edge', 'offsetDays', 'offsetMinutes']); choice(trigger.kind, ['activity_relative']); id(trigger.activityId); choice(trigger.edge, ['start', 'end']); integer(trigger.offsetDays, -366, 366); integer(trigger.offsetMinutes, -10080, 10080) }
   }
   for (const row of ruleRows) {

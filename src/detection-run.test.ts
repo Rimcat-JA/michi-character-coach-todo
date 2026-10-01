@@ -8,7 +8,7 @@ import { defaultChangePolicy } from './change-set'
 import { changePolicyFor } from './change-set'
 import { presetRules } from './automation-policy'
 import { automationRulesFor, type OperationGroup, type OperationMode } from './automation-policy'
-import { applyDetectionCreateFromUI,clearDetectionAuthority,detectObligationsForSource,discardDetectionRun,prepareDetectionCreate,prepareDetectionFromUI,savedDetectionRuns,type DetectionTransport,type PreparedDetection } from './detection-run'
+import { applyDetectionCreateFromUI,clearDetectionAuthority,detectObligationsForSource,discardDetectionRun,groundedDetectionDeadline,prepareDetectionCreate,prepareDetectionFromUI,savedDetectionRuns,type DetectionTransport,type PreparedDetection } from './detection-run'
 import { requiredDetectionClaims,type DetectionChange,type DetectionOutput } from './detection-contract'
 import { contentDigest } from './canonical'
 
@@ -168,5 +168,31 @@ describe('N09 detection.register gate and A1/A2 parity',()=>{
     }
     const a1=await runUnder('A1'),a2=await runUnder('A2')
     expect(a2).toEqual(a1);expect(a1.gate).toBe('review-only');expect(a1.tasks).toBe(0)
+  })
+})
+describe('検出した時刻付き期限',()=>{
+  it('原文と同じ時刻・タイムゾーンの期限はdueAtとして保存し、日付だけへ丸めない',async()=>{
+    const value=await prepared(await source('Karinさん、2026年10月2日17:00までに見積書を送ってください。')),calls=transport(value)
+    calls.detect=vi.fn(async()=>{const raw=output(value);raw.changes[0].due={kind:'datetime',value:'2026-10-02T17:00:00+09:00',timezone:'Asia/Tokyo',raw:raw.changes[0].evidence[0].quote};return JSON.stringify(raw)})
+    const run=await detectObligationsForSource(value,calls),confirmation=await prepareDetectionCreate(run,run.candidates[0].id)
+    const receipt=await applyDetectionCreateFromUI(run,confirmation,confirmation.digest,humanClick())
+    expect(await db.tasks.get(receipt.taskIds[0])).toMatchObject({dueDate:'2026-10-02',dueAt:'2026-10-02T08:00:00.000Z',dueTimezone:'Asia/Tokyo'})
+  })
+  it('原文に明示されない時刻や矛盾するoffsetの期限は登録しない',async()=>{
+    expect(groundedDetectionDeadline({kind:'datetime',value:'2026-10-02T17:00:00+09:00',timezone:'Asia/Tokyo',raw:'10月2日17時までに送付'},null)).toMatchObject({dueAt:'2026-10-02T08:00:00.000Z',time:'17:00'})
+    expect(()=>groundedDetectionDeadline({kind:'datetime',value:'2026-10-02T12:00:00+09:00',timezone:'Asia/Tokyo',raw:'返信の期限は12時間以内'},null)).toThrow('同じ時刻')
+    for(const due of [{kind:'datetime' as const,value:'2026-10-02T17:00:00+09:00',timezone:'Asia/Tokyo',raw:'10月2日までに送付'},{kind:'datetime' as const,value:'2026-10-02T17:00:00+00:00',timezone:'Asia/Tokyo',raw:'10月2日17時までに送付'},{kind:'datetime' as const,value:'2026-10-02T17:00:00+09:00',timezone:'Not/AZone',raw:'10月2日17時までに送付'},{kind:'datetime' as const,value:'2026-10-02T17:00:00+09:00',timezone:'Asia/Tokyo',raw:'10月2日18時までに送付'}])expect(()=>groundedDetectionDeadline(due,null)).toThrow()
+  })
+  it('モデルが資料と別のタイムゾーンを付けた期限は登録せず、タイムゾーン未指定は資料のタイムゾーンで読む',async()=>{
+    const value=await prepared(await source('Karinさん、2026年10月2日17:00までに見積書を送ってください。')),calls=transport(value)
+    calls.detect=vi.fn(async()=>{const raw=output(value);raw.changes[0].due={kind:'datetime',value:'2026-10-02T17:00:00-07:00',timezone:'America/Los_Angeles',raw:raw.changes[0].evidence[0].quote};return JSON.stringify(raw)})
+    const run=await detectObligationsForSource(value,calls)
+    await expect(prepareDetectionCreate(run,run.candidates[0].id)).rejects.toThrow('タイムゾーン')
+    expect(await db.tasks.count()).toBe(0)
+    const local=await prepared(await source('Karinさん、2026年10月2日17:00までに見積書を送ってください。')),localCalls=transport(local)
+    localCalls.detect=vi.fn(async()=>{const raw=output(local);raw.changes[0].due={kind:'datetime',value:'2026-10-02T17:00:00+09:00',timezone:null,raw:raw.changes[0].evidence[0].quote};return JSON.stringify(raw)})
+    const localRun=await detectObligationsForSource(local,localCalls),confirmation=await prepareDetectionCreate(localRun,localRun.candidates[0].id)
+    const receipt=await applyDetectionCreateFromUI(localRun,confirmation,confirmation.digest,humanClick())
+    expect(await db.tasks.get(receipt.taskIds[0])).toMatchObject({dueAt:'2026-10-02T08:00:00.000Z',dueTimezone:'Asia/Tokyo'})
   })
 })

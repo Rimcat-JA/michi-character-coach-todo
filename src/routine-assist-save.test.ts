@@ -108,7 +108,7 @@ describe('周期補助は共通の設定・生成承認を通す', () => {
     const value = await candidate(), guard = { assertCurrent: async () => {}, businessKey: 'same-business', candidateKey: 'first-candidate', detail: { hash: 'a'.repeat(64) } }
     const first = await prepareSourceRoutineConfiguration(value.input, value, 'synthetic/model', guard, click()), ruleId = await applyRoutineAssistConfigurationFromUI(first, first.digest, click())
     const again = await prepareSourceRoutineConfiguration(value.input, value, 'synthetic/model', { ...guard, candidateKey: 'new-run-candidate' }, click()); expect(await applyCalendarProposalFromUI(again.configuration, click())).toBe(ruleId); expect((await db.calendarRules.get('main'))?.rules).toHaveLength(1)
-    const changed = structuredClone(value); changed.input.selection.time = '10:00'; if (changed.definition.trigger.kind !== 'activity_relative') changed.definition.trigger.time = '10:00'
+    const changed = structuredClone(value); changed.input.selection.time = '10:00'; if ('time' in changed.definition.trigger) changed.definition.trigger.time = '10:00'
     const altered = await prepareSourceRoutineConfiguration(changed.input, changed, 'synthetic/model', { ...guard, businessKey: 'different-business' }, click()), before = await snapshot()
     await expect(applyCalendarProposalFromUI(altered.configuration, click())).rejects.toThrow('同じ検出候補'); expect(await snapshot()).toEqual(before)
   })

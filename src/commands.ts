@@ -1,5 +1,5 @@
 import { db } from './db'
-import { addDays, calculateScore, emptyScore, today, uid, validateDate, validateTaskInput, type Assessment, type Routine, type Task } from './domain'
+import { addDays, calculateScore, emptyScore, today, uid, validateDate, validateTaskDue, validateTaskInput, type Assessment, type Routine, type Task } from './domain'
 import { containerPath } from './containers'
 import { validateLabelsForOwner } from './labels'
 import { assertTripTaskScoreChangeAllowed, freezeTripBundle } from './trip-bundles'
@@ -22,7 +22,7 @@ async function receipt<T>(key: string, payload: unknown, run: () => Promise<T>, 
     return result
   })
 }
-export type TaskInput = Pick<Task, 'title' | 'notes' | 'project' | 'labels' | 'scheduledDate' | 'dueDate' | 'targetDate' | 'reviewDate' | 'availableFrom' | 'importance' | 'score'> & { containerId?: string | null; deferredUntil?: string | null; frog?: number | null; weight?: number | null; energyNeed?: number | null; focusNeed?: number | null; positiveFeeling?: number | null }
+export type TaskInput = Pick<Task, 'title' | 'notes' | 'project' | 'labels' | 'scheduledDate' | 'dueDate' | 'targetDate' | 'reviewDate' | 'availableFrom' | 'importance' | 'score'> & { containerId?: string | null; deferredUntil?: string | null; frog?: number | null; weight?: number | null; energyNeed?: number | null; focusNeed?: number | null; positiveFeeling?: number | null; dueAt?: string | null; dueTimezone?: string | null }
 export const newTaskInput = (): TaskInput => ({ title: '', notes: '', project: '', containerId: null, labels: [], scheduledDate: null, dueDate: null, targetDate: null, reviewDate: null, availableFrom: null, deferredUntil: null, importance: 1, frog: null, weight: null, energyNeed: null, focusNeed: null, positiveFeeling: null, score: emptyScore() })
 
 async function resolvedProject(input: TaskInput): Promise<string> {
@@ -38,6 +38,7 @@ export async function addTask(input: TaskInput, generationKey: string, routineId
   validateTaskInput(input)
   await validateLabelsForOwner(input.labels)
   for (const [name, value] of [['予定日', input.scheduledDate], ['締め切り', input.dueDate], ['目標日', input.targetDate], ['見直し日', input.reviewDate], ['開始可能日', input.availableFrom], ['延期終了日', input.deferredUntil ?? null]] as const) validateDate(value, name)
+  validateTaskDue(input)
   const result = calculateScore(input.score)
   const project = await resolvedProject(input)
   const id = uid(), assessmentId = uid(), at = now()
@@ -91,7 +92,9 @@ export async function bulkUpdateTasksAtomic(items: { id: string; revision: numbe
     if (tasks.some((task, index) => !task || task.deletedAt || task.revision !== items[index].revision)) throw new ConflictError()
     const at = now()
     for (const task of tasks as Task[]) {
-      await db.tasks.put({ ...task, ...patch, revision: task.revision + 1, updatedAt: at })
+      // Clearing the deadline clears its clock; moving a clock deadline's day needs the owner's time decision.
+      const due = 'dueDate' in patch && task.dueAt ? patch.dueDate === null ? { dueAt: null, dueTimezone: null } : (() => { validateTaskDue({ dueDate: patch.dueDate!, dueAt: task.dueAt, dueTimezone: task.dueTimezone }); return {} })() : {}
+      await db.tasks.put({ ...task, ...patch, ...due, revision: task.revision + 1, updatedAt: at })
       await db.audits.add({ id: uid(), taskId: task.id, operation: 'bulk_update', at, detail: `一括編集: ${fields.join(',')}` })
     }
     const ids = tasks.map(task => task!.id)
@@ -107,6 +110,8 @@ export async function updateTask(id: string, expectedRevision: number, input: Ta
     const old = await db.tasks.get(id)
     if (!old || old.deletedAt) throw new Error('タスクが見つかりません')
     if (old.revision !== expectedRevision) throw new ConflictError()
+    // An editor that does not know the clock deadline keeps it only while the deadline day is unchanged.
+    validateTaskDue('dueAt' in input ? input : { dueDate: input.dueDate, dueAt: old.dueAt, dueTimezone: old.dueTimezone })
     const scoreChanged = JSON.stringify(old.score) !== JSON.stringify(input.score)
     if (scoreChanged) assertTripTaskScoreChangeAllowed(id, old.score, input.score, await db.tripBundles.toArray())
     const result = calculateScore(input.score)

@@ -3,9 +3,9 @@ import { db } from './db'
 import { addTask, ConflictError, newTaskInput } from './commands'
 import { canonicalJSON, contentDigest } from './canonical'
 import { changePolicyFor } from './change-set'
-import { calculateScore, uid, type CalendarEvent, type Settings, type Task } from './domain'
+import { addDays, calculateScore, uid, type CalendarEvent, type Settings, type Task } from './domain'
 import { assertTripTaskScoreChangeAllowed } from './trip-bundles'
-import { buildCalendarChangePlan, prepareCalendarChangePlan, type CalendarChangePlan, type CalendarChangeScope, type CalendarRulesState, type CurrentCalendarEntity, type ResolvedCalendarSpec, type ResolverConflict } from './calendar-resolver'
+import { buildCalendarChangePlan, prepareCalendarChangePlan, type CalendarChangePlan, type CalendarChangeScope, type CalendarRulesState, type CalendarTruncation, type CurrentCalendarEntity, type ResolvedCalendarSpec, type ResolverConflict, type ResolverNotice } from './calendar-resolver'
 import { emptyCalendarRulesState, mergeScheduleImport, prepareScheduleImport, validateCalendarRulesState, type ScheduleImportPreview } from './calendar-rules-validation'
 import { redactICSForAudit } from './calendar-import-redaction'
 import { redactCSVForAudit } from './calendar-csv-redaction'
@@ -15,7 +15,7 @@ const calendarDB = db as typeof db & { calendarRules: EntityTable<CalendarRulesS
 const table = () => { if (!calendarDB.calendarRules) throw new Error('共通カレンダーの保存先がありません。アプリを更新してください'); return calendarDB.calendarRules }
 export type CalendarRulesConfiguration = Pick<CalendarRulesState, 'contexts' | 'bindings' | 'calendars' | 'activities' | 'sources' | 'facts' | 'rules'>
 type ProposalBase = { id: string; ownerId: string; datasetId: string; stateRevision: number; policyEpoch: number; sourcePermissionRevision: number; createdAt: string; expiresAt: string; digest: string }
-export type CalendarConfigurationProposal = ProposalBase & { kind: 'configuration'; next: CalendarRulesConfiguration; preview: ResolvedCalendarSpec[]; conflicts: ResolverConflict[]; importPreview: ScheduleImportPreview | null }
+export type CalendarConfigurationProposal = ProposalBase & { kind: 'configuration'; next: CalendarRulesConfiguration; preview: ResolvedCalendarSpec[]; conflicts: ResolverConflict[]; truncatedSeries?: CalendarTruncation[]; notices?: ResolverNotice[]; importPreview: ScheduleImportPreview | null }
 export type CalendarGenerationProposal = ProposalBase & { kind: 'generation'; plan: CalendarChangePlan }
 type Proposal = CalendarConfigurationProposal | CalendarGenerationProposal
 const authority = new Map<string, Proposal>()
@@ -44,19 +44,22 @@ export async function loadCalendarRulesState(): Promise<CalendarRulesState> {
   validateCalendarRulesState(state, current.profileId, current.datasetId); return state
 }
 function config(state: CalendarRulesState): CalendarRulesConfiguration { const { contexts, bindings, calendars, activities, sources, facts, rules } = state; return structuredClone({ contexts, bindings, calendars, activities, sources, facts, rules }) }
-function taskMatches(task: Task, spec: ResolvedCalendarSpec) { return task.title === spec.title && task.scheduledDate === spec.scheduledDate && task.dueDate === spec.dueDate && canonicalJSON(task.score) === canonicalJSON(spec.score) }
+/** Date-only occurrences keep the task shape unchanged; a clock deadline adds dueAt with the context time zone. */
+const specDue = (spec: ResolvedCalendarSpec, task?: Task): Partial<Pick<Task, 'dueAt' | 'dueTimezone'>> => spec.dueAt ? { dueAt: spec.dueAt, dueTimezone: spec.timezone } : task?.dueAt ? { dueAt: null, dueTimezone: null } : {}
+function taskMatches(task: Task, spec: ResolvedCalendarSpec) { return task.title === spec.title && task.scheduledDate === spec.scheduledDate && task.dueDate === spec.dueDate && (task.dueAt ?? null) === (spec.dueAt ?? null) && (!task.dueAt || task.dueTimezone === spec.timezone) && canonicalJSON(task.score) === canonicalJSON(spec.score) }
 function eventMatches(event: CalendarEvent, spec: ResolvedCalendarSpec, ownerId: string) { return event.ownerId === ownerId && event.title === spec.title && event.kind === spec.eventKind && event.startAt === spec.startAt && event.endAt === spec.endAt && event.timezone === spec.timezone && event.linkedTaskId === null }
 export async function currentCalendarEntities(state: CalendarRulesState): Promise<CurrentCalendarEntity[]> {
-  const tasks = await db.tasks.toArray(), events = await db.calendarEvents.toArray(), sessions = await db.sessions.toArray()
+  const tasks = await db.tasks.toArray(), events = await db.calendarEvents.toArray(), sessions = await db.sessions.toArray(), completions = await db.completions.toArray()
   return state.instances.map(instance => {
     const spec = instance.spec
     if (spec.kind === 'task') {
       const task = tasks.find(item => item.id === instance.entityId)
       if (!task || task.generationKey !== spec.generationKey) throw new Error('発生回とタスクの対応が変わりました。確認してください')
-      return { generationKey: instance.generationKey, entityId: task.id, revision: task.revision, status: instance.status, completed: task.status === 'completed', edited: task.revision !== instance.entityRevision || !taskMatches(task, spec) || Boolean(task.deletedAt) !== (instance.status === 'cancelled'), started: sessions.some(session => session.taskId === task.id), spec: structuredClone(spec) }
+      const completedAt = task.status === 'completed' ? completions.find(item => item.taskId === task.id)?.currentAt ?? null : null
+      return { generationKey: instance.generationKey, entityId: task.id, revision: task.revision, status: instance.status, completed: task.status === 'completed', edited: task.revision !== instance.entityRevision || !taskMatches(task, spec) || Boolean(task.deletedAt) !== (instance.status === 'cancelled'), started: sessions.some(session => session.taskId === task.id), spec: structuredClone(spec), completedAt }
     }
     const event = events.find(item => item.id === instance.entityId)
-    return { generationKey: instance.generationKey, entityId: instance.entityId, revision: instance.entityRevision, status: instance.status, completed: false, edited: instance.status === 'active' ? !event || !eventMatches(event, spec, state.ownerId) : Boolean(event), started: false, spec: structuredClone(spec) }
+    return { generationKey: instance.generationKey, entityId: instance.entityId, revision: instance.entityRevision, status: instance.status, completed: false, edited: instance.status === 'active' ? !event || !eventMatches(event, spec, state.ownerId) : Boolean(event), started: false, spec: structuredClone(spec), completedAt: null }
   })
 }
 async function captureBase(state: CalendarRulesState): Promise<Omit<ProposalBase, 'digest'>> {
@@ -79,13 +82,19 @@ export async function prepareCalendarConfiguration(next: CalendarRulesConfigurat
   const proposed: CalendarRulesState = { ...state, ...structuredClone(next), revision: state.revision + 1 }
   validateCalendarRulesState(proposed, state.ownerId, state.datasetId)
   if (previewRuleId !== undefined && (typeof previewRuleId !== 'string' || !proposed.rules.some(rule => rule.id === previewRuleId))) throw new Error('次の10回を確認するルールがありません')
-  const plan = buildCalendarChangePlan(proposed, [], from, to)
-  return register<CalendarConfigurationProposal>({ ...await captureBase(state), kind: 'configuration', next: config(proposed), preview: plan.creates.filter(spec => previewRuleId === undefined || spec.ruleId === previewRuleId).sort((a, b) => (a.scheduledDate ?? a.startAt!).localeCompare(b.scheduledDate ?? b.startAt!)).slice(0, 10), conflicts: plan.conflicts, importPreview: null })
+  const plan = buildCalendarChangePlan(proposed, [], from, to), order = (a: ResolvedCalendarSpec, b: ResolvedCalendarSpec) => (a.scheduledDate ?? a.startAt!).localeCompare(b.scheduledDate ?? b.startAt!)
+  const preview = plan.creates.filter(spec => previewRuleId === undefined || spec.ruleId === previewRuleId).sort(order)
+  // Sparse series (yearly, Feb 29) still show their next occurrences: later yearly windows are read for the preview only.
+  for (let window = 0; previewRuleId !== undefined && preview.length < 10 && window < 10; window++) {
+    const start = addDays(to, 1 + window * 366)
+    preview.push(...buildCalendarChangePlan(proposed, [], start, addDays(start, 365)).creates.filter(spec => spec.ruleId === previewRuleId).sort(order))
+  }
+  return register<CalendarConfigurationProposal>({ ...await captureBase(state), kind: 'configuration', next: config(proposed), preview: preview.slice(0, 10), conflicts: plan.conflicts, truncatedSeries: plan.truncatedSeries, notices: plan.notices, importPreview: null })
 }
 export async function prepareCalendarScheduleImport(contextId: string, input: unknown, from: string, to: string): Promise<CalendarConfigurationProposal> {
   const state = await loadCalendarRulesState(), importPreview = await prepareScheduleImport(state, contextId, input), proposed = mergeScheduleImport(state, importPreview)
   const plan = buildCalendarChangePlan(proposed, [], from, to)
-  return register<CalendarConfigurationProposal>({ ...await captureBase(state), kind: 'configuration', next: config(proposed), preview: plan.creates.sort((a, b) => (a.scheduledDate ?? a.startAt!).localeCompare(b.scheduledDate ?? b.startAt!)).slice(0, 10), conflicts: plan.conflicts, importPreview })
+  return register<CalendarConfigurationProposal>({ ...await captureBase(state), kind: 'configuration', next: config(proposed), preview: plan.creates.sort((a, b) => (a.scheduledDate ?? a.startAt!).localeCompare(b.scheduledDate ?? b.startAt!)).slice(0, 10), conflicts: plan.conflicts, truncatedSeries: plan.truncatedSeries, notices: plan.notices, importPreview })
 }
 export async function prepareCalendarGeneration(from: string, to: string, scope: CalendarChangeScope = { kind: 'all_uncompleted' }): Promise<CalendarGenerationProposal> {
   const current = await db.settings.get('main')
@@ -156,7 +165,7 @@ export async function applyCalendarProposalFromUI(input: Proposal, event: Event)
       const next = structuredClone(state), trips = await db.tripBundles.toArray()
       for (const spec of rebuilt.creates) {
         if (await db.tasks.where('generationKey').equals(spec.generationKey).first() || next.instances.some(instance => instance.generationKey === spec.generationKey)) throw new ConflictError()
-        const id = spec.kind === 'task' ? await addTask({ ...newTaskInput(), title: spec.title, scheduledDate: spec.scheduledDate, dueDate: spec.dueDate, score: spec.score! }, spec.generationKey, null, 'routine') : uid()
+        const id = spec.kind === 'task' ? await addTask({ ...newTaskInput(), title: spec.title, scheduledDate: spec.scheduledDate, dueDate: spec.dueDate, ...specDue(spec), score: spec.score! }, spec.generationKey, null, 'routine') : uid()
         assertLive()
         if (spec.kind === 'event') { await db.calendarEvents.add(eventFrom(spec, id, current.profileId, at)); assertLive() }
         next.instances.push({ generationKey: spec.generationKey, entityId: id, entityRevision: 1, status: 'active', spec: structuredClone(spec) })
@@ -169,7 +178,7 @@ export async function applyCalendarProposalFromUI(input: Proposal, event: Event)
           assertTripTaskScoreChangeAllowed(task.id, task.score, score, trips)
           let assessmentId = task.assessmentId
           if (scoreChanged) { assessmentId = uid(); await db.assessments.add({ id: assessmentId, taskId: task.id, score, result, createdAt: at, origin: 'routine', ruleVersion: 'v1' }); const completion = await db.completions.where('taskId').equals(task.id).first(); if (completion?.currentAt) throw new ConflictError(); if (completion) await db.completions.put({ ...completion, lastConfirmedPoints: result.effective }) }
-          await db.tasks.put({ ...task, title: update.after.title, scheduledDate: update.after.scheduledDate, dueDate: update.after.dueDate, score, effectivePoints: result.effective, assessmentId, deletedAt: null, revision: task.revision + 1, updatedAt: at })
+          await db.tasks.put({ ...task, title: update.after.title, scheduledDate: update.after.scheduledDate, dueDate: update.after.dueDate, ...specDue(update.after, task), score, effectivePoints: result.effective, assessmentId, deletedAt: null, revision: task.revision + 1, updatedAt: at })
           instance.entityRevision = task.revision + 1
         } else {
           const old = await db.calendarEvents.get(instance.entityId)

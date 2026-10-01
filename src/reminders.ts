@@ -1,5 +1,5 @@
 import { db } from './db'
-import { addDays, today, uid, validateDate, type ReminderEvent, type ReminderRule, type ReminderState, type Settings } from './domain'
+import { addDays, today, uid, validateDate, type ReminderEvent, type ReminderRule, type ReminderState, type Settings, type Task } from './domain'
 import { querySmartList } from './smart-lists'
 import { coachNotificationGuardFor, coachNotificationStateFor, prepareCoachNotificationDelivery, setCoachNotificationPolicy } from './coach-notification-save'
 import { cancelPendingCoachNotifications, notificationDedupeKey, notificationLocalClock, reserveCoachNotification, settleCoachNotificationDelivery, type CoachNotificationState, type NotificationRequest } from './coach-notifications'
@@ -10,6 +10,13 @@ function state(settings: Settings) { return settings.reminderState ?? defaultRem
 function atLocal(date: string, time: string) { return new Date(`${date}T${time}:00`).toISOString() }
 function nextDaily(now: Date, time: string) { return atLocal(addDays(today(now), 1), time) }
 function assertTime(time: string) { if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(time)) throw new Error('時刻を確認してください') }
+
+/** A one-time reminder before a clock deadline is computed from dueAt, never from the date alone or the device zone. */
+export function deadlineReminderAt(task: Pick<Task, 'dueAt'>, minutesBefore: number): string {
+  if (!task.dueAt || !Number.isFinite(Date.parse(task.dueAt))) throw new Error('時刻付きの締め切りがありません')
+  if (!Number.isInteger(minutesBefore) || minutesBefore < 0 || minutesBefore > 10080) throw new Error('締め切りの何分前かを0〜10080で指定してください')
+  return new Date(Date.parse(task.dueAt) - minutesBefore * 60000).toISOString()
+}
 
 export async function setReminderPolicy(patch: Partial<Pick<ReminderState, 'quietStart' | 'quietEnd' | 'dailyCap'>>) {
   if (patch.quietStart !== undefined) assertTime(patch.quietStart)

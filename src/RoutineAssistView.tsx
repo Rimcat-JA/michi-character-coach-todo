@@ -1,10 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
 import { changePolicyFor } from './change-set'
-import { calendarRuleEditorDefinition } from './calendar-rule-editor'
-import { calendarDateAt, type CalendarChangeScope, type CalendarRule, type CalendarRulesState, type ResolvedCalendarSpec } from './calendar-resolver'
+import { calendarRuleEditorDefinition, describeCalendarTrigger } from './calendar-rule-editor'
+import { calendarDateAt, calendarTimeAt, defaultUnfinishedPolicy, type CalendarChangeScope, type CalendarRule, type CalendarRulesState, type RecurrenceUnfinishedPolicy, type ResolvedCalendarSpec } from './calendar-resolver'
+import { unfinishedPolicyLabels } from './calendar-rule-editor'
 import { applyCalendarProposalFromUI, prepareCalendarGeneration, type CalendarGenerationProposal } from './calendar-rules-save'
 import { today, type Settings } from './domain'
-import { createRoutineAssistRequest, parseRoutineAssistAnswer, type RoutineAssistCandidate, type RoutineAssistInput } from './routine-assist'
+import { describeRRule } from './rrule'
+import { createRoutineAssistRequest, groundedRoutinePattern, routineAssistStartNote, parseRoutineAssistAnswer, type RoutineAssistCandidate, type RoutineAssistInput, type RoutineAssistSelection } from './routine-assist'
 import { confirmRoutineInstructionFromUI } from './routine-instruction'
 import { applyRoutineAssistConfigurationFromUI, cancelRoutineAssistance, prepareRoutineAssistConfiguration, type PreparedRoutineAssistance } from './routine-assist-save'
 import './RoutineAssistView.css'
@@ -28,14 +30,10 @@ type Props = {
 }
 const weekdays = ['日', '月', '火', '水', '木', '金', '土']
 const errorText = (error: unknown) => error instanceof Error ? error.message : String(error)
-function ruleWhen(trigger: CalendarRule['trigger']) {
-  if (trigger.kind === 'weekly') return `毎週${trigger.weekdays.map(day => weekdays[day]).join('・')}曜 ${trigger.time}`
-  if (trigger.kind === 'monthly_business') return `毎月の${trigger.from === 'start' ? '最初' : '最後'}から第${trigger.ordinal}営業日 ${trigger.time}`
-  return `選択活動の${trigger.edge === 'start' ? '開始' : '終了'}から ${trigger.offsetDays}日 ${trigger.offsetMinutes}分`
-}
-function occurrenceWhen(spec: ResolvedCalendarSpec) { return spec.kind === 'task' ? `${spec.scheduledDate} / 締切 ${spec.dueDate ?? 'なし'}` : `${new Date(spec.startAt!).toLocaleString('ja-JP', { timeZone: spec.timezone })}〜${new Date(spec.endAt!).toLocaleString('ja-JP', { timeZone: spec.timezone })}` }
+const ruleWhen = (trigger: CalendarRule['trigger']) => describeCalendarTrigger(trigger)
+function occurrenceWhen(spec: ResolvedCalendarSpec) { return spec.kind === 'task' ? `${spec.scheduledDate} / 締切 ${spec.dueDate ?? 'なし'}${spec.dueAt ? ` ${calendarTimeAt(spec.dueAt, spec.timezone)}` : ''}` : `${new Date(spec.startAt!).toLocaleString('ja-JP', { timeZone: spec.timezone })}〜${new Date(spec.endAt!).toLocaleString('ja-JP', { timeZone: spec.timezone })}` }
 function occurrencePoints(spec: ResolvedCalendarSpec) { return spec.score?.mode === 'manual' ? `${spec.score.manualPoints}pt（本人指定）` : spec.score?.mode === 'formula' ? '計算方式・属性を保持' : spec.kind === 'event' ? `${Math.round((Date.parse(spec.endAt!) - Date.parse(spec.startAt!)) / 60000)}分の予定` : 'ポイント未設定' }
-function StepSummary({ steps }: { steps: CalendarRule['steps'] }) { return <ul>{steps.map(step => <li key={step.key}>{step.title} / {step.kind === 'task' ? 'タスク' : '占有予定'} / 基準から{step.scheduledOffsetDays}日 / 締切 {step.dueOffsetDays === null ? 'なし' : `基準から${step.dueOffsetDays}日`} / {step.score?.mode === 'manual' ? `${step.score.manualPoints}pt（本人指定）` : step.score?.mode === 'formula' ? '既存の計算方式・属性を保持' : step.kind === 'event' ? `${step.durationMinutes}分` : 'ポイント未設定'}</li>)}</ul> }
+function StepSummary({ steps }: { steps: CalendarRule['steps'] }) { return <ul>{steps.map(step => <li key={step.key}>{step.title} / {step.kind === 'task' ? 'タスク' : '占有予定'} / 基準から{step.scheduledOffsetDays}日 / 締切 {step.dueOffsetDays === null ? 'なし' : `基準から${step.dueOffsetDays}日${step.dueTime ? ` ${step.dueTime}` : ''}`} / {step.score?.mode === 'manual' ? `${step.score.manualPoints}pt（本人指定）` : step.score?.mode === 'formula' ? '既存の計算方式・属性を保持' : step.kind === 'event' ? `${step.durationMinutes}分` : 'ポイント未設定'}</li>)}</ul> }
 
 export default function RoutineAssistView({ state, settings, initialMessage = '', heading = '周期の相談と確認', sourceSuggestion, allowAI = true, onPrepare, onApply, onSaved, onCancel }: Props) {
   const [message, setMessage] = useState(sourceSuggestion?.message ?? initialMessage)
@@ -46,6 +44,8 @@ export default function RoutineAssistView({ state, settings, initialMessage = ''
   const [scopeKind, setScopeKind] = useState<CalendarChangeScope['kind'] | ''>(''), [futureFrom, setFutureFrom] = useState(''), [instanceKey, setInstanceKey] = useState('')
   const [titleQuote, setTitleQuote] = useState(''), [triggerKind, setTriggerKind] = useState<CalendarRule['trigger']['kind'] | ''>(''), [weeklyDays, setWeeklyDays] = useState<number[]>([])
   const [ordinal, setOrdinal] = useState(''), [ordinalFrom, setOrdinalFrom] = useState<'start' | 'end' | ''>(''), [edge, setEdge] = useState<'start' | 'end' | ''>(''), [relativeDays, setRelativeDays] = useState(''), [relativeMinutes, setRelativeMinutes] = useState(''), [points, setPoints] = useState('')
+  const [rruleText, setRRuleText] = useState(''), [afterDays, setAfterDays] = useState(''), [dueTime, setDueTime] = useState('')
+  const [nonexistentTime, setNonexistentTime] = useState<'skip' | 'next_valid'>('skip'), [ambiguousTime, setAmbiguousTime] = useState<'earlier' | 'later'>('earlier'), [unfinishedPolicy, setUnfinishedPolicy] = useState<RecurrenceUnfinishedPolicy>(defaultUnfinishedPolicy)
   const [savedCandidate, setCandidate] = useState<RoutineAssistCandidate | null>(null), [candidateModel, setCandidateModel] = useState<string | null>(null)
   const [savedPrepared, setPrepared] = useState<PreparedRoutineAssistance | null>(null), [savedGenerationProposal, setGenerationProposal] = useState<CalendarGenerationProposal | null>(null)
   const [checked, setChecked] = useState(false), [generationChecked, setGenerationChecked] = useState(false), [busy, setBusy] = useState(false), [notice, setNotice] = useState('')
@@ -81,13 +81,33 @@ export default function RoutineAssistView({ state, settings, initialMessage = ''
     if (!context || !bindingId || !calendarId || !validFrom || !validTo || !time) throw new Error('対象・本人適用・カレンダー・有効期間・時刻をすべて選んでください')
     if (targetRuleId && !target) throw new Error('編集対象が変わりました。現在のルールを選び直してください')
     if (stepKind === 'event' && !duration.trim()) throw new Error('占有予定の時間を本人が指定してください')
-    return { message: sourceSuggestion?.message ?? message, referenceDate: today(), targetRuleId: target?.id ?? null, expectedRuleRevision: target?.revision ?? null, selection: { contextId, bindingId, calendarId, activityId: activityId || null, timezone: context.timezone, validFrom, validTo, time, stepKind, durationMinutes: stepKind === 'event' ? Number(duration) : null, scheduledOffsetDays: Number(scheduledOffset), dueOffsetDays: stepKind === 'event' || dueOffset === '' ? null : Number(dueOffset) }, scope: scope() }
+    const dueOffsetDays = stepKind === 'event' || dueOffset === '' ? null : Number(dueOffset)
+    if (dueTime && dueOffsetDays === null) throw new Error('締め切り時刻は、本当の締切日を指定したタスクだけに設定できます')
+    // Defaults are omitted so an unchanged selection keeps the same approval digest as before these choices existed.
+    // An edited rule keeps its earlier choices unless the owner changes them, so a choice back to the default is sent explicitly.
+    const kept = targetDefinition?.trigger, keptRRule = kept?.kind === 'rrule' ? kept : null, keptChain = kept?.kind === 'completion_relative' ? kept : null
+    const choices: Partial<RoutineAssistSelection> = { ...(!target && dueTime ? { dueTime } : {}), ...(nonexistentTime !== 'skip' || keptRRule && keptRRule.nonexistentTime !== 'skip' ? { nonexistentTime } : {}), ...(ambiguousTime !== 'earlier' || keptRRule && keptRRule.ambiguousTime !== 'earlier' ? { ambiguousTime } : {}), ...(unfinishedPolicy !== defaultUnfinishedPolicy || keptChain && keptChain.unfinishedPolicy !== defaultUnfinishedPolicy ? { unfinishedPolicy } : {}) }
+    return { message: sourceSuggestion?.message ?? message, referenceDate: today(), targetRuleId: target?.id ?? null, expectedRuleRevision: target?.revision ?? null, selection: { contextId, bindingId, calendarId, activityId: activityId || null, timezone: context.timezone, validFrom, validTo, time, stepKind, durationMinutes: stepKind === 'event' ? Number(duration) : null, scheduledOffsetDays: Number(scheduledOffset), dueOffsetDays, ...choices }, scope: scope() }
+  }
+  /** Fills the manual fields from the deterministic reading of the person's own wording; nothing is saved. */
+  function readPeriod() {
+    try {
+      const pattern = groundedRoutinePattern(sourceSuggestion?.message ?? message)
+      changed(() => {
+        setTriggerKind(pattern.kind)
+        if (pattern.kind === 'weekly') setWeeklyDays(pattern.weekdays)
+        else if (pattern.kind === 'monthly_business') { setOrdinal(String(pattern.ordinal)); setOrdinalFrom(pattern.from) }
+        else if (pattern.kind === 'rrule') setRRuleText(pattern.rrule)
+        else setAfterDays(String(pattern.afterDays))
+      })
+      setNotice('本文の周期を読み取りました。作業名・時刻・期間を確認してから確定してください。')
+    } catch (error) { setNotice(errorText(error)) }
   }
   function manualCandidate(current: RoutineAssistInput): RoutineAssistCandidate {
     if (!triggerKind) throw new Error('本文に明示した周期を選んでください')
     if (!target && !titleQuote.trim()) throw new Error('新規作業の名前を、本人の相談文からそのまま入力してください')
     if (triggerKind === 'activity_relative' && !relativeDays.trim() && !relativeMinutes.trim()) throw new Error('活動からの日数または分数を本人が明示してください。0も指定できます。')
-    const trigger = triggerKind === 'weekly' ? { kind: triggerKind, weekdays: weeklyDays, time } : triggerKind === 'monthly_business' ? { kind: triggerKind, ordinal: Number(ordinal), from: ordinalFrom, time } : { kind: triggerKind, activityId, edge, offsetDays: Number(relativeDays), offsetMinutes: Number(relativeMinutes) }
+    const trigger = triggerKind === 'weekly' ? { kind: triggerKind, weekdays: weeklyDays, time } : triggerKind === 'monthly_business' ? { kind: triggerKind, ordinal: Number(ordinal), from: ordinalFrom, time } : triggerKind === 'rrule' ? { kind: triggerKind, rrule: rruleText } : triggerKind === 'completion_relative' ? { kind: triggerKind, afterDays: Number(afterDays) } : { kind: triggerKind, activityId, edge, offsetDays: Number(relativeDays), offsetMinutes: Number(relativeMinutes) }
     return parseRoutineAssistAnswer(JSON.stringify({ title_quote: titleQuote.trim() || null, recurrence_quote: current.message, trigger, manual_points: points.trim() === '' ? null : Number(points), reason: '本人が相談文に明示した周期を入力欄で指定した' }), current, state)
   }
   async function ask() {
@@ -149,7 +169,7 @@ export default function RoutineAssistView({ state, settings, initialMessage = ''
     <h3>{heading}</h3>
     <p>本人が指定した周期を確認し、選んだカレンダーで次の発生回を示します。</p>
     <label className="field">{sourceSuggestion ? '検証済みの周期候補（参照用）' : '本人の周期の相談文'}<textarea aria-label="周期の相談文" rows={3} maxLength={4000} value={sourceSuggestion?.message ?? message} readOnly={Boolean(sourceSuggestion)} disabled={disabled} onChange={event => changed(() => setMessage(event.target.value))} placeholder="例：毎月第2営業日に勤怠提出" /></label>
-    {!sourceSuggestion && <label className="field">新規 / 編集<select aria-label="周期相談の編集対象" value={targetRuleId} disabled={disabled} onChange={event => changed(() => { setTargetRuleId(event.target.value); const chosen = state.rules.find(item => item.id === event.target.value); const first = chosen ? calendarRuleEditorDefinition(chosen).steps[0] : null; setStepKind(first?.kind ?? 'task'); setDuration(first?.durationMinutes === null || first?.durationMinutes === undefined ? '' : String(first.durationMinutes)) })}><option value="">新規の周期設定</option>{state.rules.map(rule => <option key={rule.id} value={rule.id}>{rule.title}（版{rule.revision}）</option>)}</select></label>}
+    {!sourceSuggestion && <label className="field">新規 / 編集<select aria-label="周期相談の編集対象" value={targetRuleId} disabled={disabled} onChange={event => changed(() => { setTargetRuleId(event.target.value); const chosen = state.rules.find(item => item.id === event.target.value); const definition = chosen ? calendarRuleEditorDefinition(chosen) : null, first = definition?.steps[0] ?? null, trigger = definition?.trigger; setStepKind(first?.kind ?? 'task'); setNonexistentTime(trigger?.kind === 'rrule' ? trigger.nonexistentTime : 'skip'); setAmbiguousTime(trigger?.kind === 'rrule' ? trigger.ambiguousTime : 'earlier'); setUnfinishedPolicy(trigger?.kind === 'completion_relative' ? trigger.unfinishedPolicy : defaultUnfinishedPolicy); setDuration(first?.durationMinutes === null || first?.durationMinutes === undefined ? '' : String(first.durationMinutes)) })}><option value="">新規の周期設定</option>{state.rules.map(rule => <option key={rule.id} value={rule.id}>{rule.title}（版{rule.revision}）</option>)}</select></label>}
     {targetDefinition && target && <details open><summary>現在の手順・ポイント</summary><p>{targetDefinition.title} / {ruleWhen(targetDefinition.trigger)} / {targetDefinition.enabled ? '有効' : '停止'}</p><p>対象：{state.contexts.find(item => item.id === target.contextId)?.name} / カレンダー：{state.calendars.find(item => item.id === target.calendarId)?.name} / 有効期間：{target.validFrom}〜{target.validTo}</p><StepSummary steps={targetDefinition.steps} /><p className="muted">周期相談は、明示された変更以外の既存手順・ポイント・属性を保持します。各手順の編集は通常のルール編集で行えます。</p></details>}
     <div className="form-grid">
       <label className="field">本人が選ぶ対象<select aria-label="周期相談の対象" value={contextId} disabled={disabled} onChange={event => changed(() => { setContextId(event.target.value); setBindingId(''); setCalendarId(''); setActivityId('') })}><option value="">対象を選択してください</option>{state.contexts.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
@@ -164,8 +184,13 @@ export default function RoutineAssistView({ state, settings, initialMessage = ''
     {!target && <details><summary>本人が指定する作業の形</summary><div className="form-grid">
       <label className="field">作業の種別<select aria-label="周期相談の作業種別" value={stepKind} disabled={disabled} onChange={event => changed(() => setStepKind(event.target.value as typeof stepKind))}><option value="task">タスク</option><option value="event">占有予定</option></select></label>
       <label className="field">基準日から予定日まで（日）<input aria-label="周期相談の予定日オフセット" type="number" min={-366} max={366} value={scheduledOffset} disabled={disabled} onChange={event => changed(() => setScheduledOffset(event.target.value))} /></label>
-      {stepKind === 'task' ? <label className="field">基準日から本当の締切まで（日、空欄はなし）<input aria-label="周期相談の締切オフセット" type="number" min={-366} max={366} value={dueOffset} disabled={disabled} onChange={event => changed(() => setDueOffset(event.target.value))} /></label> : <label className="field">占有する時間（分）<input aria-label="周期相談の占有時間" type="number" min={1} max={10080} value={duration} disabled={disabled} onChange={event => changed(() => setDuration(event.target.value))} /></label>}
+      {stepKind === 'task' ? <><label className="field">基準日から本当の締切まで（日、空欄はなし）<input aria-label="周期相談の締切オフセット" type="number" min={-366} max={366} value={dueOffset} disabled={disabled} onChange={event => changed(() => setDueOffset(event.target.value))} /></label>{dueOffset !== '' && <label className="field">本当の締切の時刻（任意・対象のタイムゾーン）<input aria-label="周期相談の締切時刻" type="time" value={dueTime} disabled={disabled} onChange={event => changed(() => setDueTime(event.target.value))} /></label>}</> : <label className="field">占有する時間（分）<input aria-label="周期相談の占有時間" type="number" min={1} max={10080} value={duration} disabled={disabled} onChange={event => changed(() => setDuration(event.target.value))} /></label>}
     </div></details>}
+    <details><summary>繰り返し規則・完了起点の扱い（本人が選択）</summary><div className="form-grid">
+      <label className="field">夏時間で存在しない時刻<select aria-label="周期相談の存在しない時刻" value={nonexistentTime} disabled={disabled} onChange={event => changed(() => setNonexistentTime(event.target.value as typeof nonexistentTime))}><option value="skip">その回を作らない</option><option value="next_valid">切替前の時差で作る（例 02:30→03:30）</option></select></label>
+      <label className="field">夏時間で二度ある時刻<select aria-label="周期相談の二度ある時刻" value={ambiguousTime} disabled={disabled} onChange={event => changed(() => setAmbiguousTime(event.target.value as typeof ambiguousTime))}><option value="earlier">前の回（切替前）</option><option value="later">後の回（切替後）</option></select></label>
+      <label className="field">前回の完了から数える周期で未完了が残ったとき<select aria-label="周期相談の未完了の扱い" value={unfinishedPolicy} disabled={disabled} onChange={event => changed(() => setUnfinishedPolicy(event.target.value as RecurrenceUnfinishedPolicy))}>{Object.entries(unfinishedPolicyLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
+    </div><p className="muted">{routineAssistStartNote}</p></details>
     <label className="field">変更・反映する範囲<select aria-label="周期相談の変更範囲" value={scopeKind} disabled={disabled} onChange={event => changed(() => setScopeKind(event.target.value as typeof scopeKind))}><option value="">範囲を選択してください</option><option value="all_uncompleted">未完了のすべて</option><option value="this_and_future">指定日以後</option>{target && <option value="this_instance">今回だけ</option>}</select></label>
     {scopeKind === 'this_and_future' && <label className="field">以後の開始日<input aria-label="周期相談の以後開始日" type="date" value={futureFrom} disabled={disabled} onChange={event => changed(() => setFutureFrom(event.target.value))} /></label>}
     {scopeKind === 'this_instance' && <label className="field">今回だけの発生回<select aria-label="周期相談の今回の発生回" value={instanceKey} disabled={disabled} onChange={event => changed(() => setInstanceKey(event.target.value))}><option value="">発生回を選択してください</option>{state.instances.filter(item => item.spec.ruleId === targetRuleId).map(item => <option key={item.generationKey} value={item.generationKey}>{item.spec.title} / {item.spec.scheduledDate ?? calendarDateAt(item.spec.startAt!, item.spec.timezone)}</option>)}</select></label>}
@@ -177,7 +202,10 @@ export default function RoutineAssistView({ state, settings, initialMessage = ''
         <p className="muted">相談文に書いた作業名と周期をそのまま指定してください。指定のない既存ポイントは保持します。</p>
         <div className="form-grid">
           <label className="field">本文に書いた作業名（編集で維持するなら空欄）<input aria-label="周期相談の本文作業名" maxLength={300} value={titleQuote} disabled={disabled} onChange={event => changed(() => setTitleQuote(event.target.value))} /></label>
-          <label className="field">明示した周期<select aria-label="周期相談の本人入力周期" value={triggerKind} disabled={disabled} onChange={event => changed(() => setTriggerKind(event.target.value as typeof triggerKind))}><option value="">周期を選択してください</option><option value="weekly">毎週の明示曜日</option><option value="monthly_business">毎月の営業日順位</option><option value="activity_relative">選択活動からの相対指定</option></select></label>
+          <label className="field">明示した周期<select aria-label="周期相談の本人入力周期" value={triggerKind} disabled={disabled} onChange={event => changed(() => setTriggerKind(event.target.value as typeof triggerKind))}><option value="">周期を選択してください</option><option value="weekly">毎週の明示曜日</option><option value="monthly_business">毎月の営業日順位</option><option value="activity_relative">選択活動からの相対指定</option><option value="rrule">繰り返し規則（毎日・隔週・毎月の日付・月末・第N曜日・毎年）</option><option value="completion_relative">前回の完了からN日後</option></select></label>
+          <button type="button" className="text-button" disabled={disabled || !message.trim()} onClick={readPeriod}>本文から周期を読み取る</button>
+          {triggerKind === 'rrule' && <label className="field">読み取った繰り返し規則<input aria-label="周期相談の繰り返し規則" readOnly value={rruleText ? (() => { try { return `${describeRRule(rruleText)}（${rruleText}）` } catch { return rruleText } })() : ''} placeholder="「本文から周期を読み取る」で表示" /></label>}
+          {triggerKind === 'completion_relative' && <label className="field">前回の完了から（日）<input aria-label="周期相談の完了からの日数" type="number" min={1} max={3650} value={afterDays} disabled={disabled} onChange={event => changed(() => setAfterDays(event.target.value))} /></label>}
           {triggerKind === 'monthly_business' && <><label className="field">数える向き<select aria-label="周期相談の営業日の向き" value={ordinalFrom} disabled={disabled} onChange={event => changed(() => setOrdinalFrom(event.target.value as typeof ordinalFrom))}><option value="">向きを選択してください</option><option value="start">月の最初から</option><option value="end">月の最後から</option></select></label><label className="field">第何営業日<input aria-label="周期相談の営業日順位" type="number" min={1} max={31} value={ordinal} disabled={disabled} onChange={event => changed(() => setOrdinal(event.target.value))} /></label></>}
           {triggerKind === 'activity_relative' && <><label className="field">活動の基準<select aria-label="周期相談の活動基準" value={edge} disabled={disabled} onChange={event => changed(() => setEdge(event.target.value as typeof edge))}><option value="">基準を選択してください</option><option value="start">開始</option><option value="end">終了</option></select></label><label className="field">基準からの日数<input aria-label="周期相談の相対日数" type="number" min={-366} max={366} value={relativeDays} disabled={disabled} onChange={event => changed(() => setRelativeDays(event.target.value))} /></label><label className="field">さらに分数<input aria-label="周期相談の相対分数" type="number" min={-10080} max={10080} value={relativeMinutes} disabled={disabled} onChange={event => changed(() => setRelativeMinutes(event.target.value))} /></label></>}
           <label className="field">本文に明示した本人指定ポイント（空欄は変更なし）<input aria-label="周期相談の本人指定ポイント" type="number" min={0} max={100000} value={points} disabled={disabled} onChange={event => changed(() => setPoints(event.target.value))} /></label>
@@ -185,7 +213,7 @@ export default function RoutineAssistView({ state, settings, initialMessage = ''
         {triggerKind === 'weekly' && <fieldset><legend>本文に明示した曜日</legend>{weekdays.map((name, day) => <label key={day}><input type="checkbox" aria-label={`周期相談の${name}曜日`} checked={weeklyDays.includes(day)} disabled={disabled} onChange={event => changed(() => setWeeklyDays(event.target.checked ? [...weeklyDays, day].sort() : weeklyDays.filter(value => value !== day)))} />{name}曜 </label>)}</fieldset>}
       </details>
     </>}
-    <p className="muted">毎日・隔週・固定日など未対応の周期や、時刻付きの締切は確認待ちになります。別の周期や日付へ置き換えません。</p>
+    <p className="muted">毎日・N日ごと・隔週・毎月の日付・月末・第N曜日・毎年・前回の完了からN日後は、本文の語をアプリが決定的に読み取り候補と照合します。除外・選択肢・おおよその周期・複数の周期は確認待ちになり、別の周期へ置き換えません。時刻付きの締切は、本人が選んだ締切時刻と一致する場合だけ保存します。</p>
     {candidate && <section aria-label="周期の候補"><h4>保存前の候補</h4><p>{candidate.definition.title} / {ruleWhen(candidate.definition.trigger)}</p><StepSummary steps={candidate.definition.steps} />{candidate.notices.map((item, index) => <p key={index}>{item}</p>)}</section>}
     <div className="routine-assist-actions"><button type="button" className="primary-button" disabled={disabled || !(sourceSuggestion?.message ?? message).trim()} onClick={event => void prepare(event.nativeEvent)}>本人の周期指定を確定して次の10回を確認</button>{onCancel && <button type="button" className="text-button" disabled={busy} onClick={onCancel}>周期候補を閉じる</button>}</div>
     {prepared && <section className="routine-assist-preview" aria-label="周期設定の確認案"><h4>保存される設定と次の10回</h4>
@@ -193,6 +221,8 @@ export default function RoutineAssistView({ state, settings, initialMessage = ''
       <p>カレンダー：{calendars.find(item => item.id === calendarId)?.name ?? '選択済みカレンダー'} / {context?.timezone} / 変更範囲：{scopeKind === 'all_uncompleted' ? '未完了すべて' : scopeKind === 'this_and_future' ? `${futureFrom}以後` : '今回だけ'}</p>
       {prepared.configuration.preview.length > 0 ? <ol>{prepared.configuration.preview.map(spec => <li key={spec.generationKey}>{spec.title}：{occurrenceWhen(spec)}{spec.score?.mode === 'manual' ? ` / ${spec.score.manualPoints}pt` : ''}</li>)}</ol> : <p>この期間の発生回はありません。期間と本人適用を確認してください。</p>}
       {prepared.configuration.conflicts.map((conflict, index) => <p role="alert" key={`${conflict.key}:${index}`}>{conflict.reason}</p>)}
+      {(prepared.configuration.notices ?? []).map((item, index) => <p role="status" key={`notice:${item.key}:${index}`}>{item.reason.includes('夏時間') ? '夏時間' : '確認'}：{item.reason}</p>)}
+      {(prepared.configuration.truncatedSeries ?? []).map((item, index) => <p role="status" key={`cut:${item.series}:${index}`}>切り詰め：{item.reason}</p>)}
       <p className="muted">設定の保存だけを行います。タスクや予定への反映は続く別の確認で行えます。</p>
       <label><input type="checkbox" aria-label="周期設定の差分を確認" checked={checked} disabled={busy} onChange={event => setChecked(event.target.checked)} />本人指定・カレンダー・期間・手順・ポイント・変更範囲を確認した</label>
       <div className="routine-assist-actions"><button type="button" className="primary-button" disabled={busy || !checked} onClick={event => void save(event.nativeEvent)}>確認した周期設定を保存</button><button type="button" className="text-button" disabled={busy} onClick={() => { cancelRoutineAssistance(prepared); setPrepared(null); setChecked(false); setNotice('設定案を取り消しました。本文と入力欄は残っています。') }}>設定案を取り消す</button></div>
