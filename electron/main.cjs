@@ -9,7 +9,8 @@ const { detectionMessages } = require('./detection.cjs')
 const { installFileBridgeIPC } = require('./file-bridge-ipc.cjs')
 const { installLocalActionIPC } = require('./local-action-ipc.cjs')
 const { installGitHubPublishIPC } = require('./github-publish-ipc.cjs')
-const { readNotificationContext } = require('./app-db-reader.cjs')
+const { readAppDatabase, readNotificationContext } = require('./app-db-reader.cjs')
+const { createNetworkGateway, policyFromSettings } = require('./network-gateway.cjs')
 const { createOSNotificationGuard } = require('./notification-delivery.cjs')
 
 const hasInstanceLock = app.requestSingleInstanceLock()
@@ -27,6 +28,7 @@ const keyPath = () => path.join(app.getPath('userData'), 'openrouter-key.bin')
 let sessionKey = null
 let chatInFlight = false
 let aiBudget = null
+let networkGateway = null
 const usageBudget = () => aiBudget ??= createAIBudget({ filePath: path.join(app.getPath('userData'), 'openrouter-usage.json') })
 
 function assertAppFrame(event) {
@@ -45,13 +47,23 @@ async function loadKey() {
   }
 }
 
+function egress() {
+  if (!networkGateway) throw new Error('通信経路を準備中です。もう一度操作してください')
+  return networkGateway
+}
+async function exists(file) { try { await fs.access(file); return true } catch { return false } }
+// Only file presence is checked: neither the key nor the GitHub token is decrypted for the policy.
+const legacyOnlineConfigured = async () => await exists(keyPath()) || await exists(path.join(app.getPath('userData'), 'github-achievements-private', 'connection.bin'))
+
 async function openRouterCompletion(kind, request) {
+  try { await egress().assertAllowed('openrouter') }
+  catch (error) { throw new Error(error?.code === 'NETWORK_POLICY_OFFLINE' ? 'AIはオフラインのため利用できません（オフライン専用の設定）。入力と下書きは残ります' : error.message) }
   const key = await loadKey()
   if (!key) throw new Error('OpenRouterのAPIキーを設定してください')
   const reservation = await usageBudget().reserve({ kind, reservedTokens: estimateReservationTokens(request.messages, request.max_tokens) })
   let response
   try {
-    response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+    response = await egress().fetch('openrouter', 'https://openrouter.ai/api/v1/chat/completions', {
       method: 'POST',
       headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json', 'X-OpenRouter-Title': 'michi Character Coach ToDo' },
       body: JSON.stringify(request), signal: AbortSignal.timeout(45000)
@@ -266,19 +278,27 @@ if (hasInstanceLock) app.whenReady().then(() => {
     catch { callback({ cancel: true }) }
   })
   session.defaultSession.setPermissionRequestHandler((_contents, _permission, callback) => callback(false))
+  // Spellcheck dictionaries are a Chromium download path outside the gateway.
+  session.defaultSession.setSpellCheckerEnabled(false)
 
   const win = new BrowserWindow({
     width: 1280, height: 830, minWidth: 380, minHeight: 550,
     backgroundColor: '#f7f7fb', title: 'michi — キャラクターコーチToDo',
     autoHideMenuBar: true,
-    webPreferences: { nodeIntegration: false, contextIsolation: true, sandbox: true, webSecurity: true, preload: path.join(__dirname, 'preload.cjs') }
+    webPreferences: { nodeIntegration: false, contextIsolation: true, sandbox: true, webSecurity: true, spellcheck: false, preload: path.join(__dirname, 'preload.cjs') }
   })
   win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
   win.webContents.on('will-navigate', (event, url) => { if (!url.startsWith('michi://app/')) event.preventDefault() })
+  networkGateway = createNetworkGateway({ getPolicy: async () => policyFromSettings(await readAppDatabase(win, 'settings', 'main'), await legacyOnlineConfigured()) })
+  ipcMain.handle('michi:network-status', async event => {
+    assertAppFrame(event)
+    await networkGateway.refresh()
+    return { ...networkGateway.status(), legacyOnlineConfigured: await legacyOnlineConfigured() }
+  })
   win.loadURL('michi://app/index.html')
   installFileBridgeIPC({ ipcMain, win, app, safeStorage })
   installLocalActionIPC({ ipcMain, win, app, safeStorage })
-  installGitHubPublishIPC({ ipcMain, win, app, safeStorage })
+  installGitHubPublishIPC({ ipcMain, win, app, safeStorage, fetchImpl: (url, init) => egress().fetch('github', url, init) })
   ipcMain.handle('michi:open-top-of-mind', event => {
     assertAppFrame(event)
     if (miniWin && !miniWin.isDestroyed()) { miniWin.show(); miniWin.focus(); return true }

@@ -12,6 +12,7 @@
     "test": "vitest run",
     "check:electron": "node scripts/electron-checks.mjs syntax",
     "test:electron": "node scripts/electron-checks.mjs test",
+    "check:pwa-offline": "node scripts/pwa-offline-check.mjs",
     "mcp:stdio": "node scripts/michi-mcp.mjs",
     "desktop": "npm run build && electron .",
     "package:win": "npm run build && powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package-portable.ps1"

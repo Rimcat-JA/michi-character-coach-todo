@@ -76,6 +76,7 @@ function githubPublishNativeCall(method, kind, reference, request) {
 }
 contextBridge.exposeInMainWorld('michiGitHubAchievements', {
   status: () => ipcRenderer.invoke('michi:githubpublish-status'),
+  storedStatus: () => ipcRenderer.invoke('michi:githubpublish-storedStatus'),
   inspectConfiguration: request => githubPublishNativeCall('inspectConfiguration', 'configure', 'inspect', request),
   configure: request => githubPublishNativeCall('configure', 'configure', request?.reference, request),
   publish: request => githubPublishNativeCall('publish', 'approve', request?.exportId, request),
@@ -99,6 +100,10 @@ contextBridge.exposeInMainWorld('michiAI', {
   verifyObligations: request => ipcRenderer.invoke('michi:ai-verify-obligations', request),
   usage: () => ipcRenderer.invoke('michi:ai-usage'),
   setUsageLimits: limits => ipcRenderer.invoke('michi:ai-usage-limits', limits)
+})
+
+contextBridge.exposeInMainWorld('michiNetwork', {
+  status: () => ipcRenderer.invoke('michi:network-status')
 })
 
 contextBridge.exposeInMainWorld('michiDesktop', {

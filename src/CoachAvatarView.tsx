@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { createAvatarController, importAvatarBundle, type AvatarBundle, type AvatarMode, type Live2DAdapter } from './avatar-media'
+import ExternalLink from './ExternalLink'
 
 export function CoachAvatarView({ name = 'コーチ', mode = 'idle', adapter = null, hidden = false, onHiddenChange }: { name?: string; mode?: AvatarMode; adapter?: Live2DAdapter | null; hidden?: boolean; onHiddenChange?: (value: boolean) => void }) {
   const canvas = useRef<HTMLCanvasElement>(null), [bundle, setBundle] = useState<AvatarBundle | null>(null), [state, setState] = useState<{ status: 'static' | 'loading' | 'animated'; notice: string }>({ status: 'static', notice: '' })
@@ -23,7 +24,7 @@ export function CoachAvatarView({ name = 'コーチ', mode = 'idle', adapter = n
       <label className="field">本人の静止画像（PNG/JPEG/WebP・最大10 MiB）<input type="file" accept="image/png,image/jpeg,image/webp" onChange={event => { const file = event.target.files?.[0]; event.target.value = ''; if (!file) return; if (!['image/png', 'image/jpeg', 'image/webp'].includes(file.type) || file.size > 10 * 1024 * 1024 || !file.size) { setError('PNG/JPEG/WebPの静止画像を10 MiBまで選択してください'); return }; setImageURL(URL.createObjectURL(file)); setImageFailed(false); setError('') }} /></label>{imageURL && <button className="text-button" onClick={() => { setImageURL(''); setImageFailed(false) }}>本人画像を解除</button>}
       <label style={{ display: 'block', marginTop: 12 }}><input type="checkbox" checked={rights} onChange={event => setRights(event.target.checked)} /> この端末で使うLive2D素材を所有しているか、利用許諾を確認しました</label><label className="field">利用権利の確認メモ<input value={rightsNote} maxLength={2000} onChange={event => setRightsNote(event.target.value)} /></label>
       <label className="field">model3.json を含む本人フォルダー<input type="file" multiple disabled={!rights || !rightsNote.trim()} {...{ webkitdirectory: '', directory: '' }} onChange={async event => { const files = Array.from(event.target.files ?? []); event.target.value = ''; setError(''); try { setBundle(await importAvatarBundle(files, { ownsOrLicensed: true, usageNote: rightsNote, redistributionAllowed: false })) } catch (failure) { setError(failure instanceof Error ? failure.message : String(failure)) } }} /></label>{bundle && <><p>選択中: {bundle.name} · {bundle.resources.size}参照ファイル。外部公開・再配布の許可は付与していません。</p><button className="text-button" onClick={() => setBundle(null)}>モデルを解除</button></>}
-      <p><a href="https://www.live2d.com/sdk/license/" target="_blank" rel="noreferrer">Live2DのSDK利用・公開条件を確認</a></p>
+      <p><ExternalLink href="https://www.live2d.com/sdk/license/">Live2DのSDK利用・公開条件を確認</ExternalLink></p>
     </details>{state.notice && <p role="status">{state.notice}</p>}{!adapter && <p className="muted">Live2D SDKは未提供のため静止表示です。</p>}{error && <p role="alert">{error}</p>}
   </section>
 }
