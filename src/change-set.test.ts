@@ -1,6 +1,7 @@
 import 'fake-indexeddb/auto'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { db, ensureSettings } from './db'
+import { changeAuditFact, operationsForFields, presetRules } from './automation-policy'
 import { completeTask, createTask, newTaskInput, updateTask } from './commands'
 import { emptyScore, type Settings } from './domain'
 import { contentDigest } from './canonical'
@@ -372,6 +373,17 @@ describe('時刻付き締め切りのChangeSet',()=>{
     await applyChangeSet(prepared,await approveChangeSetFromUI(prepared,full(owner),humanClick(),['dueDate','dueAt']),full(coach),'deadline-clock')
     expect(await db.tasks.get(taskId)).toMatchObject({dueDate:'2026-10-05',dueAt:'2026-10-05T08:00:00.000Z',dueTimezone:'Asia/Tokyo',scheduledDate:'2026-10-01',effectivePoints:25})
     await setPolicy({fieldRules:{dueDate:'deny'}});await expect(instructed({dueAt:null})).rejects.toMatchObject({code:'CHANGES_STOPPED'})
+  })
+  it('N09の操作表では締め切り時刻もtask.deadline（本人確認のみ・自動にならない）として扱う',async()=>{
+    expect(operationsForFields(['dueAt'])).toEqual(['task.deadline']);expect(operationsForFields(['dueDate','dueAt'])).toEqual(['task.deadline'])
+    await setPolicy({operations:presetRules('A3')})
+    const set=await instructed({dueDate:'2026-10-05',dueAt:clock})
+    expect(decideChangePolicy(set,changePolicyFor((await db.settings.get('main'))!))).toMatchObject({status:'awaiting_approval',protectedFields:['dueDate','dueAt']})
+    await applyChangeSet(set,await approveChangeSetFromUI(set,full(owner),humanClick(),['dueDate','dueAt']),full(coach),'a3-clock')
+    const fact=(await db.audits.toArray()).map(changeAuditFact).find(item=>item?.changeSetId===set.id)
+    expect(fact).toMatchObject({fields:['dueDate','dueAt'],operations:['task.deadline']})
+    await setPolicy({operations:presetRules('A3').map(rule=>rule.operation==='task.deadline'?{...rule,mode:'deny' as const}:rule)})
+    await expect(instructed({dueAt:null})).rejects.toMatchObject({code:'CHANGES_STOPPED'})
   })
   it('日付と時刻の不一致、時刻を残した日付だけの移動を拒否する',async()=>{
     await expect(instructed({dueDate:'2026-10-06',dueAt:clock})).rejects.toMatchObject({code:'INVALID_INPUT'})

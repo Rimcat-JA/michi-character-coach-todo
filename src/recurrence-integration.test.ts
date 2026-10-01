@@ -9,6 +9,7 @@ import { calendarFixture, monthlyRule } from './calendar-test-fixtures'
 import type { CalendarRule, CalendarRulesState } from './calendar-resolver'
 import { applyCalendarProposalFromUI, clearCalendarRulesAuthority, loadCalendarRulesState, prepareCalendarConfiguration, prepareCalendarGeneration, type CalendarRulesConfiguration } from './calendar-rules-save'
 import { validateCalendarRulesRecords } from './calendar-rules-validation'
+import { emergencyStop, reduceAuthority } from './automation-control'
 
 const click = () => { const event = new Event('click'); Object.defineProperty(event, 'isTrusted', { value: true }); return event }
 const at = (iso: string) => vi.setSystemTime(new Date(iso))
@@ -120,5 +121,26 @@ describe('次の10回の確認', () => {
     const leap = await prepareCalendarConfiguration(config(state), 1, '2026-10-01', '2026-12-30', 'leap')
     expect(leap.preview.map(spec => spec.scheduledDate)).toEqual(['2028-02-29', '2032-02-29', '2036-02-29'])
     expect(await db.tasks.count()).toBe(0); expect(await db.calendarRules.count()).toBe(0)
+  })
+})
+
+describe('N09の停止スイッチとN05の系列生成', () => {
+  it.each(['routines', 'emergency'] as const)('%s 停止中はRRULE系列も完了起点の次の回も生成せず、停止前の確認案も適用しない', async scope => {
+    await save([
+      monthlyRule({ id: 'meeting', title: '町内会の資料確認', trigger: { kind: 'rrule', dtstart: '2026-10-13T10:00', rrule: 'FREQ=MONTHLY;BYDAY=2TU', rdates: [], exdates: [], nonexistentTime: 'skip', ambiguousTime: 'earlier' }, steps: [{ ...step(25), title: '町内会の資料確認' }] }),
+      monthlyRule({ id: 'water', title: '植物の水やり', trigger: { kind: 'completion_relative', firstDate: '2026-10-01', time: '09:00', afterDays: 14, unfinishedPolicy: 'generate_after_completion' }, steps: [step(10)] }),
+    ])
+    await applyCalendarProposalFromUI(await prepareCalendarGeneration('2026-09-17', '2026-10-31'), click())
+    expect((await live()).map(task => task.generationKey).sort()).toEqual(['calendar:rule:meeting:anchor:2026-10-13:main', 'calendar:rule:water:chain:0:main'])
+    const first = await byKey(':chain:0:main'); at('2026-10-01T03:00:00.000Z'); await completeTask(first.id, first.revision)
+    const pending = await prepareCalendarGeneration('2026-09-17', '2026-12-31')
+    expect(pending.plan.creates.map(spec => spec.generationKey).sort()).toEqual(['calendar:rule:meeting:anchor:2026-11-10:main', 'calendar:rule:meeting:anchor:2026-12-08:main', 'calendar:rule:water:chain:1:main'])
+    const tasksBefore = await db.tasks.toArray(), stateBefore = await loadCalendarRulesState()
+    if (scope === 'routines') await reduceAuthority('routines', 'button'); else await emergencyStop('button')
+    await expect(prepareCalendarGeneration('2026-09-17', '2026-12-31')).rejects.toThrow('停止中')
+    // The stop also invalidates proposals prepared before it, so nothing generated earlier can be applied afterwards.
+    await expect(applyCalendarProposalFromUI(pending, click())).rejects.toThrow()
+    expect(await db.tasks.toArray()).toEqual(tasksBefore); expect(await loadCalendarRulesState()).toEqual(stateBefore)
+    expect((await live()).map(task => task.generationKey).sort()).toEqual(['calendar:rule:meeting:anchor:2026-10-13:main', 'calendar:rule:water:chain:0:main'])
   })
 })
