@@ -9,6 +9,7 @@ import { makeWebCaptureCapsule, prepareWebCaptureImport, saveCaptureImportFromUI
 import { clearDetectionAuthority, detectObligationsForSource, prepareDetectionFromUI } from './detection-run'
 import { purgeExpiredCoachContext } from './context-retention'
 import { migrateLegacyDetectionNotes } from './task-source-evidence'
+import { captureSnapshot, restoreBackup } from './backup'
 import { retentionDefaults, retentionDraft, retentionFromDateInput, retentionValue } from './retention-defaults'
 import RetentionChoice from './RetentionChoice'
 import { unlimitedRetentionNotice } from './retention-notice'
@@ -56,7 +57,13 @@ describe('K11 設計23.2の既定保持期間', () => {
     const row = (await db.contextSources.get(sourceId))!, settings = (await db.settings.get('main'))!
     const prepared = await prepareDetectionFromUI(sourceId, row.revision, settings.aiModel!, { confirmedAliases: [], authorIsOwner: false, existingTaskIds: [] }, humanClick())
     const newer = await detectObligationsForSource(prepared, syntheticTransport(prepared, '別の未採用候補'))
+    const older = await captureSnapshot()
+    expect(older.sourceArtifacts).toHaveLength(2)
     vi.setSystemTime(new Date(plus(30)))
+    // Backups taken or restored after day 30 never carry the expired candidate.
+    expect((await captureSnapshot()).sourceArtifacts!.map(item => item.id)).toEqual([`detection:${newer.id}`])
+    await restoreBackup(older)
+    expect((await db.sourceArtifacts.toArray()).map(item => item.id)).toEqual([`detection:${newer.id}`])
     await purgeExpiredCoachContext()
     expect((await db.sourceArtifacts.toArray()).map(item => item.id)).toEqual([`detection:${newer.id}`])
     expect(await db.tasks.get(adopted.taskId)).toMatchObject({ title: '非公開見積を送る' })

@@ -11,7 +11,7 @@ import { clearRoutineAssistanceAuthority } from './routine-assist-save'
 import { clearCompletionReconfirmationAuthority } from './completion-reconfirmation'
 import { invalidateExternalConnection } from './external-connection'
 import { restoreCoachNotificationState } from './coach-notifications'
-import { deleteSource, purgeExpiredSources } from './source-library'
+import { deleteSource, purgeExpiredDetectionCandidates, purgeExpiredSources } from './source-library'
 import { migrateLegacyDetectionNotes, restorableTaskSourceEvidence, verifyTaskSourceEvidenceDigests } from './task-source-evidence'
 import { purgeExpiredMemories } from './coach-memory'
 import { purgeExpiredConversations } from './chat-history'
@@ -43,6 +43,7 @@ async function key(password: string, salt: Uint8Array) {
 }
 export async function captureSnapshot(): Promise<Snapshot> {
   await purgeExpiredSources()
+  await purgeExpiredDetectionCandidates()
   await purgeExpiredMemories()
   await purgeExpiredConversations()
   await purgeExpiredCalendarOriginals()
@@ -153,6 +154,7 @@ export async function restoreBackup(snapshot: Snapshot) {
   await purgeExpiredConversations()
   await purgeExpiredCalendarOriginals()
   await purgeExpiredCSVOriginals()
+  await purgeExpiredDetectionCandidates()
   for (const id of erasedHere) { const source = await db.contextSources.get(id); if (source && !source.deletedAt && source.ownerId === ownerId) await deleteSource(id, source.revision) }
   await migrateLegacyDetectionNotes()
 }
