@@ -92,6 +92,7 @@ contextBridge.exposeInMainWorld('michiAI', {
   assistTask: request => ipcRenderer.invoke('michi:ai-assist-task', request),
   assessScore: request => ipcRenderer.invoke('michi:ai-assess-score', request),
   proposeTaskChange: request => ipcRenderer.invoke('michi:ai-propose-task-change', request),
+  proposeRoutine: request => ipcRenderer.invoke('michi:ai-propose-routine', request),
   detectObligations: request => ipcRenderer.invoke('michi:ai-detect-obligations', request),
   verifyObligations: request => ipcRenderer.invoke('michi:ai-verify-obligations', request),
   usage: () => ipcRenderer.invoke('michi:ai-usage'),

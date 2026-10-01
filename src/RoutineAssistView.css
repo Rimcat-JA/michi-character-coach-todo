@@ -1,0 +1,20 @@
+.routine-assist-view { display: grid; gap: 1rem; min-width: 0; overflow-wrap: anywhere; }
+.routine-assist-view h3, .routine-assist-view h4, .routine-assist-view p { margin: 0; }
+.routine-assist-view details { border: 1px solid var(--line, #cfd7e3); border-radius: .65rem; padding: .8rem; }
+.routine-assist-view details[open] > summary { margin-bottom: .8rem; }
+.routine-assist-view .form-grid, .routine-assist-view fieldset { margin: .8rem 0; min-width: 0; }
+.routine-assist-view .form-grid > *, .routine-assist-view .field, .routine-assist-view details, .routine-assist-view button { min-width: 0; }
+.routine-assist-view fieldset { border: 1px solid var(--line, #cfd7e3); border-radius: .5rem; padding: .7rem; }
+.routine-assist-view fieldset label { display: inline-flex; gap: .25rem; align-items: center; margin: .25rem .6rem .25rem 0; }
+.routine-assist-view li { overflow-wrap: anywhere; margin-bottom: .35rem; }
+.routine-assist-view select, .routine-assist-view input, .routine-assist-view textarea { max-width: 100%; min-width: 0; box-sizing: border-box; }
+.routine-assist-view select, .routine-assist-view input:not([type="checkbox"]), .routine-assist-view textarea { width: 100%; }
+.routine-assist-actions { display: flex; flex-wrap: wrap; gap: .65rem; }
+.routine-assist-preview { display: grid; gap: .75rem; padding: 1rem; border: 1px solid var(--line, #cfd7e3); border-radius: .65rem; }
+@media (max-width: 600px) {
+  .routine-assist-view .form-grid { grid-template-columns: minmax(0, 1fr); }
+  .routine-assist-view button { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
+  .routine-assist-actions > button { width: 100%; }
+  .routine-assist-preview { padding: .75rem; }
+  .detection-inbox .routine-assist-view { padding: .75rem; }
+}

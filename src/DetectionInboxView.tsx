@@ -2,9 +2,11 @@ import { useEffect, useState } from 'react'
 import { useLiveQuery } from 'dexie-react-hooks'
 import { changePolicyFor } from './change-set'
 import { sourceDb as db, type ContextSource } from './source-library'
-import { applyDetectionCreateFromUI, detectObligationsForSource, discardDetectionRun, isLiveDetectionRun, prepareDetectionCreate, prepareDetectionFromUI, savedDetectionRuns, type DetectionCreationReceipt, type DetectionRun, type DetectionTransport, type PreparedDetectionCreate } from './detection-run'
+import { applyDetectionCreateFromUI, applyDetectionRecurrenceFromUI, detectObligationsForSource, discardDetectionRun, isLiveDetectionRun, prepareDetectionCreate, prepareDetectionFromUI, prepareDetectionRecurrenceFromUI, savedDetectionRuns, type DetectionCreationReceipt, type DetectionRun, type DetectionTransport, type PreparedDetectionCreate } from './detection-run'
 import type { DetectionChange } from './detection-contract'
 import type { Settings, Task } from './domain'
+import { loadCalendarRulesState } from './calendar-rules-save'
+import RoutineAssistView from './RoutineAssistView'
 
 type Props={settings:Settings;tasks:Task[];onEdit?:(task:Task)=>void;onCreated?:(receipt:DetectionCreationReceipt)=>void}
 type Bridge={detectObligations?:DetectionTransport['detect'];verifyObligations?:DetectionTransport['verify']}
@@ -43,9 +45,12 @@ function DetectionSourceForm({source,settings,tasks,onDetected,at}:{source:Conte
 
 function DetectionRunCard({run,source,settings,tasks,onEdit,onCreated,onDiscard,at}:{run:DetectionRun;source:ContextSource|undefined;settings:Settings;tasks:Task[];onEdit?:Props['onEdit'];onCreated?:Props['onCreated'];onDiscard:(id:string)=>void;at:number}){
   const [prepared,setPrepared]=useState<PreparedDetectionCreate|null>(null),[checked,setChecked]=useState(false),[busy,setBusy]=useState(false),[notice,setNotice]=useState(''),[created,setCreated]=useState<string[]>([])
+  const [recurrenceId,setRecurrenceId]=useState<string|null>(null),[adoptedRecurrences,setAdoptedRecurrences]=useState<string[]>([])
+  const calendarState=useLiveQuery(()=>loadCalendarRulesState(),[settings.profileId,settings.datasetId])
   const policy=changePolicyFor(settings)
-  const current=Boolean(source&&sourceUsable(source,settings,at)&&settings.aiEnabled&&run.ownerId===settings.profileId&&run.datasetId===settings.datasetId&&run.policyEpoch===policy.epoch&&run.sourcePermissionRevision===policy.sourcePermissionRevision&&run.source.sourceRevision===source.revision&&run.source.snapshotRevision===source.latestRevision&&run.source.permissionRevision===source.permissionRevision&&Date.parse(run.expiresAt)>at)
+  const current=Boolean(source&&sourceUsable(source,settings,at)&&settings.aiEnabled&&run.detectorModel===settings.aiModel&&run.ownerId===settings.profileId&&run.datasetId===settings.datasetId&&run.policyEpoch===policy.epoch&&run.sourcePermissionRevision===policy.sourcePermissionRevision&&run.source.sourceRevision===source.revision&&run.source.snapshotRevision===source.latestRevision&&run.source.permissionRevision===source.permissionRevision&&Date.parse(run.expiresAt)>at)
   const sessionLive=current&&isLiveDetectionRun(run)
+  const recurrence=run.candidates.find(candidate=>candidate.id===recurrenceId&&candidate.change.action==='define_recurrence')
   async function prepare(candidateId:string){setBusy(true);setNotice('');try{setPrepared(await prepareDetectionCreate(run,candidateId));setChecked(false)}catch(error){setNotice(errorText(error))}finally{setBusy(false)}}
   async function apply(event:Event){
     if(!prepared||!checked||busy||!sessionLive)return
@@ -64,18 +69,22 @@ function DetectionRunCard({run,source,settings,tasks,onEdit,onCreated,onDiscard,
         return <div className="setting-section" key={candidate.id}>
           <h4>{actionNames[change.action]}：{change.title??target?.title??'対象を確認'}</h4>
           <p>{basisNames[change.basis]} · {candidate.reason}</p>
-          {change.action==='create'?<p>期限：{change.due.kind==='date'?change.due.value:change.due.kind==='datetime'?`${change.due.value}（時刻付き期限は手動確認）`:change.due.kind==='unresolved'?'未確定（登録時に期限は空欄）':'記載なし'} · 点数・時間・優先度は推定しません。</p>:<>
+          {change.action==='create'?<p>期限：{change.due.kind==='date'?change.due.value:change.due.kind==='datetime'?`${change.due.value}（時刻付き期限は手動確認）`:change.due.kind==='unresolved'?'未確定（登録時に期限は空欄）':'記載なし'} · 点数・時間・優先度は推定しません。</p>:change.action==='define_recurrence'?<>
+            <p>周期の原文：{change.recurrence?.raw}。本人が対象・参加条件・名前付きカレンダー・有効期間・時刻を選び、設定だけを確認できます。</p>
+            <p className="muted">周期の設定保存と、タスク・占有予定への反映は別に承認します。点数や準備作業は推定しません。</p>
+            {change.due.kind==='datetime'&&<p role="alert">時刻付きの本当の期限は日付や予定時刻へ省略できません。原文を確認して手動編集してください。</p>}
+          </>:<>
             <p>既存対象：{target?.title??change.target_task_id??'未確定'} · 候補の基準版 {change.expected_revision??'なし'}</p>
             {change.action==='update'&&<p>変更する項目：{change.change_fields.join(', ')}{change.change_fields.includes('due')?` / 期限 ${target?.dueDate??'未設定'} → ${change.due.value??change.due.raw??'未確定'}`:''}</p>}
             {change.action==='cancel'&&<p>現在 {target?.status??'不明'} → 取消の確認候補。タスクはまだ取り消していません。</p>}
             {change.action==='report_completion'&&<p>現在 {target?.status??'不明'} → 完了報告の確認候補。完了登録と加点はしていません。</p>}
-            {change.action==='define_recurrence'&&<p>周期の原文：{change.recurrence?.raw}。ルーティン作成・分割・権限追加はしていません。</p>}
-            <p className="muted">期限・取消・完了・周期の変更はこのInboxから適用できません。原文と既存内容を確認し、本人が手動編集してください。</p>
+            <p className="muted">期限・取消・完了の変更はこのInboxから適用できません。原文と既存内容を確認し、本人が手動編集してください。</p>
             {targetStale&&<p role="alert">対象タスクの版が変わっています。現在のタスクを確認してください。</p>}
             {onEdit&&target&&<button type="button" className="text-button" disabled={busy} onClick={()=>onEdit(target)}>既存タスクを本人が確認・編集</button>}
           </>}
           <details><summary>根拠の原文と検証</summary>{change.evidence.map((evidence,index)=><blockquote key={index}><p style={{whiteSpace:'pre-wrap'}}>{evidence.quote}</p><small>{evidence.source_id} / 内容版 {evidence.revision} / {evidence.span_id} / 支持項目 {evidence.supports.join(', ')}</small></blockquote>)}{candidate.verification?.checks.map(check=><p key={check.field}>検証判定 {check.field}: {check.verdict} · 参照 {check.source_refs.join(', ')}</p>)}</details>
           {created.includes(candidate.id)?<p>登録結果を受領した候補です。</p>:candidate.status==='ready-for-review'&&change.action==='create'&&<button type="button" className="secondary-button" disabled={!sessionLive||busy||Boolean(prepared)} onClick={()=>void prepare(candidate.id)}>タスクにする内容を確認</button>}
+          {adoptedRecurrences.includes(candidate.id)?<p>周期の設定結果を受領した候補です。発生回への反映は共通カレンダーで別に確認してください。</p>:candidate.status==='ready-for-review'&&change.action==='define_recurrence'&&change.due.kind!=='datetime'&&<button type="button" className="secondary-button" disabled={!sessionLive||busy||Boolean(prepared)||Boolean(recurrenceId)} onClick={()=>setRecurrenceId(candidate.id)}>周期の設定を確認</button>}
         </div>
       })}
       {run.reviewItems.length>0&&<div className="setting-section"><h4>検出を確定するための確認事項</h4>{run.reviewItems.map((item,index)=><p key={index}>{item.question} <small>({item.reason})</small></p>)}<p className="muted">確認事項は作業タスクではありません。件数やポイントに数えません。</p></div>}
@@ -86,6 +95,7 @@ function DetectionRunCard({run,source,settings,tasks,onEdit,onCreated,onDiscard,
         <label><input type="checkbox" aria-label="検出候補の根拠と本人担当を承認" checked={checked} disabled={busy} onChange={event=>setChecked(event.target.checked)}/> 行為・本人担当・現在も必要であること・原文の根拠・期限の意味を確認し、この候補の登録を承認する</label>
         <div className="export-buttons"><button type="button" className="primary-button" disabled={busy||!checked} onClick={event=>void apply(event.nativeEvent)}>確認したこの候補を登録</button><button type="button" className="text-button" disabled={busy} onClick={()=>{setPrepared(null);setChecked(false)}}>登録確認を戻す</button></div>
       </div>}
+      {recurrence&&calendarState&&sessionLive&&<RoutineAssistView key={recurrence.id} state={calendarState} settings={settings} heading="検証済み周期の本人採用" allowAI={false} sourceSuggestion={{message:`${recurrence.change.title}\n${recurrence.change.recurrence!.raw}`,prepare:(input,event)=>prepareDetectionRecurrenceFromUI(run,recurrence.id,input,event),apply:(proposal,digest,event)=>applyDetectionRecurrenceFromUI(run,recurrence.id,proposal,digest,event)}} onSaved={()=>{setAdoptedRecurrences(current=>[...current,recurrence.id]);setRecurrenceId(null);setNotice('本人が確認した周期の設定を受領しました。タスク・予定への反映は共通カレンダーで別に確認してください。')}} onCancel={()=>setRecurrenceId(null)}/>}
     </>}
     {notice&&<p role="status">{notice}</p>}
   </article>

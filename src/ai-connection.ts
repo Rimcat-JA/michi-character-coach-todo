@@ -3,6 +3,7 @@ import { changePolicyFor, clearChangeSetAuthority, validateChangePolicy } from '
 import { clearDetectionAuthority } from './detection-run'
 import { clearCoachTurnAuthority } from './chat-history'
 import { clearCalendarRulesAuthority } from './calendar-rules-save'
+import { clearRoutineAssistanceAuthority } from './routine-assist-save'
 import { invalidateExternalConnection } from './external-connection'
 
 export async function updateAIConnection(enabled: boolean, model?: string) {
@@ -19,5 +20,6 @@ export async function updateAIConnection(enabled: boolean, model?: string) {
   clearDetectionAuthority()
   clearCoachTurnAuthority()
   clearCalendarRulesAuthority()
+  clearRoutineAssistanceAuthority()
   await invalidateExternalConnection()
 }
