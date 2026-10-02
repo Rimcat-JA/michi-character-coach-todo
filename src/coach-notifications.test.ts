@@ -98,9 +98,16 @@ describe('K05/N07 共通通知ポリシー', () => {
     expect(settleCoachNotificationDelivery(begin.state, 'notification', 'os', 'stale-attempt', 'accepted_by_provider', at)).toEqual(begin.state)
   })
   it('AI停止時は同じ事実の定型文を使い、保存済みAI文と区別する', () => {
-    const req = request({ purpose: 'deadline_near', text: { factual: '登録済みの期限を確認してください', savedAI: '以前AIで生成した文面' } }), initial = reserved(req)
-    expect(beginCoachNotificationDelivery(initial, req.id, 'os', 'ai', guard(req), at).payload).toMatchObject({ body: req.text.savedAI, provenance: 'saved-ai' })
-    expect(beginCoachNotificationDelivery(initial, req.id, 'os', 'off', { ...guard(req), aiEnabled: false }, at).payload).toMatchObject({ body: req.text.factual, provenance: 'factual-template' })
+    const digest = 'a'.repeat(64), req = request({ purpose: 'deadline_near', text: { factual: '登録済みの期限を確認してください', savedAI: '以前AIで生成した文面', savedAIModel: 'model/a', factsDigest: digest } }), initial = reserved(req)
+    expect(beginCoachNotificationDelivery(initial, req.id, 'os', 'ai', { ...guard(req), factsDigest: digest, aiModel: 'model/a' }, at).payload).toMatchObject({ body: req.text.savedAI, provenance: 'saved-ai' })
+    expect(beginCoachNotificationDelivery(initial, req.id, 'os', 'off', { ...guard(req), aiEnabled: false, factsDigest: digest, aiModel: 'model/a' }, at).payload).toMatchObject({ body: req.text.factual, provenance: 'factual-template' })
+    // The owner switched models after the wording was saved: the saved text is kept but not used.
+    expect(beginCoachNotificationDelivery(initial, req.id, 'os', 'switched', { ...guard(req), factsDigest: digest, aiModel: 'model/b' }, at).payload).toMatchObject({ body: req.text.factual, provenance: 'factual-template' })
+    expect(beginCoachNotificationDelivery(initial, req.id, 'os', 'nomodel', { ...guard(req), factsDigest: digest, aiModel: null }, at).payload).toMatchObject({ body: req.text.factual, provenance: 'factual-template' })
+    // Facts changed after the wording was saved (or no digest recomputed): the factual template is used.
+    expect(beginCoachNotificationDelivery(initial, req.id, 'os', 'changed', { ...guard(req), factsDigest: 'b'.repeat(64) }, at).payload).toMatchObject({ body: req.text.factual, provenance: 'factual-template' })
+    const unbound = request({ id: 'unbound', purpose: 'deadline_near', target: { kind: 'task', id: 'other', revision: 1 }, text: { factual: '登録済みの期限', savedAI: '束縛のないAI文' } })
+    expect(beginCoachNotificationDelivery(reserved(unbound), unbound.id, 'os', 'x', { ...guard(unbound), factsDigest: digest }, at).payload).toMatchObject({ provenance: 'factual-template' })
   })
   it('共有先では私的タスク名・保存済みAI文を送らない', () => {
     const initial = policyPatch(state(), { destinations: [{ id: 'shared', channel: 'messenger', label: '共有', approved: true, shared: true, permissionRevision: 0 }] })

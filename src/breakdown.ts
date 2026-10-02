@@ -3,7 +3,7 @@ import { db } from './db'
 import { calculateScore, emptyScore, uid, type Assessment, type Task } from './domain'
 import { synchronizeAllocationCompletion } from './allocation-completion'
 
-export type ResistanceReason = 'unclear' | 'large' | 'waiting' | 'priority' | 'difficult'
+export type ResistanceReason = 'unclear' | 'large' | 'waiting' | 'priority' | 'difficult' | 'instruction'
 export type BreakdownStep = { title: string; points: number }
 export type BreakdownProposal = { id: string; taskId: string; parentRevision: number; reason: ResistanceReason; steps: BreakdownStep[] }
 
@@ -13,10 +13,13 @@ const stepNames: Record<ResistanceReason, string[]> = {
   waiting: ['待っている相手・情報を確認する', '今できる部分を進める', '返答後に残りを進める'],
   priority: ['必要な範囲を決める', '最初の部分を進める', '残りを仕上げる'],
   difficult: ['着手しやすい一歩を決める', '短時間だけ試す', '残りを進める'],
+  // Parts named by the person in a coach consultation (coach-split.ts); never suggested by the app.
+  instruction: [],
 }
 
 export function suggestBreakdown(task: Task, reason: ResistanceReason): BreakdownProposal {
   if (task.deletedAt || task.status !== 'open') throw new Error('未完了のタスクだけ分割できます')
+  if (!stepNames[reason].length) throw new Error('分割の理由を選んでください')
   if (!['manual', 'allocated'].includes(task.score.mode) || task.score.manualPoints === null || !Number.isInteger(task.score.manualPoints)) throw new Error('分割前に必要ポイントを手動で確定してください')
   const total = task.score.manualPoints
   const base = Math.floor(total / 3)
@@ -24,8 +27,9 @@ export function suggestBreakdown(task: Task, reason: ResistanceReason): Breakdow
   return { id: uid(), taskId: task.id, parentRevision: task.revision, reason, steps: stepNames[reason].map((title, index) => ({ title: `${task.title}：${title}`, points: points[index] })) }
 }
 
-export async function applyBreakdownProposal(proposal: BreakdownProposal): Promise<string[]> {
-  if (!proposal.id || !proposal.taskId || !stepNames[proposal.reason]) throw new Error('分割案が不正です')
+/** audit: coach-mediated splits record their origin and the digest of the person's instruction. */
+export async function applyBreakdownProposal(proposal: BreakdownProposal, audit?: { origin: 'coach_split_from_instruction'; instructionDigest: string }): Promise<string[]> {
+  if (!proposal.id || !proposal.taskId || !stepNames[proposal.reason] || (proposal.reason === 'instruction') !== Boolean(audit)) throw new Error('分割案が不正です')
   if (proposal.steps.length < 2 || proposal.steps.length > 20) throw new Error('分割は2〜20件で指定してください')
   const steps = proposal.steps.map(step => ({ title: step.title.trim(), points: step.points }))
   if (steps.some(step => !step.title || step.title.length > 300 || !Number.isInteger(step.points) || step.points < 0 || step.points > 100000)) throw new Error('各手順の名前と配分ポイントを確認してください')
@@ -55,14 +59,14 @@ export async function applyBreakdownProposal(proposal: BreakdownProposal): Promi
       const id = uid(), itemId = uid(), assessmentId = uid()
       const score = { ...emptyScore(), mode: 'allocated' as const, manualPoints: step.points }
       const result = calculateScore(score)
-      const child: Task = { ...newTaskInput(), id, generationKey: `breakdown:${proposal.id}:${index}`, routineId: null, title: step.title, notes: '', project: parent.project, containerId: parent.containerId ?? null, labels: [...parent.labels], scheduledDate: parent.scheduledDate, dueDate: parent.dueDate, targetDate: parent.targetDate, reviewDate: null, availableFrom: parent.availableFrom, importance: parent.importance, score, effectivePoints: result.effective, assessmentId, status: 'open', revision: 1, createdAt: at, updatedAt: at, deletedAt: null }
+      const child: Task = { ...newTaskInput(), id, generationKey: `breakdown:${proposal.id}:${index}`, routineId: null, title: step.title, notes: '', project: parent.project, containerId: parent.containerId ?? null, labels: [...parent.labels], scheduledDate: parent.scheduledDate, dueDate: parent.dueDate, ...(parent.dueAt ? { dueAt: parent.dueAt, dueTimezone: parent.dueTimezone ?? null } : {}), targetDate: parent.targetDate, reviewDate: null, availableFrom: parent.availableFrom, importance: parent.importance, score, effectivePoints: result.effective, assessmentId, status: 'open', revision: 1, createdAt: at, updatedAt: at, deletedAt: null }
       await db.tasks.add(child)
       await db.assessments.add({ id: assessmentId, taskId: id, score, result, createdAt: at, origin: 'human', ruleVersion: 'v1' })
       await db.checklistItems.add({ id: itemId, taskId: parent.id, text: step.title, done: false, convertedTaskId: id, createdAt: at, updatedAt: at })
       await db.audits.add({ id: uid(), taskId: id, operation: 'create_from_breakdown', at, detail: `親タスク ${parent.id} の分割案 ${proposal.id} から作成` })
       ids.push(id)
     }
-    await db.audits.add({ id: uid(), taskId: parent.id, operation: 'breakdown', at, detail: `${proposal.reason}: ${total}ptを${ids.length}件へ配分` })
+    await db.audits.add({ id: uid(), taskId: parent.id, operation: 'breakdown', at, detail: `${proposal.reason}: ${total}ptを${ids.length}件へ配分${audit ? ` · origin=${audit.origin} · instruction=${audit.instructionDigest}` : ''}` })
     await db.commands.add({ key: `breakdown:${proposal.id}`, hash, resultId: JSON.stringify(ids), at })
     return ids
   })

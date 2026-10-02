@@ -10,6 +10,7 @@ import { emptyCalendarRulesState, mergeScheduleImport, prepareScheduleImport, va
 import { redactICSForAudit } from './calendar-import-redaction'
 import { redactCSVForAudit } from './calendar-csv-redaction'
 import { csvHeadHasRetainedEvidence } from './calendar-resolver'
+import { queueCalendarChangeNotifications, type CalendarMove } from './coach-triggers'
 
 const calendarDB = db as typeof db & { calendarRules: EntityTable<CalendarRulesState, 'id'> }
 const table = () => { if (!calendarDB.calendarRules) throw new Error('共通カレンダーの保存先がありません。アプリを更新してください'); return calendarDB.calendarRules }
@@ -120,7 +121,8 @@ export async function applyCalendarProposalFromUI(input: Proposal, event: Event)
   const { digest, ...unsigned } = proposal
   if (await contentDigest(unsigned) !== digest) throw new Error('確認後に案が変わりました')
   const calendarTable = table()
-  return db.transaction('rw', [calendarTable, db.settings, db.tasks, db.calendarEvents, db.assessments, db.completions, db.sessions, db.tripBundles, db.audits, db.commands, db.containers, db.labelGroups, db.labelDefinitions, db.contextSources, db.contextSnapshots, db.sourceArtifacts], async () => {
+  const moves: CalendarMove[] = []
+  const applied = await db.transaction('rw', [calendarTable, db.settings, db.tasks, db.calendarEvents, db.assessments, db.completions, db.sessions, db.tripBundles, db.audits, db.commands, db.containers, db.labelGroups, db.labelDefinitions, db.contextSources, db.contextSnapshots, db.sourceArtifacts], async () => {
     const current = await settings(), state = await calendarTable.get('main') ?? emptyCalendarRulesState(current.profileId, current.datasetId)
     validateCalendarRulesState(state, current.profileId, current.datasetId)
     const guard = configurationGuards.get(proposal.id)
@@ -178,6 +180,7 @@ export async function applyCalendarProposalFromUI(input: Proposal, event: Event)
           assertTripTaskScoreChangeAllowed(task.id, task.score, score, trips)
           let assessmentId = task.assessmentId
           if (scoreChanged) { assessmentId = uid(); await db.assessments.add({ id: assessmentId, taskId: task.id, score, result, createdAt: at, origin: 'routine', ruleVersion: 'v1' }); const completion = await db.completions.where('taskId').equals(task.id).first(); if (completion?.currentAt) throw new ConflictError(); if (completion) await db.completions.put({ ...completion, lastConfirmedPoints: result.effective }) }
+          if (task.scheduledDate !== update.after.scheduledDate) moves.push({ taskId: task.id, title: update.after.title, revision: task.revision + 1, from: task.scheduledDate, to: update.after.scheduledDate })
           await db.tasks.put({ ...task, title: update.after.title, scheduledDate: update.after.scheduledDate, dueDate: update.after.dueDate, ...specDue(update.after, task), score, effectivePoints: result.effective, assessmentId, deletedAt: null, revision: task.revision + 1, updatedAt: at })
           instance.entityRevision = task.revision + 1
         } else {
@@ -209,4 +212,7 @@ export async function applyCalendarProposalFromUI(input: Proposal, event: Event)
     }
     await db.commands.add({ key, hash, resultId, at }); assertLive(); return resultId
   })
+  // N07 official-change fact: queued after commit through the common policy; it never affects the approved change.
+  if (moves.length) await queueCalendarChangeNotifications(proposal.id, moves).catch(() => undefined)
+  return applied
 }

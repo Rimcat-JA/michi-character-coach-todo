@@ -24,7 +24,7 @@ function integer(value, max = MAX_TOKENS) { return Number.isSafeInteger(value) &
 
 function validateUsageLimits(value) {
   const globals = ['dailyRequests', 'dailyTokens', 'monthlyRequests', 'monthlyTokens']
-  if (!keysAre(value, globals, ['kindDailyRequests']) || !integer(value.dailyRequests, MAX_REQUESTS) ||
+  if (!keysAre(value, globals, ['kindDailyRequests', 'automaticDailyRequests']) || !integer(value.dailyRequests, MAX_REQUESTS) ||
     !integer(value.monthlyRequests, MAX_REQUESTS) || !integer(value.dailyTokens) || !integer(value.monthlyTokens)) {
     throw new Error('AI利用上限は範囲内の0以上の整数で指定してください')
   }
@@ -32,7 +32,9 @@ function validateUsageLimits(value) {
   if (!keysAre(kindDailyRequests, KINDS) || KINDS.some(kind => !integer(kindDailyRequests[kind], MAX_REQUESTS))) {
     throw new Error('処理別のAI回数上限は0以上の整数で指定してください')
   }
-  return { ...Object.fromEntries(globals.map(key => [key, value[key]])), kindDailyRequests: { ...kindDailyRequests } }
+  if (value.automaticDailyRequests !== undefined && !integer(value.automaticDailyRequests, 1000)) throw new Error('自動AI処理の回数上限は0〜1000の整数で指定してください')
+  // Unset automatic budget stays 0 and is not written, so older files keep their exact shape.
+  return { ...Object.fromEntries(globals.map(key => [key, value[key]])), kindDailyRequests: { ...kindDailyRequests }, ...(value.automaticDailyRequests ? { automaticDailyRequests: value.automaticDailyRequests } : {}) }
 }
 
 function dateKey(date) {
@@ -61,7 +63,7 @@ function validateState(value) {
   try { value.limits = validateUsageLimits(value.limits) } catch { throw new Error(CORRUPT_MESSAGE) }
   const ids = new Set()
   for (const entry of value.entries) {
-    if (!keysAre(entry, ['id', 'day', 'settledDay', 'kind', 'reservedTokens', 'actualTokens', 'outcome']) ||
+    if (!keysAre(entry, ['id', 'day', 'settledDay', 'kind', 'reservedTokens', 'actualTokens', 'outcome'], ['automatic']) || entry.automatic !== undefined && entry.automatic !== true ||
       typeof entry.id !== 'string' || !/^[\da-f-]{36}$/.test(entry.id) || ids.has(entry.id) || !validDay(entry.day) || entry.day > value.lastDay ||
       !KINDS.includes(entry.kind) || !integer(entry.reservedTokens, MAX_RESERVATION) || entry.reservedTokens === 0 ||
       !['pending', 'success', 'failed', 'timeout'].includes(entry.outcome) ||
@@ -95,7 +97,7 @@ function snapshot(state) {
   const dailyEntries = state.entries.filter(entry => entry.day === day || entry.settledDay === day || entry.outcome === 'pending')
   const monthlyEntries = state.entries.filter(entry => entry.day.startsWith(month) || entry.settledDay?.startsWith(month) || entry.outcome === 'pending')
   return {
-    provider: 'openrouter', day, month, limits: clone(state.limits), automaticBudget: { requests: 0, tokens: 0 },
+    provider: 'openrouter', day, month, limits: clone(state.limits), automaticBudget: { requests: state.limits.automaticDailyRequests ?? 0, used: dailyEntries.filter(entry => entry.automatic).length },
     daily: totals(dailyEntries), monthly: totals(monthlyEntries),
     byKind: Object.fromEntries(KINDS.map(kind => [kind, totals(dailyEntries.filter(entry => entry.kind === kind))])),
     cost: null
@@ -185,14 +187,17 @@ function createAIBudget({ filePath, now = () => new Date() }) {
       if (!keysAre(value, ['kind', 'reservedTokens'], ['automatic']) || !KINDS.includes(value.kind) ||
         !integer(value.reservedTokens, MAX_RESERVATION) || value.reservedTokens === 0 ||
         (value.automatic !== undefined && typeof value.automatic !== 'boolean')) throw new Error('AI予算予約の形式が不正です')
-      if (value.automatic) throw new Error('自動AI処理の利用予算は0です')
       await load()
       const usage = snapshot(state)
       const limits = state.limits
+      // Automatic work (e.g. notification wording) has its own owner-set daily count; unset means 0.
+      if (value.automatic && usage.automaticBudget.used + 1 > usage.automaticBudget.requests) throw new Error(usage.automaticBudget.requests ? '自動AI処理の1日の回数上限に達しています' : '自動AI処理の利用予算は0です')
       if (usage.daily.requests + 1 > limits.dailyRequests || usage.daily.tokens + value.reservedTokens > limits.dailyTokens) throw new Error('1日のAI利用上限に達しています')
       if (usage.monthly.requests + 1 > limits.monthlyRequests || usage.monthly.tokens + value.reservedTokens > limits.monthlyTokens) throw new Error('1か月のAI利用上限に達しています')
-      if (usage.byKind[value.kind].requests + 1 > limits.kindDailyRequests[value.kind]) throw new Error('この処理の1日のAI回数上限に達しています')
-      const reservation = { id: randomUUID(), day: state.lastDay, settledDay: null, kind: value.kind, reservedTokens: value.reservedTokens, actualTokens: null, outcome: 'pending' }
+      // Automatic entries never use up the owner's per-kind limit; they are bounded by the automatic budget and the global caps.
+      const ownerKindRequests = state.entries.filter(entry => (entry.day === state.lastDay || entry.settledDay === state.lastDay || entry.outcome === 'pending') && entry.kind === value.kind && !entry.automatic).length
+      if (!value.automatic && ownerKindRequests + 1 > limits.kindDailyRequests[value.kind]) throw new Error('この処理の1日のAI回数上限に達しています')
+      const reservation = { id: randomUUID(), day: state.lastDay, settledDay: null, kind: value.kind, reservedTokens: value.reservedTokens, actualTokens: null, outcome: 'pending', ...(value.automatic ? { automatic: true } : {}) }
       const next = clone(state)
       next.entries.push(reservation)
       await commit(next)

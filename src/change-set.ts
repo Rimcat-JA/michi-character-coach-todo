@@ -6,7 +6,7 @@ import { assertTripTaskScoreChangeAllowed } from './trip-bundles'
 import { localDateAt, localTimeAt } from './zoned-time'
 import { cancelCoachNotificationTarget } from './coach-notification-save'
 import { assertTaskInstruction, clearTaskInstructionAuthority, type VerifiedTaskInstruction } from './task-user-instruction'
-import { autoChangeCounts, automationRulesFor, changeAuditFact, OPERATION_INFO, operationsForFields, ownerTimezone, validateAllowedHours, validateAutomationRules, validateStopFlags, withinAllowedHours, type AllowedHours, type AutomationRule, type AutomationStopFlags, type OperationGroup } from './automation-policy'
+import { autoChangeCounts, automationRulesFor, changeAuditFact, coachMediatedChange, OPERATION_INFO, operationsForFields, ownerTimezone, validateAllowedHours, validateAutomationRules, validateStopFlags, withinAllowedHours, type AllowedHours, type AutomationRule, type AutomationStopFlags, type ChangeAuditFact, type OperationGroup } from './automation-policy'
 
 export const taskChangeFields = ['title', 'notes', 'scheduledDate', 'dueDate', 'dueAt', 'manualPoints'] as const
 export type TaskChangeField = typeof taskChangeFields[number]
@@ -60,7 +60,8 @@ const approvals = new WeakMap<UIChangeApproval, { proposalId: string; digest: st
 const now = () => new Date().toISOString()
 const principal = (value: ChangePrincipal): ChangePrincipal => ({ id: value.id, kind: value.kind, model: value.model ?? null })
 const sourceOrder = (a:SourceRevision,b:SourceRevision) => a.id<b.id?-1:a.id>b.id?1:0
-const undoLinks = new Map<string, string>()
+// prepared ChangeSet id -> audit id (single) or task id -> audit id (whole ChangeSet undo)
+const undoLinks = new Map<string, string | Record<string, string>>()
 /** Dataset restore/logout only reduces authority; no serialized grant is trusted. */
 export function clearChangeSetAuthority() { proposals.clear(); undoLinks.clear(); clearTaskInstructionAuthority() }
 function record(value: unknown): value is Record<string, unknown> { return Boolean(value && typeof value === 'object' && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype) }
@@ -314,7 +315,7 @@ export async function applyChangeSet(value: PreparedChangeSet, approval: UIChang
     if (grant?.consumed) fail('APPROVAL_CONSUMED','この本人承認は既に使用されています')
     const tasks=await Promise.all(prepared.changes.map(change=>db.tasks.get(change.taskId)))
     if (tasks.some((task,index)=>!task || task.deletedAt || task.revision!==prepared.changes[index].baseRevision || canonicalJSON(values(task))!==canonicalJSON(prepared.changes[index].before) || canonicalJSON(task.score)!==canonicalJSON(prepared.changes[index].scoreBefore)||task.assessmentId!==prepared.changes[index].assessmentBefore||task.effectivePoints!==prepared.changes[index].effectivePointsBefore)) fail('CONFLICT','タスクが更新されています。新しい版で差分を確認してください')
-    const revisions:ChangeReceipt['revisions']=[],undoOf=undoLinks.get(prepared.id)
+    const revisions:ChangeReceipt['revisions']=[],undoLink=undoLinks.get(prepared.id)
     for (const [index,change] of prepared.changes.entries()) {
       const task=tasks[index]!
       await ownedTaskContainer(task,context.ownerId)
@@ -331,7 +332,7 @@ export async function applyChangeSet(value: PreparedChangeSet, approval: UIChang
       await db.tasks.put({...task,...after,...(dueAt||task.dueAt?{dueAt:dueAt?.at??null,dueTimezone:dueAt?.timezone??null}:{}),score:structuredClone(change.scoreAfter),assessmentId,effectivePoints:result.effective,firstScheduledDate:task.firstScheduledDate??task.scheduledDate??change.after.scheduledDate,revision:task.revision+1,updatedAt:at})
       await cancelCoachNotificationTarget(task.id,at)
       revisions.push({taskId:task.id,revision:task.revision+1})
-      await db.audits.add({id:uid(),taskId:task.id,operation:'changeset.update',at,detail:JSON.stringify({changeSetId:prepared.id,digest:prepared.digest,principal:prepared.principal,decision:grant?'approved':'auto',operations:operationsForFields(change.fields),...(undoOf?{undoOf}:{}),origin:prepared.principal.kind==='human'?'human':prepared.instruction?'user_instruction_via_agent':'agent_proposal',approvedBy:grant?.userId??null,policyEpoch:policy.epoch,sourcePermissionRevision:policy.sourcePermissionRevision,sourceRevisions:prepared.sourceRevisions,instruction:prepared.instruction,before:change.before,after:change.after,scoreBefore:change.scoreBefore,scoreAfter:change.scoreAfter,assessmentBefore:task.assessmentId,assessmentAfter:assessmentId,fieldOrigins:change.fieldOrigins,reason:prepared.reason,undo:{expectedRevision:task.revision+1,patch:Object.fromEntries(change.fields.map(field=>[field,change.before[field]])),...(scoreChanged?{score:change.scoreBefore,requiresNewInstruction:true}:{})}})})
+      await db.audits.add({id:uid(),taskId:task.id,operation:'changeset.update',at,detail:JSON.stringify({changeSetId:prepared.id,digest:prepared.digest,principal:prepared.principal,decision:grant?'approved':'auto',operations:operationsForFields(change.fields),...(undoLink?{undoOf:typeof undoLink==='string'?undoLink:undoLink[task.id]}:{}),origin:prepared.principal.kind==='human'?'human':prepared.instruction?'user_instruction_via_agent':'agent_proposal',approvedBy:grant?.userId??null,policyEpoch:policy.epoch,sourcePermissionRevision:policy.sourcePermissionRevision,sourceRevisions:prepared.sourceRevisions,instruction:prepared.instruction,before:change.before,after:change.after,scoreBefore:change.scoreBefore,scoreAfter:change.scoreAfter,assessmentBefore:task.assessmentId,assessmentAfter:assessmentId,fieldOrigins:change.fieldOrigins,reason:prepared.reason,undo:{expectedRevision:task.revision+1,patch:Object.fromEntries(change.fields.map(field=>[field,change.before[field]])),...(scoreChanged?{score:change.scoreBefore,requiresNewInstruction:true}:{})}})})
     }
     const result:ChangeReceipt={changeSetId:prepared.id,digest:prepared.digest,taskIds:prepared.changes.map(change=>change.taskId),revisions,appliedAt:at}
     const resultId=JSON.stringify(result)
@@ -347,31 +348,48 @@ export type UndoRediff = { field: TaskChangeField; recorded: unknown; current: u
 export type UndoPreparation = { status: 'prepared'; auditId: string; prepared: PreparedChangeSet } | { status: 'conflict'; auditId: string; taskId: string; rediff: UndoRediff[] } | { status: 'already_undone'; auditId: string }
 /** Owner-approved inverse ChangeSet built from the stored undo patch at the current revision; completions and the ledger are never touched. */
 export async function prepareUndoFromAudit(auditId: string, context: ChangeContext, instruction: VerifiedTaskInstruction|null = null): Promise<UndoPreparation> {
+  return prepareUndoFromAudits([auditId],context,instruction)
+}
+/** Inverse of several task rows of ONE earlier ChangeSet (e.g. a replan that moved 2 tasks), applied atomically after the owner's click. */
+export async function prepareUndoFromAudits(auditIds: string[], context: ChangeContext, instruction: VerifiedTaskInstruction|null = null): Promise<UndoPreparation> {
   context=freeze(structuredClone(context)); validateContext(context)
   if (context.principal.kind!=='human') fail('HUMAN_APPROVAL_REQUIRED','取り消しは本人の確認画面から行います')
+  if (!Array.isArray(auditIds)||!auditIds.length||auditIds.length>50||new Set(auditIds).size!==auditIds.length) fail('UNDO_UNAVAILABLE','取り消せる変更記録がありません')
   const found=await db.transaction('r',db.audits,db.tasks,db.settings,async()=>{
     await currentSettings(context)
-    const audit=await db.audits.get(auditId),fact=audit?changeAuditFact(audit):null
-    if (!fact||!fact.taskId||!fact.undo||!record(fact.undo.patch)||!fact.fields.length) fail('UNDO_UNAVAILABLE','取り消せる変更記録がありません')
-    if (fact.principal.kind==='human') fail('UNDO_UNAVAILABLE','本人の変更は通常のタスク編集で戻してください')
-    if ((await db.audits.where('taskId').equals(fact.taskId).toArray()).some(item=>changeAuditFact(item)?.undoOf===auditId)) return {status:'already_undone' as const}
-    const task=await db.tasks.get(fact.taskId)
-    if (!task||task.deletedAt) fail('UNDO_UNAVAILABLE','対象のタスクがありません')
-    const current=values(task)
-    // A later edit is never overwritten: the owner sees a re-diff instead.
-    if (task.revision!==fact.undo.expectedRevision||fact.fields.some(field=>canonicalJSON(current[field])!==canonicalJSON(fact.after[field]??null))) return {status:'conflict' as const,taskId:task.id,rediff:fact.fields.map(field=>({field,recorded:fact.after[field]??null,current:current[field],restore:fact.undo!.patch[field]??null}))}
-    return {status:'ready' as const,task,fact}
+    const rows:{auditId:string;task:Task;fact:ChangeAuditFact}[]=[],seen:ChangeAuditFact[]=[]
+    for (const auditId of auditIds) {
+      const audit=await db.audits.get(auditId),fact=audit?changeAuditFact(audit):null
+      if (!fact||!fact.taskId||!fact.undo||!record(fact.undo.patch)||!fact.fields.length||fact.undoOf) fail('UNDO_UNAVAILABLE','取り消せる変更記録がありません')
+      // Ordinary owner edits are reverted by editing; owner-approved coach-screen changes may be undone from the coach.
+      if (!coachMediatedChange(fact)) fail('UNDO_UNAVAILABLE','本人の変更は通常のタスク編集で戻してください')
+      if (seen.length&&(fact.changeSetId!==seen[0].changeSetId||seen.some(item=>item.taskId===fact.taskId))) fail('UNDO_UNAVAILABLE','一つの変更の分だけ取り消せます')
+      seen.push(fact)
+      // Rows already undone one by one are skipped; the rest of the same ChangeSet stays undoable.
+      if ((await db.audits.where('taskId').equals(fact.taskId).toArray()).some(item=>changeAuditFact(item)?.undoOf===auditId)) continue
+      const task=await db.tasks.get(fact.taskId)
+      if (!task||task.deletedAt) fail('UNDO_UNAVAILABLE','対象のタスクがありません')
+      const current=values(task)
+      // A later edit is never overwritten: the owner sees a re-diff instead.
+      if (task.revision!==fact.undo.expectedRevision||fact.fields.some(field=>canonicalJSON(current[field])!==canonicalJSON(fact.after[field]??null))) return {status:'conflict' as const,auditId,taskId:task.id,rediff:fact.fields.map(field=>({field,recorded:fact.after[field]??null,current:current[field],restore:fact.undo!.patch[field]??null}))}
+      rows.push({auditId,task,fact})
+    }
+    if (!rows.length) return {status:'already_undone' as const,auditId:auditIds[0]}
+    return {status:'ready' as const,rows}
   })
-  if (found.status==='already_undone') return {status:'already_undone',auditId}
-  if (found.status==='conflict') return {status:'conflict',auditId,taskId:found.taskId,rediff:found.rediff}
-  const {task,fact}=found,undo=fact.undo!
-  if (undo.requiresNewInstruction) {
-    const before=undo.score as ScoreInput|undefined
-    if (!before||before.mode!=='manual'||!Number.isInteger(before.manualPoints)) fail('UNDO_UNAVAILABLE','元の点数方式へは自動で戻せません。タスク編集で本人が設定してください。完了記録と実績台帳は変わりません。')
-    if (!instruction) fail('USER_INSTRUCTION_REQUIRED','点数の取り消しには本人の新しい指示が必要です。完了記録と実績台帳は変わりません。')
+  if (found.status==='already_undone') return {status:'already_undone',auditId:found.auditId}
+  if (found.status==='conflict') return {status:'conflict',auditId:found.auditId,taskId:found.taskId,rediff:found.rediff}
+  for (const {fact} of found.rows) {
+    const undo=fact.undo!
+    if (undo.requiresNewInstruction) {
+      const before=undo.score as ScoreInput|undefined
+      if (!before||before.mode!=='manual'||!Number.isInteger(before.manualPoints)) fail('UNDO_UNAVAILABLE','元の点数方式へは自動で戻せません。タスク編集で本人が設定してください。完了記録と実績台帳は変わりません。')
+      if (!instruction) fail('USER_INSTRUCTION_REQUIRED','点数の取り消しには本人の新しい指示が必要です。完了記録と実績台帳は変わりません。')
+    }
+    if (!instruction&&fact.fields.some(field=>field==='title'||field==='dueDate'||field==='dueAt'||field==='manualPoints')) fail('USER_INSTRUCTION_REQUIRED','タイトル・本当の締め切りの取り消しには本人の新しい指示が必要です。タスク編集で本人が直接戻すこともできます。')
   }
-  if (!instruction&&fact.fields.some(field=>field==='title'||field==='dueDate'||field==='dueAt'||field==='manualPoints')) fail('USER_INSTRUCTION_REQUIRED','タイトル・本当の締め切りの取り消しには本人の新しい指示が必要です。タスク編集で本人が直接戻すこともできます。')
-  const prepared=await prepareTaskChanges([{taskId:task.id,expectedRevision:task.revision,patch:structuredClone(undo.patch) as TaskChangePatch}],{...context,allowedFields:[...fact.fields]},`代理変更の取り消し（元の変更 ${fact.changeSetId.slice(0,8)}）`,instruction)
-  undoLinks.set(prepared.id,auditId)
-  return {status:'prepared',auditId,prepared}
+  const first=found.rows[0].fact,label=first.principal.kind==='human'?'コーチ経由の変更の取り消し':'代理変更の取り消し'
+  const prepared=await prepareTaskChanges(found.rows.map(({task,fact})=>({taskId:task.id,expectedRevision:task.revision,patch:structuredClone(fact.undo!.patch) as TaskChangePatch})),{...context,allowedFields:[...new Set(found.rows.flatMap(row=>row.fact.fields))]},`${label}（元の変更 ${first.changeSetId.slice(0,8)}）`,instruction)
+  undoLinks.set(prepared.id,found.rows.length===1?found.rows[0].auditId:Object.fromEntries(found.rows.map(row=>[row.task.id,row.auditId])))
+  return {status:'prepared',auditId:found.rows[0].auditId,prepared}
 }

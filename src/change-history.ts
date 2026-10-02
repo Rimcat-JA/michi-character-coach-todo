@@ -1,7 +1,7 @@
 import { db } from './db'
 import type { Audit } from './domain'
 import { decideChangePolicy, type ChangePolicy, type PreparedChangeSet, type TaskChangeField } from './change-set'
-import { changeAuditFact, localClock, operationsForFields, ownerTimezone, type ChangeAuditFact, type OperationGroup } from './automation-policy'
+import { changeAuditFact, coachMediatedChange, localClock, operationsForFields, ownerTimezone, type ChangeAuditFact, type OperationGroup } from './automation-policy'
 
 export type DryRunEntry = { changeSetId: string; at: string; taskIds: string[]; principal: ChangeAuditFact['principal']; fields: TaskChangeField[]; actual: 'auto' | 'approved'; wouldBe: 'auto' | 'awaiting_approval' | 'denied'; reason: string }
 export type DryRunSummary = { from: string; to: string; total: number; auto: number; approval: number; denied: number; entries: DryRunEntry[] }
@@ -9,6 +9,11 @@ export type DryRunSummary = { from: string; to: string; total: number; auto: num
 /** Agent (coach/external) task changes, newest first. Display data only; it cannot authorize anything. */
 export function agentChangeHistory(audits: Audit[], limit = 50): ChangeAuditFact[] {
   return audits.map(changeAuditFact).filter((fact): fact is ChangeAuditFact => Boolean(fact && fact.principal.kind !== 'human')).sort((a, b) => b.at.localeCompare(a.at)).slice(0, limit)
+}
+/** All task rows of the newest change made through the coach (agent changes or owner-approved coach-screen changes), for 「さっきの変更を戻して」. Owner changes older than 24h are not offered. */
+export function latestCoachChange(audits: Audit[], now = new Date().toISOString()): ChangeAuditFact[] {
+  const facts = audits.map(changeAuditFact).filter((fact): fact is ChangeAuditFact => Boolean(fact && !fact.undoOf && coachMediatedChange(fact) && (fact.principal.kind !== 'human' || Date.parse(now) - Date.parse(fact.at) <= 86400000))).sort((a, b) => b.at.localeCompare(a.at) || a.auditId.localeCompare(b.auditId))
+  return facts.length ? facts.filter(fact => fact.changeSetId === facts[0].changeSetId) : []
 }
 export function undoneAuditIds(audits: Audit[]): Set<string> {
   return new Set(audits.map(changeAuditFact).flatMap(fact => fact?.undoOf ? [fact.undoOf] : []))

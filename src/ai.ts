@@ -3,13 +3,15 @@ import { currentCheckInContext } from './goals'
 import type { AIUsageLimits, AIUsageSnapshot } from './AIUsageView'
 import type { DetectionRequest, DetectionChange } from './detection-contract'
 import type { RoutineAssistRequest } from './routine-assist'
+import type { NotificationTextTransport } from './notification-text'
+import type { CoachTargetCandidate } from './coach-target-resolution'
 
 export type AIStatus = { secureStorage: boolean; configured: boolean }
 export type AIRequest = { model: string; message: string; selectedTask: string | null; character?: CharacterProfile }
 
 declare global {
   interface Window {
-    michiDesktop?: { openTopOfMind: () => Promise<boolean>; showMain: () => Promise<boolean>; notify: (payload: { notificationId: string; destinationId: string; attemptId: string; title: string; body: string; provenance: 'factual-template' | 'saved-ai' }) => Promise<boolean> }
+    michiDesktop?: { openTopOfMind: () => Promise<boolean>; showMain: () => Promise<boolean>; notify: (payload: { notificationId: string; destinationId: string; attemptId: string; title: string; body: string; provenance: 'factual-template' | 'saved-ai' }) => Promise<boolean>; setTrayMode?: (enabled: boolean) => Promise<boolean>; onTrayStopNotifications?: (callback: () => void) => () => void }
     michiAI?: {
       status: () => Promise<AIStatus>
       saveKey: (value: string) => Promise<boolean>
@@ -22,6 +24,8 @@ declare global {
       proposeRoutine: (request: RoutineAssistRequest) => Promise<string>
       detectObligations: (input: { model: string; request: DetectionRequest }) => Promise<string>
       verifyObligations: (input: { model: string; request: DetectionRequest; change: DetectionChange }) => Promise<string>
+      notificationText?: NotificationTextTransport
+      resolveTarget?: (request: { model: string; message: string; candidates: CoachTargetCandidate[] }) => Promise<string>
       usage: () => Promise<AIUsageSnapshot>
       setUsageLimits: (limits: AIUsageLimits) => Promise<AIUsageSnapshot>
     }

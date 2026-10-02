@@ -163,6 +163,9 @@ export function changeAuditFact(audit: Audit): ChangeAuditFact | null {
     return { auditId: audit.id, changeSetId: String(detail.changeSetId ?? ''), taskId: audit.taskId, at: audit.at, principal, decision, fields, operations: operationsForFields(fields), before: record(detail.before) ? detail.before : {}, after: record(detail.after) ? detail.after : {}, undo, undoOf: typeof detail.undoOf === 'string' ? detail.undoOf : null, reason: typeof detail.reason === 'string' ? detail.reason : '' }
   } catch { return null }
 }
+/** Owner-approved ChangeSets made through the coach screens (replan candidates, consult). Only these human changes can be undone from the coach. */
+export const COACH_MEDIATED_REASONS = ['アプリの再計画候補（本人選択）', '本人が指定した対象と値の変更（まだ適用していません）'] as const
+export const coachMediatedChange = (fact: Pick<ChangeAuditFact, 'principal' | 'reason'>) => fact.principal.kind !== 'human' || (COACH_MEDIATED_REASONS as readonly string[]).includes(fact.reason)
 /** Automatic agent changes already applied today (owner timezone), counted across all entrances. */
 export function autoChangeCounts(audits: Audit[], at: string, timezone: string): Partial<Record<OperationGroup, number>> {
   const day = localClock(at, timezone).day, counts: Partial<Record<OperationGroup, number>> = {}

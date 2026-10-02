@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
 import ChangeSetPreview from './ChangeSetPreview'
 import { cancelChangeSet, changePolicyFor, prepareTaskChanges, taskChangeFields, type ChangeContext, type ChangeReceipt, type PreparedChangeSet, type TaskChangeField, type TaskChangePatch, type TaskFieldOrigin } from './change-set'
-import { parseCoachTaskChange, prepareCoachTaskChange, prepareCoachTaskRequest, type CoachTaskSnapshot } from './coach-task-change'
+import { parseCoachTaskChange, prepareCoachTaskChange, prepareCoachTaskRequest, scheduleOnlyPatch, type CoachTaskSnapshot } from './coach-task-change'
 import { confirmTaskInstructionFromUI } from './task-user-instruction'
+import { COACH_MEDIATED_REASONS } from './automation-policy'
 import { egressNotice } from './egress-policy'
 import { taskDueAt, taskDueTime, today, type Settings, type Task } from './domain'
 
@@ -11,12 +12,18 @@ type Preview = { prepared:PreparedChangeSet; actor:ChangeContext }
 const labels:Record<TaskChangeField,string>={title:'タイトル',notes:'メモ',scheduledDate:'予定日',dueDate:'本当の締め切り',dueAt:'締め切り時刻',manualPoints:'本人指定ポイント'}
 const fromTask=(task:Task):Draft=>({snapshot:{id:task.id,title:task.title,notes:task.notes,scheduledDate:task.scheduledDate,dueDate:task.dueDate,revision:task.revision,scoreMode:task.score.mode,manualPoints:task.score.mode==='manual'||task.score.mode==='allocated'?task.score.manualPoints:null},title:task.title,notes:task.notes,scheduledDate:task.scheduledDate,dueDate:task.dueDate,dueTime:taskDueTime(task)??'',dueZone:task.dueTimezone??Intl.DateTimeFormat().resolvedOptions().timeZone,points:task.score.mode==='manual'&&task.score.manualPoints!==null?String(task.score.manualPoints):'',fields:[],origin:'manual',model:null,fieldOrigins:{}})
 
-export default function CoachTaskChangeView({selectedTask,settings,onEdit,onApplied}:{selectedTask:Task|undefined;settings:Settings;onEdit?:(task:Task)=>void;onApplied?:(receipt:ChangeReceipt)=>void}){
-  const [instruction,setInstruction]=useState('')
-  const [savedDraft,setDraft]=useState<Draft|null>(null)
+function scheduleOnlyDraft(task:Task|undefined,instruction:string):{draft:Draft|null;notice:string}{
+  if(!task)return{draft:null,notice:''}
+  const result=scheduleOnlyPatch(task,instruction,today())
+  return{draft:result.scheduledDate?{...fromTask(task),scheduledDate:result.scheduledDate,fields:['scheduledDate'],fieldOrigins:{scheduledDate:'human'}}:null,notice:result.notice}
+}
+export default function CoachTaskChangeView({selectedTask,settings,onEdit,onApplied,initialInstruction}:{selectedTask:Task|undefined;settings:Settings;onEdit?:(task:Task)=>void;onApplied?:(receipt:ChangeReceipt)=>void;initialInstruction?:string}){
+  const [instruction,setInstruction]=useState(initialInstruction??'')
+  const [initial]=useState(()=>scheduleOnlyDraft(selectedTask,initialInstruction??''))
+  const [savedDraft,setDraft]=useState<Draft|null>(initial.draft)
   const draft=savedDraft??(selectedTask?fromTask(selectedTask):null)
   const [preview,setPreview]=useState<Preview|null>(null)
-  const [busy,setBusy]=useState(false),[notice,setNotice]=useState('')
+  const [busy,setBusy]=useState(false),[notice,setNotice]=useState(initial.notice)
   const generation=useRef(0)
   const policy=changePolicyFor(settings)
   const common={ownerId:settings.profileId,datasetId:settings.datasetId,allowedFields:[...taskChangeFields],sourceRevisions:[]}
@@ -74,7 +81,7 @@ export default function CoachTaskChangeView({selectedTask,settings,onEdit,onAppl
     try{
       const patch=draftPatch(),requests=[{taskId:draft.snapshot.id,expectedRevision:draft.snapshot.revision,patch}]
       const verified=draft.fields.some(field=>['title','dueDate','dueAt','manualPoints'].includes(field))||patch.dueAt!==undefined?await confirmTaskInstructionFromUI({message:instruction.trim()||'本人が選択タスクの入力欄に指定した値を変更する',referenceDate:today(),timezone:Intl.DateTimeFormat().resolvedOptions().timeZone,changes:requests},human,event):null
-      const prepared=draft.origin==='ai'?await prepareCoachTaskChange({targetId:draft.snapshot.id,targetRevision:draft.snapshot.revision,patch,reason:''},selectedTask,actor,verified):await prepareTaskChanges(requests,actor,'本人が指定した対象と値の変更（まだ適用していません）',verified)
+      const prepared=draft.origin==='ai'?await prepareCoachTaskChange({targetId:draft.snapshot.id,targetRevision:draft.snapshot.revision,patch,reason:''},selectedTask,actor,verified):await prepareTaskChanges(requests,actor,COACH_MEDIATED_REASONS[1],verified)
       setPreview({prepared,actor});setNotice('本人の指定値に結び付く差分を用意しました。最終確認ボタンで適用します。')
     }catch(error){setNotice(error instanceof Error?error.message:String(error))}
     finally{setBusy(false)}
@@ -87,6 +94,7 @@ export default function CoachTaskChangeView({selectedTask,settings,onEdit,onAppl
     <label className="field">相談文<textarea aria-label="既存タスクの変更相談" rows={3} maxLength={4000} value={instruction} disabled={disabled} onChange={event=>setInstruction(event.target.value)} placeholder="例：明日に移して / この25ptを30ptへ変更して"/></label>
     <p className="muted">AIには相談文と選択タスクの名前・予定日・期限・版を送ります。メモと点数は、その変更を指定した場合だけ送ります。資料から検出したタスクの引用（資料の根拠）はメモに含めず、送りません。</p>
     <button type="button" className="secondary-button" disabled={!selectedTask||!instruction.trim()||disabled} onClick={ask}>{busy?'変更案を用意しています…':'AIで変更候補を作る'}</button>
+    <button type="button" className="text-button" disabled={!selectedTask||!instruction.trim()||disabled} onClick={()=>{const result=scheduleOnlyDraft(selectedTask,instruction);if(result.draft)setDraft(result.draft);setNotice(result.notice)}}>相談文の日付を予定日に入れる（AIなし）</button>
     {draft&&<div className="coach-task-manual"><h4>本人の指定値を確認</h4><small>対象：{draft.snapshot.title}（版 {draft.snapshot.revision}）{draft.origin==='ai'?` · AI候補 ${draft.model}`:' · 本人入力'}</small>
       {stale&&<p role="alert">対象または版が変わりました。現在値を読み込んでから変更を指定してください。</p>}
       <div className="form-grid">{taskChangeFields.map(field=><label className={`field ${field==='notes'||field==='title'?'full-field':''}`} key={field}><span><input type="checkbox" aria-label={`${labels[field]}変更を含める`} checked={draft.fields.includes(field)} disabled={disabled} onChange={event=>toggle(field,event.target.checked)}/> {labels[field]}を変更する</span>{field==='notes'?<textarea aria-label="変更候補のメモ" rows={3} maxLength={50000} value={draft.notes} disabled={disabled} onChange={event=>edit(field,event.target.value)}/>:field==='manualPoints'?<><input aria-label="変更候補の本人指定ポイント" type="number" min={0} max={100000} step={1} value={draft.points} disabled={disabled} onChange={event=>edit(field,event.target.value)} /><small>現在：{selectedTask?.effectivePoints??'未設定'}pt · {draft.snapshot.scoreMode}。変更後は本人指定の manual。0ptも確定値です。</small></>:field==='dueAt'?<><input aria-label="変更候補の締め切り時刻" type="time" value={draft.dueTime} disabled={disabled||!draft.dueDate} onChange={event=>edit(field,event.target.value||null)}/><small>{draft.dueZone}。空欄は時刻なしの締め切り</small></>:<input aria-label={`変更候補の${labels[field]}`} type={field==='title'?'text':'date'} maxLength={field==='title'?300:undefined} value={draft[field]??''} disabled={disabled} onChange={event=>edit(field,field==='title'?event.target.value:event.target.value||null)}/>} {draft.fieldOrigins[field]==='human_override'&&<small>AI候補を本人が修正</small>}</label>)}</div>

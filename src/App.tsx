@@ -24,7 +24,7 @@ import TaskSourceEvidenceView from './TaskSourceEvidenceView'
 import AIUsageView from './AIUsageView'
 import AutomationSettingsView from './AutomationSettingsView'
 import ChangeHistoryView from './ChangeHistoryView'
-import { agentChangeHistory } from './change-history'
+import { latestCoachChange } from './change-history'
 import FeatureConnectionsView from './FeatureConnectionsView'
 import FeatureOffCard from './FeatureOffCard'
 import CoachTaskChangeView from './CoachTaskChangeView'
@@ -38,6 +38,12 @@ import CoachAvatarPanel from './CoachAvatarPanel'
 import LocalFileBridgeView from './LocalFileBridgeView'
 import LocalActionsView from './LocalActionsView'
 import CoachNotificationsView from './CoachNotificationsView'
+import CoachInboxView from './CoachInboxView'
+import CoachConsultView from './CoachConsultView'
+import ReplanCandidatesView from './ReplanCandidatesView'
+import { runCoachTriggers } from './coach-triggers'
+import { reduceAuthority } from './automation-control'
+import { keyStatusForSave, keyStatusOnOpen } from './ai-key-status'
 import { VoiceMediaView } from './VoiceMediaView'
 import { prepareCoachNotificationDelivery, queueSnoozeNotification, recordCoachNotificationDelivery } from './coach-notification-save'
 import { CalendarRulesView } from './CalendarRulesView'
@@ -94,7 +100,7 @@ import WallView from './WallView'
 import { findNavigation, visibleNavigation, type NavigationId } from './navigation'
 import { featureEnabled, FEATURE_REGISTRY, OPTIONAL_FEATURE_IDS, PANEL_FEATURE_IDS, setFeatureVisible, type FeatureId } from './features'
 import { automationStopsFor, matchingPreset, automationRulesFor, type CoachAuthorityCommand } from './automation-policy'
-import { changePolicyFor, prepareUndoFromAudit, taskChangeFields, type UndoPreparation } from './change-set'
+import { changePolicyFor, prepareUndoFromAudits, taskChangeFields, type UndoPreparation } from './change-set'
 import WorkflowPresetsView from './WorkflowPresetsView'
 import AppearanceSettingsView from './AppearanceSettingsView'
 import ReminderCenter from './ReminderCenter'
@@ -251,6 +257,16 @@ function App() {
       }
     })().catch(showError)
   }, [settings?.profileId, settings?.datasetId, settings?.notifications, settings?.notificationState?.policy.epoch, snoozeAlerts])
+  const triggerKey = JSON.stringify(settings?.notificationState?.triggers ?? null)
+  useEffect(() => {
+    // N07/K05 fact triggers on the same 60s tick; reservation runs the common policy before any wording or delivery.
+    if (view === 'mini' || !settings?.profileId) return
+    void runCoachTriggers({ notify: showOSNotification, notificationText: window.michiAI?.notificationText }, nowIso).catch(showError)
+  }, [nowIso, view, settings?.profileId, settings?.datasetId, settings?.notificationState?.policy.epoch, triggerKey])
+  const trayResident = Boolean(settings?.notificationState?.triggers?.trayResident)
+  useEffect(() => { if (view !== 'mini') void window.michiDesktop?.setTrayMode?.(trayResident).catch(showError) }, [trayResident, view])
+  // The tray item is the N09 reduce-only notification stop; resuming needs the S20 preview and the owner's click.
+  useEffect(() => window.michiDesktop?.onTrayStopNotifications?.(() => { void reduceAuthority('notifications', 'tray').then(() => setToast('トレイから通知を停止しました。再開は 設定 > 自動化 で確認して行います')).catch(showError) }), [])
   useEffect(() => { location.hash = view }, [view])
   useEffect(() => { if (!toast) return; const id = setTimeout(() => setToast(''), 4500); return () => clearTimeout(id) }, [toast])
   function showError(e: unknown) { setToast(`エラー: ${storageErrorMessage(e) ?? (e instanceof Error ? e.message : String(e))}`) }
@@ -281,7 +297,9 @@ function App() {
           {runtimeChoicePending(settings) && <RuntimeChoiceCard run={run} />}{catchupNotice(settings.routineCatchup?.summary) && <section className="card info-card catchup-summary" role="status"><Repeat2 size={20} /><div><strong>{catchupNotice(settings.routineCatchup?.summary)}</strong><p>繰り返しの必要な回を重複なく作成しました。過去の回の通知はまとめて送りません。{settings.routineCatchup!.summary!.unexpanded ? '未展開の回は1系列1,000回の上限を超えた古い回です。' : ''}</p></div><button className="secondary-button" onClick={() => void run(acknowledgeCatchupSummary, '確認しました')}>確認した</button></section>}
           <DashboardWidgets settings={settings} scheduled={scheduled.length} overdue={overdue.length} plannedMinutes={plannedMinutes} plannedPoints={plannedPoints} todayPoints={todayPoints} completed={completedToday.length} pendingPoints={pendingPoints} />
           <DayProgressView baseline={settings.dayProgressBaseline} date={currentDate} tasks={active} completions={completions} />
-          <ReminderCenter mode="today" tasks={tasks} lists={smartLists} settings={settings} run={run} />
+          <ReminderCenter mode="today" tasks={tasks} lists={smartLists} settings={settings} run={run} onEdit={setEditor} />
+          <CoachInboxView settings={settings} tasks={tasks} run={run} onEdit={setEditor} />
+          <ReplanCandidatesView settings={settings} compact />
           <div className="two-column"><TodaySections tasks={todayTasks} blocks={timeBlocks} date={currentDate} mode={settings.daySectionMode ?? 'halfday'} onEdit={setEditor} onToggle={toggleTask} onNew={() => setEditor('new')} onAll={() => go('tasks')} run={run} />
           <section className="card coach-panel"><div className="card-heading"><div><span className="eyebrow">YOUR COMPANION</span><h2>{settings.coachName}から</h2></div><span className="template-tag">定型メッセージ</span></div><div className="coach-illustration"><div className="coach-orbit orbit-one"/><div className="coach-orbit orbit-two"/><div className="coach-face"><span className="coach-eye"/><span className="coach-eye"/><span className="coach-mouth"/></div><span className="star star-one">✦</span><span className="star star-two">✧</span></div><div className="speech">{todayTasks.length ? `まずは「${todayTasks[0].title}」から。ひとつ終われば、次を一緒に選びましょう。` : '今日は何から始めましょうか。新しいタスクも、ゆっくり整理できます。'}</div><button className="secondary-button full" onClick={() => go('coach')}><MessageCircle size={16} /> コーチを開く</button></section></div>
           {reviews.length > 0 && <section className="card suggestion-card"><div className="card-heading"><div><span className="eyebrow">REVIEW</span><h2>見直しが必要</h2></div><span className="subtle">見直しだけでは完了しません</span></div><div className="suggestion-list">{reviews.map(task => <button key={task.id} className="suggestion" onClick={() => setEditor(task)}><span className="suggestion-dot"/><span>{task.title}</span><small>見直し {dateLabel(task.reviewDate)}</small></button>)}</div></section>}
@@ -532,10 +550,15 @@ function PlanView({ tasks, blocks, settings, onEdit }: { tasks: Task[]; blocks: 
   return <><div className="page-heading"><div><span className="eyebrow">LOOK AHEAD</span><h1>これからの計画</h1><p>予定日と締め切りを分けて管理します。容量は目安として表示します。</p></div></div><div className="week-grid">{days.map(day => { const items = tasks.filter(t => t.scheduledDate === day), capacity = dayCapacity(items, settings.dailyMinutes, settings.dailyPoints), load = timeBlockCapacity(day, tasks, blocks); return <section key={day} className={`day-card ${day === today() ? 'is-today' : ''}`}><div className="day-title"><strong>{dateLong(day)}</strong>{day === today() && <span>今日</span>}</div><div className="capacity"><span className={load.totalMinutes > settings.dailyMinutes ? 'over' : ''}>{load.totalMinutes}/{settings.dailyMinutes}分</span><span className={capacity.overPoints ? 'over' : ''}>{capacity.points}/{settings.dailyPoints}pt</span></div><div className="meter"><i style={{ width: `${Math.min(100, load.totalMinutes / Math.max(settings.dailyMinutes, 1) * 100)}%` }} /></div><small className="muted">時間未設定 {load.unknownMinutes}件 · ポイント未設定 {capacity.unknownPoints}件</small><div className="day-tasks">{items.length ? items.map(t => <button key={t.id} onClick={() => onEdit(t)}><span>{t.title}</span><small>{scoreText(t)}</small></button>) : <span className="muted">予定なし</span>}</div></section> })}</div><div className="card info-card"><CalendarDays size={20} /><p>締め切りは予定日を動かしても変わりません。時間とポイントの上限も別々に確認できます。</p></div></>
 }
 
+async function showOSNotification(payload: { notificationId: string; destinationId: string; attemptId: string; title: string; body: string; provenance: 'factual-template' | 'saved-ai' }) {
+  if (window.michiDesktop) return window.michiDesktop.notify(payload)
+  if ('Notification' in window && Notification.permission === 'granted') { new Notification(payload.title, { body: payload.body }); return true }
+  return false
+}
 function fixedCoachAnswer(text: string, next: Task | undefined) {
   let answer = 'ここでは保存済みのタスクを一緒に確認できます。新しいAI推論は実行していません。'
   if (/今日|いま|次|何から/.test(text)) answer = next ? `登録済みのタスクなら「${next.title}」が次の候補です。必要なら開いて予定を調整しましょう。` : '未完了のタスクはありません。必要な作業があれば手動で追加できます。'
-  if (/疲れ|しんど|無理/.test(text)) answer = '今日は負荷を下げても大丈夫です。予定を見直す場合は、対象のタスクを選んで変更しましょう。'
+  if (/疲れ|しんど|無理/.test(text)) answer = '今日は負荷を下げても大丈夫です。下の選択肢から、今日のコーチ通知を休む・今日の予定から選んで移す・このままにする、を選べます。まだ何も変更していません。'
   return answer
 }
 
@@ -556,15 +579,17 @@ function CoachView({ tasks, allTasks, goals, checkIns, settings, onEdit, onNew, 
   const aiReady = availability.ready, aiOffline = availability.offline ? policy === 'offline_only' ? 'オフライン専用の設定です' : 'ネットワークに接続していません' : null
 
   useEffect(() => {
-    if (!window.michiAI) return
-    window.michiAI.status().then(setAiStatus).catch(e => setConnectionError(e instanceof Error ? e.message : String(e)))
-  }, [])
+    // While AI is OFF the stored key is not touched; the person can check it explicitly below.
+    keyStatusOnOpen(settings.aiEnabled, window.michiAI?.status)?.then(setAiStatus).catch(e => setConnectionError(e instanceof Error ? e.message : String(e)))
+  }, [settings.aiEnabled])
+  async function checkStoredKey() { try { if (window.michiAI) setAiStatus(await window.michiAI.status()) } catch (error) { setConnectionError(error instanceof Error ? error.message : String(error)) } }
 
   // The coach intent only opens the undo preview; applying it still needs the owner's native click.
   async function openLatestUndo() {
     try {
-      const latest = agentChangeHistory(await db.audits.toArray(), 1)[0]
-      const result = latest ? await prepareUndoFromAudit(latest.auditId, { principal: { id: settings.profileId, kind: 'human' }, ownerId: settings.profileId, datasetId: settings.datasetId, allowedFields: [...taskChangeFields], sourceRevisions: [] }).catch(error => { onError(error); return null }) : null
+      // 「さっきの変更を戻して」: the newest coach-made change (agent, or owner-approved on a coach screen within 24h), all of its task rows.
+      const latest = latestCoachChange(await db.audits.toArray())
+      const result = latest.length ? await prepareUndoFromAudits(latest.map(fact => fact.auditId), { principal: { id: settings.profileId, kind: 'human' }, ownerId: settings.profileId, datasetId: settings.datasetId, allowedFields: [...taskChangeFields], sourceRevisions: [] }).catch(error => { onError(error); return null }) : null
       setUndoLatest(current => ({ key: (current?.key ?? 0) + 1, result }))
     } catch (error) { onError(error) }
   }
@@ -576,7 +601,8 @@ function CoachView({ tasks, allTasks, goals, checkIns, settings, onEdit, onNew, 
     try {
       const model = modelInput.trim()
       if (!/^[\w~./:-]{3,120}$/.test(model)) throw new Error('モデルIDを入力してください')
-      if (!aiStatus?.configured && !keyInput) throw new Error('APIキーを入力してください')
+      // Runs only on the owner's native click: with AI OFF the stored-key status is read here, not on open.
+      setAiStatus(await keyStatusForSave(aiStatus, keyInput, () => bridge.status()))
       if (keyInput) await bridge.saveKey(keyInput.trim())
       // Saving never turns AI back on: a stopped AI resumes only after the resume preview and the owner's click.
       await saveAIModel(model)
@@ -632,9 +658,9 @@ function CoachView({ tasks, allTasks, goals, checkIns, settings, onEdit, onNew, 
         <div className="coach-ai-setup">
           <h3>OpenRouter接続</h3>
           {bridge ? <>
-            <p>APIキーはWindowsの暗号化保存を使用し、バックアップには含めません。</p>
+            <p>APIキーはWindowsの暗号化保存を使用し、バックアップには含めません。</p>{!settings.aiEnabled && !aiStatus && <p className="muted">AIはOFFです。保存済みキーは読み込んでいません。モデルだけの保存はそのままできます。再開・キー削除のボタンは状態の確認後に表示します。<button className="text-button" onClick={checkStoredKey}>保存済みキーの状態を確認</button></p>}
             <label className="field">モデルID<input value={modelInput} onChange={e => setModelInput(e.target.value)} placeholder="例：提供元/モデル名" /></label>
-            <label className="field">APIキー<input type="password" autoComplete="off" value={keyInput} onChange={e => setKeyInput(e.target.value)} placeholder={aiStatus?.configured ? '登録済み（変更時のみ入力）' : 'OpenRouterのキー'} /></label>
+            <label className="field">APIキー<input type="password" autoComplete="off" value={keyInput} onChange={e => setKeyInput(e.target.value)} placeholder={aiStatus?.configured ? '登録済み（変更時のみ入力）' : !aiStatus && !settings.aiEnabled ? '未確認（変更時のみ入力）' : 'OpenRouterのキー'} /></label>
             <button className="secondary-button full" disabled={aiStatus?.secureStorage === false} onClick={saveConnection}>接続を保存</button>
             {settings.aiEnabled && <button className="secondary-button full" onClick={pauseAI}>AIをOFFにする（キーを保持）</button>}
             {!settings.aiEnabled && aiStatus?.configured && settings.aiModel && <AIProcessingResume settings={settings} label="AI処理の再開内容を確認" />}
@@ -647,6 +673,8 @@ function CoachView({ tasks, allTasks, goals, checkIns, settings, onEdit, onNew, 
         </div>
       </aside>
     </div>
+    <CoachConsultView settings={settings} tasks={tasks} onEdit={onEdit} />
+    <ReplanCandidatesView settings={settings} />
     <section className="card setting-section"><h2>既存タスクの再計画</h2><label className="field">変更する既存タスク<select aria-label="変更する既存タスク" value={changeTaskId} onChange={event => setChangeTaskId(event.target.value)}><option value="">選択してください</option>{tasks.map(task => <option key={task.id} value={task.id}>{task.title}</option>)}</select></label></section>
     {undoLatest && <ChangeHistoryView key={undoLatest.key} settings={settings} tasks={allTasks} latestOnly initial={undoLatest.result} />}
     <CoachTaskChangeView selectedTask={tasks.find(task => task.id === changeTaskId)} settings={settings} onEdit={onEdit} />
