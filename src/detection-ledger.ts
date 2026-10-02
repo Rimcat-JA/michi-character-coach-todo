@@ -1,3 +1,4 @@
+import Dexie from 'dexie'
 import { db } from './db'
 import { contentDigest } from './canonical'
 import { uid } from './domain'
@@ -37,7 +38,8 @@ async function observe(row: DetectedObligation, verdict: ObservationVerdict, at:
 /** Runs inside the detection save transaction. A dismissed or linked obligation keeps its state; observations are appended. */
 export async function recordObligationObservations(ownerId: string, datasetId: string, runId: string, candidates: { id: string; change: DetectionChange; status: ObservationVerdict; obligationKey: string }[], at: string): Promise<void> {
   for (const candidate of candidates) {
-    const evidenceKeys = await obligationEvidenceKeys(candidate.change), existing = await findObligation(ownerId, candidate.obligationKey)
+    // Quote digests use WebCrypto outside IndexedDB: Dexie.waitFor keeps this transaction alive across them.
+    const evidenceKeys = await Dexie.waitFor(obligationEvidenceKeys(candidate.change)), existing = await findObligation(ownerId, candidate.obligationKey)
     let row: DetectedObligation
     if (!existing) { row = { id: uid(), ownerId, datasetId, canonicalKey: candidate.obligationKey, state: stateFor(candidate.status), linkedTaskId: null, evidenceKeys, action: candidate.change.action, basis: candidate.change.basis, revision: 1, createdAt: at, updatedAt: at }; await db.detectedObligations.add(row) }
     else {
@@ -70,7 +72,7 @@ export async function linkObligation(ownerId: string, datasetId: string, canonic
   const existing = await findObligation(ownerId, canonicalKey)
   if (existing?.state === 'linked' && existing.linkedTaskId === taskId) return
   if (existing && sticky(existing.state)) throw new Error('この根拠は不要または反映済みです')
-  const row: DetectedObligation = existing ? { ...existing, state: 'linked', linkedTaskId: taskId, revision: existing.revision + 1, updatedAt: at < existing.updatedAt ? existing.updatedAt : at } : { id: uid(), ownerId, datasetId, canonicalKey, state: 'linked', linkedTaskId: taskId, evidenceKeys: await obligationEvidenceKeys(change), action: change.action, basis: change.basis, revision: 1, createdAt: at, updatedAt: at }
+  const row: DetectedObligation = existing ? { ...existing, state: 'linked', linkedTaskId: taskId, revision: existing.revision + 1, updatedAt: at < existing.updatedAt ? existing.updatedAt : at } : { id: uid(), ownerId, datasetId, canonicalKey, state: 'linked', linkedTaskId: taskId, evidenceKeys: await Dexie.waitFor(obligationEvidenceKeys(change)), action: change.action, basis: change.basis, revision: 1, createdAt: at, updatedAt: at }
   await db.detectedObligations.put(row); await observe(row, 'linked', row.updatedAt, runId, candidateId)
 }
 /** Source erasure is 出典失効 (10.6), not a business cancellation: open observations become withdrawn; dismissals and links stay. */

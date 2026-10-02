@@ -69,7 +69,9 @@ describe('K04 所属・承認済みルールを本人の画面から渡す',()=>
     await detectObligationsForSource(context.prepared,{detect:async payload=>{sent.push(JSON.stringify(payload));return calls.detect(payload)},verify:calls.verify})
     const trusted=JSON.parse(sent[0]).request.trusted_context
     expect(trusted.participation_bindings).toEqual([{id:'binding-dev',confirmed:true,description:expect.stringContaining('本人の会社暦')}]);expect(trusted.approved_rules).toEqual([])
-    for(const hidden of ['staff-001','会社営業日','勤怠を提出','公開勤務割当の出勤'])expect(sent[0]).not.toContain(hidden)
+    // Only the selected ids and descriptions may travel as calendar data; the source
+    // spans below are the analyzed document itself, not calendar leakage.
+    for(const hidden of ['staff-001','会社営業日','勤怠を提出','公開勤務割当の出勤'])expect(JSON.stringify(trusted)).not.toContain(hidden)
   })
 })
 

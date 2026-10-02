@@ -4,7 +4,7 @@ import { db,ensureSettings } from './db'
 import { defaultChangePolicy } from './change-set'
 import { designDetectionFixtures } from './detection-fixtures'
 import { applyDetectionCreateFromUI,clearDetectionAuthority,detectObligationsForSource,prepareDetectionCreate,savedDetectionRuns } from './detection-run'
-import { humanClick,mapFixtureOutput,prepareFixture,replayModel,replayTransport } from './detection-fixture-replay'
+import { mapFixtureOutput, prepareFixture, replayModel, replayTransport } from './detection-fixture-replay'
 import type { DetectionChange } from './detection-contract'
 
 beforeEach(async()=>{vi.restoreAllMocks();clearDetectionAuthority();await db.delete();await db.open();await ensureSettings();await db.settings.update('main',{aiEnabled:true,aiModel:replayModel,changePolicy:defaultChangePolicy()})})
