@@ -131,3 +131,4 @@ contextBridge.exposeInMainWorld('michiScheduleRefresh', {
   onStatus: callback => { const listener = (_event, value) => callback(value); ipcRenderer.on('michi:schedule-refresh-status', listener); return () => ipcRenderer.removeListener('michi:schedule-refresh-status', listener) },
   onNotify: callback => { const listener = (_event, value) => callback(value); ipcRenderer.on('michi:schedule-refresh-notify', listener); return () => ipcRenderer.removeListener('michi:schedule-refresh-notify', listener) }
 })
+contextBridge.exposeInMainWorld('michiCalDAV', { request: value => ipcRenderer.invoke('michi:caldav', value) })

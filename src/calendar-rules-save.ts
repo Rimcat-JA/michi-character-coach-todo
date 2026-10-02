@@ -11,6 +11,7 @@ import { redactICSForAudit } from './calendar-import-redaction'
 import { redactCSVForAudit } from './calendar-csv-redaction'
 import { csvHeadHasRetainedEvidence } from './calendar-resolver'
 import { queueCalendarChangeNotifications, type CalendarMove } from './coach-triggers'
+import { clearScheduleRefreshBytes } from './schedule-refresh'
 
 const calendarDB = db as typeof db & { calendarRules: EntityTable<CalendarRulesState, 'id'> }
 const table = () => { if (!calendarDB.calendarRules) throw new Error('共通カレンダーの保存先がありません。アプリを更新してください'); return calendarDB.calendarRules }
@@ -30,7 +31,7 @@ const configurationGuards = new Map<string, CalendarConfigurationGuard>()
 type AcquisitionGuard = { assertCurrent: (settings: Settings) => Promise<void>; markApplied: () => Promise<void> }
 const acquisitionGuards = new Map<string, AcquisitionGuard>()
 export function bindCalendarAcquisitionGuard(proposal: CalendarConfigurationProposal, guard: AcquisitionGuard) { if (authority.get(proposal.id) !== proposal || acquisitionGuards.has(proposal.id)) throw new Error('登録済みの確認案へ取得資料を一度だけ結び付けてください'); acquisitionGuards.set(proposal.id, guard) }
-export function clearCalendarRulesAuthority() { authority.clear(); configurationGuards.clear(); acquisitionGuards.clear() }
+export function clearCalendarRulesAuthority() { authority.clear(); configurationGuards.clear(); acquisitionGuards.clear(); clearScheduleRefreshBytes() }
 export function discardCalendarConfigurationProposal(proposal: CalendarConfigurationProposal) { if (authority.get(proposal.id) === proposal) { authority.delete(proposal.id); configurationGuards.delete(proposal.id); acquisitionGuards.delete(proposal.id) } }
 /** Guards are process-owned callbacks and cannot be recovered from a JSON proposal. */
 export function bindCalendarConfigurationGuard(proposal: CalendarConfigurationProposal, guard: CalendarConfigurationGuard) {

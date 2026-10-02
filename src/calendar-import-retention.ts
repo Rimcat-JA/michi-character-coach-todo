@@ -5,6 +5,7 @@ import { changePolicyFor } from './change-set'
 import { clearCalendarRulesAuthority } from './calendar-rules-save'
 import { redactExpiredICSRecords } from './calendar-import-redaction'
 import { validateCalendarRulesState } from './calendar-rules-validation'
+import { purgeScheduleRefreshInbox } from './schedule-refresh'
 
 let running: Promise<void> | null = null
 /** Call on startup, expiry tick and before capture. No event is cancelled. */
@@ -22,5 +23,5 @@ export async function purgeExpiredCalendarOriginals(at = new Date().toISOString(
     await db.settings.put({ ...settings, changePolicy: { ...policy, epoch: policy.epoch + 1, sourcePermissionRevision: policy.sourcePermissionRevision + 1 } })
     clearCalendarRulesAuthority()
   })
-  try { await running } finally { running = null }
+  try { await running; await purgeScheduleRefreshInbox(at) } finally { running = null }
 }

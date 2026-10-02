@@ -23,6 +23,7 @@ import { purgeExpiredCalendarOriginals } from './calendar-import-retention'
 import { redactExpiredICSRecords } from './calendar-import-redaction'
 import { changePolicyFor, validateChangePolicy } from './change-set'
 import { verifyCalendarOriginalDigests } from './calendar-import'
+import { verifyCalDAVOriginalDigests } from './calendar-caldav'
 import { verifyCSVOriginalDigests } from './calendar-csv-import'
 import { purgeExpiredCSVOriginals } from './calendar-csv-retention'
 import { applyCurrentCSVRetention, redactExpiredCSVRecords } from './calendar-csv-redaction'
@@ -65,6 +66,7 @@ export async function captureSnapshot(): Promise<Snapshot> {
   snapshot.taskAttachments = await Promise.all(attachmentRows.map(async ({ blob, ...metadata }) => ({ ...metadata, contentBase64: b64(new Uint8Array(await blob.arrayBuffer())) })))
   validateSnapshot(snapshot)
   await verifyCalendarOriginalDigests(snapshot.calendarRules ?? [])
+  await verifyCalDAVOriginalDigests(snapshot.calendarRules ?? [])
   await verifyCSVOriginalDigests(snapshot.calendarRules ?? [])
   await verifyAchievementDigests(snapshot.achievementEvidence ?? [], snapshot.achievementExports ?? [])
   return snapshot
@@ -131,6 +133,7 @@ export async function restoreBackup(snapshot: Snapshot) {
   validateSnapshot(snapshot)
   await verifySourceDigests(snapshot.contextSnapshots, snapshot.sourceSummaries)
   await verifyCalendarOriginalDigests(snapshot.calendarRules ?? [])
+  await verifyCalDAVOriginalDigests(snapshot.calendarRules ?? [])
   await verifyCSVOriginalDigests(snapshot.calendarRules ?? [])
   await verifyAchievementDigests(snapshot.achievementEvidence ?? [], snapshot.achievementExports ?? [])
   await verifyTaskSourceEvidenceDigests(snapshot.taskSourceEvidence)

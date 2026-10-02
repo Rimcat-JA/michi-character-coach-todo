@@ -254,6 +254,7 @@ export async function prepareICSConfiguration(state: CalendarRulesState, target:
 export async function prepareCalendarICSImport(target: ICSImportTarget, input: string, options: Omit<CalendarImportOptions, 'timezone'>): Promise<PreparedCalendarImport> {
   const state = await loadCalendarRulesState(), context = state.contexts.find(item => item.id === target.contextId)
   if (!context) error('対象を選んでください')
+  if (state.sources.some(source => source.contextId === target.contextId && source.ics?.feedId === target.feedId && (source.caldav || source.acquisition?.provider === 'caldav'))) error('CalDAV資料はCalDAVの確認待ち一覧から更新してください')
   const parsed = parseCalendarImport(input, { ...options, timezone: context.timezone }), preview = await prepareICSConfiguration(state, target, parsed)
   return { preview, proposal: preview.noOp || preview.duplicates.length ? null : await prepareCalendarConfiguration(preview.next, state.revision, parsed.fromDate, parsed.toDate) }
 }

@@ -14,7 +14,7 @@ function text(value: unknown, name: string, max = 300): asserts value is string 
 function id(value: unknown) { text(value, 'ID', 200); if (!/^[A-Za-z0-9_.:-]+$/.test(value)) throw new Error('IDには英数字・_ . : - を使ってください') }
 function integer(value: unknown, low: number, high: number) { if (!Number.isInteger(value) || Number(value) < low || Number(value) > high) throw new Error('カレンダーの数値が範囲外です') }
 function revision(value: unknown) { integer(value, 1, Number.MAX_SAFE_INTEGER) }
-function hash(value: unknown) { if (typeof value !== 'string' || !/^[a-f0-9]{64}$/.test(value)) throw new Error('CSVの内容hashが不正です') }
+function hash(value: unknown): asserts value is string { if (typeof value !== 'string' || !/^[a-f0-9]{64}$/.test(value)) throw new Error('内容hashが不正です') }
 function anonymousId(value: unknown) { if (typeof value !== 'string' || !/^sha256:[a-f0-9]{64}$/.test(value)) throw new Error('CSVの外部ID・本人参照は匿名hashです') }
 function date(value: unknown) { if (typeof value !== 'string') throw new Error('日付が不正です'); validateDate(value, 'カレンダー日付'); if (!value) throw new Error('日付を指定してください') }
 function range(from: unknown, to: unknown) { date(from); date(to); if (String(from) > String(to)) throw new Error('有効期間の順序が不正です') }
@@ -90,10 +90,21 @@ export function validateCalendarRulesState(value: unknown, ownerId?: string, dat
   rows(value.activities, ['id', 'contextId', 'bindingId', 'calendarId', 'title', 'eventKind', 'weekdays', 'startTime', 'endTime', 'endDayOffset', 'validFrom', 'validTo', 'revision'], 1000)
   value.activities.forEach(row => { id(row.contextId); id(row.bindingId); id(row.calendarId); text(row.title, '活動名'); choice(row.eventKind, ['class', 'meeting', 'other']); weekdays(row.weekdays); clock(row.startTime); clock(row.endTime); integer(row.endDayOffset, 0, 6); range(row.validFrom, row.validTo); revision(row.revision); if (row.endDayOffset === 0 && String(row.startTime) >= String(row.endTime)) throw new Error('開始・終了の順序を確認してください') })
   array(value.sources, 1000)
-  for (const source of value.sources) { if (!source || typeof source !== 'object') throw new Error('資料が不正です'); object(source, ['id', 'contextId', 'title', 'authorityScope', 'coverageFrom', 'coverageTo', 'status', 'revision', 'importedAt', 'bodyHash', ...('ics' in source ? ['ics'] : []), ...('csv' in source ? ['csv'] : []), ...('acquisition' in source ? ['acquisition'] : [])]); id(source.id); if ('acquisition' in source) { object(source.acquisition, ['provider', 'qaFixture', 'staleByFetch']); choice(source.acquisition.provider, ['ics_url', 'file_watch', 'caldav']); bool(source.acquisition.qaFixture); bool(source.acquisition.staleByFetch) }; if ('ics' in source && 'csv' in source) throw new Error('ICSとCSVの資料を混ぜられません') }
+  for (const source of value.sources) { if (!source || typeof source !== 'object') throw new Error('資料が不正です'); object(source, ['id', 'contextId', 'title', 'authorityScope', 'coverageFrom', 'coverageTo', 'status', 'revision', 'importedAt', 'bodyHash', ...('ics' in source ? ['ics'] : []), ...('csv' in source ? ['csv'] : []), ...('acquisition' in source ? ['acquisition'] : []), ...('caldav' in source ? ['caldav'] : [])]); id(source.id); if ('acquisition' in source) { object(source.acquisition, ['provider', 'qaFixture', 'staleByFetch']); choice(source.acquisition.provider, ['ics_url', 'file_watch', 'caldav']); bool(source.acquisition.qaFixture); bool(source.acquisition.staleByFetch) }; if ('ics' in source && 'csv' in source) throw new Error('ICSとCSVの資料を混ぜられません') }
   if (new Set(value.sources.map(source => (source as Row).id)).size !== value.sources.length) throw new Error('資料IDが重複しています')
   const sourceRows = value.sources as Row[]
   let originalBytes = 0
+  for (const source of sourceRows) if (source.caldav !== undefined) {
+    object(source.caldav, ['accountId', 'collectionHash', 'readOnly', 'objects', 'snapshots'])
+    if (!source.ics || source.caldav.readOnly !== true || (source.acquisition as Row | undefined)?.provider !== 'caldav') throw new Error('CalDAVは読取対象のICS資料として保持してください')
+    id(source.caldav.accountId);hash(source.caldav.collectionHash)
+    array(source.caldav.objects,1000)
+    const hrefs=new Set<string>()
+    for (const entry of source.caldav.objects) { object(entry,['hrefHash','etag','uidHashes']);hash(entry.hrefHash);if(hrefs.has(entry.hrefHash))throw new Error('CalDAVのオブジェクトが重複しています');hrefs.add(entry.hrefHash);text(entry.etag,'CalDAV ETag',1000);if((!/^"[^"]+"$/.test(entry.etag)||[...entry.etag].some(char=>char.charCodeAt(0)<32||char.charCodeAt(0)===127)))throw new Error('CalDAV ETagが不正です');array(entry.uidHashes,1000);for(const uid of entry.uidHashes)if(typeof uid!=='string'||!/^sha256:[a-f0-9]{64}$/.test(uid))throw new Error('CalDAV UIDは匿名hashです') }
+    array(source.caldav.snapshots,20);let prior=0
+    for(const snapshot of source.caldav.snapshots){object(snapshot,['revision','sha256','originalJSON','fetchedAt']);revision(snapshot.revision);if(Number(snapshot.revision)<=prior||Number(snapshot.revision)>Number(source.revision))throw new Error('CalDAV取得原本の版が不正です');prior=Number(snapshot.revision);hash(snapshot.sha256);instant(snapshot.fetchedAt);if(snapshot.originalJSON!==null){if(typeof snapshot.originalJSON!=='string'||!snapshot.originalJSON||new TextEncoder().encode(snapshot.originalJSON).length>1048576)throw new Error('CalDAV取得原本は1MiB以内です');originalBytes+=new TextEncoder().encode(snapshot.originalJSON).length}}
+    if(prior!==source.revision)throw new Error('CalDAV取得原本と資料の最新版が一致しません')
+  }
   for (const source of sourceRows) if (source.ics !== undefined) {
     object(source.ics, ['feedId', 'readOnly', 'retentionUntil', 'snapshots', 'components']); text(source.ics.feedId, 'ICS取込元', 120); if (source.ics.readOnly !== true || source.authorityScope !== 'activity') throw new Error('ICSは読取専用の活動資料です')
     if (source.ics.retentionUntil !== null) instant(source.ics.retentionUntil)

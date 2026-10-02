@@ -35,3 +35,12 @@ test('ambiguous, rotated, scanned and oversized grids are held rather than guess
   await assert.rejects(extractScheduleDocument(input('huge.pdf', new Uint8Array(25 * 1024 * 1024 + 1))), /25MiB/)
   await assert.rejects(extractScheduleDocument({ ...input('bad.pdf', new Uint8Array([1])), yTolerance: Infinity }), /25MiB/)
 })
+
+function imageOnlyPDF(encrypted=false){
+ const objects=['<< /Type /Catalog /Pages 2 0 R >>','<< /Type /Pages /Kids [3 0 R] /Count 1 >>','<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Resources << /XObject << /Im1 5 0 R >> >> /Contents 4 0 R >>','<< /Length 31 >>\nstream\nq 100 0 0 100 0 0 cm /Im1 Do Q\nendstream','<< /Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /ASCIIHexDecode /Length 8 >>\nstream\nFF0000>\nendstream'];if(encrypted)objects.push('<< /Filter /Standard /V 1 /R 2 /O <'+ '00'.repeat(32)+'> /U <'+ '00'.repeat(32)+'> /P -4 >>')
+ let text='%PDF-1.4\n',offsets=[0];for(const [index,value]of objects.entries()){offsets.push(Buffer.byteLength(text));text+=`${index+1} 0 obj\n${value}\nendobj\n`}const xref=Buffer.byteLength(text);text+=`xref\n0 ${objects.length+1}\n0000000000 65535 f \n`+offsets.slice(1).map(offset=>String(offset).padStart(10,'0')+' 00000 n \n').join('')+`trailer\n<< /Size ${objects.length+1} /Root 1 0 R ${encrypted?'/Encrypt 6 0 R /ID [<00112233445566778899aabbccddeeff><00112233445566778899aabbccddeeff>]':''} >>\nstartxref\n${xref}\n%%EOF`;return new Uint8Array(Buffer.from(text))
+}
+test('actual image-only and encrypted PDF bytes are refused in the worker, without OCR or a password prompt',async()=>{
+ await assert.rejects(extractScheduleDocument(input('scan.pdf',imageOnlyPDF())),/OCR/)
+ await assert.rejects(extractScheduleDocument(input('encrypted.pdf',imageOnlyPDF(true))),/password|パスワード|暗号/i)
+})

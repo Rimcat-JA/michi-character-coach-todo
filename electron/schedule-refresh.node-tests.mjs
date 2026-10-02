@@ -40,7 +40,7 @@ test('offline, frozen, stops and owner/epoch changes block before request; resto
   f.context.datasetState.mode='active';f.context.settings.changePolicy.stops={routines:true};await f.service.refresh(record.id);assert.equal(f.requests.length,count)
   f.context.settings.changePolicy.stops={};f.context.settings.changePolicy.epoch++;await f.service.refresh(record.id);assert.equal(f.requests.length,count)
 })
-test('native-selected file change, replacement and watch fallback detect SHA; symlinks are rejected',async t=>{
+test('native-selected file change, replacement and watch fallback detect SHA',async t=>{
   const f=await fixture(t),root=await fs.mkdtemp(path.join(os.tmpdir(),'michi-schedule-'));t.after(()=>fs.rm(root,{recursive:true,force:true}));const filePath=await fs.realpath(root).then(root=>path.join(root,'calendar.ics'));await fs.writeFile(filePath,'one')
   const record=await f.configure({kind:'file',url:null,filePath});await f.service.tick();assert.equal(f.changed.length,1);await f.service.acknowledge(record.id,f.changed[0].bodySha256)
   await fs.writeFile(filePath,'two');await f.service.tick();assert.equal(f.changed.length,2);await f.service.acknowledge(record.id,f.changed[1].bodySha256)
@@ -52,4 +52,11 @@ test('HTTPS, private IPs, IPv6 aliases, DNS rebinding and an unapproved origin a
   assert.equal(publicAddress('8.8.8.8'),true);assert.equal(publicAddress('2606:4700:4700::1111'),true)
   const transport=createScheduleTransport({lookup:async()=>[{address:'8.8.8.8',family:4},{address:'127.0.0.1',family:4}]});await assert.rejects(transport('https://example.com'),/PRIVATE_ADDRESS/)
   const gateway=createNetworkGateway({getPolicy:async()=>({policy:'explicit_online'}),scheduleTransport:transport});await assert.rejects(gateway.fetch('schedule','https://example.com'),/許可/)
+})
+
+test('a permission sweep erases pending originals before the next due date; reapproval needs newly acquired bytes',async t=>{
+  const f=await fixture(t),record=await f.configure();f.context.calendarRules={sources:[{id:'source',ics:{retentionUntil:'2026-10-03T00:00:00.000Z'}}]};await f.service.refresh(record.id);const before=f.requests.length
+  f.context.settings.changePolicy.stops={routines:true};await f.service.tick();assert.equal(f.requests.length,before);assert.equal((await f.service.list())[0].status,'paused');await assert.rejects(f.service.candidate(record.id),/STOPPED/)
+  f.context.settings.changePolicy.stops={};assert.equal(await f.service.candidate(record.id),null);await f.service.refresh(record.id);assert.ok(await f.service.candidate(record.id));assert.equal(f.requests.at(-1).headers['if-none-match'],undefined)
+  f.advance(86400000);await f.service.tick();assert.equal(f.requests.length,before+1);await assert.rejects(f.service.candidate(record.id),/PERMISSION_EXPIRED/)
 })

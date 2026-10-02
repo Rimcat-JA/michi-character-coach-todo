@@ -1,4 +1,4 @@
-const tables = new Set(['settings', 'tasks', 'commands', 'contextSources', 'smartLists', 'calendarRules', 'datasetState'])
+const tables = new Set(['settings', 'tasks', 'commands', 'contextSources', 'smartLists', 'calendarRules', 'datasetState', 'calendarEvents'])
 async function readAppDatabase(win, table, key) {
   if (!tables.has(table) || win.isDestroyed() || key !== null && typeof key !== 'string' && !Array.isArray(key)) throw new Error('アプリの保存領域を読めません')
   const all = key === null || Array.isArray(key)

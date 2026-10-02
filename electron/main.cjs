@@ -17,6 +17,7 @@ const { readAppDatabase, readNotificationContext } = require('./app-db-reader.cj
 const { createNetworkGateway, policyFromSettings } = require('./network-gateway.cjs')
 const { createScheduleTransport } = require('./schedule-network.cjs')
 const { installScheduleRefreshIPC, scheduleQAFixtureMode } = require('./schedule-refresh-ipc.cjs')
+const { installCalDAVIPC } = require('./caldav-ipc.cjs')
 const { githubQAFetch } = require('./github-qa.cjs')
 const { createOSNotificationGuard, notificationTextAllowed } = require('./notification-delivery.cjs')
 const { createTrayMode } = require('./tray-mode.cjs')
@@ -362,7 +363,8 @@ if (hasInstanceLock) app.whenReady().then(() => {
   const qaGitHub = githubQAFetch({ app })
   const qaSchedule = scheduleQAFixtureMode(app)
   networkGateway = createNetworkGateway({ fetchImpl: qaGitHub.fetchImpl, scheduleTransport: createScheduleTransport({ qaLoopback: qaSchedule }), qaScheduleLoopback: qaSchedule, getPolicy: async () => policyFromSettings(await readAppDatabase(win, 'settings', 'main'), await legacyOnlineConfigured()) })
-  installScheduleRefreshIPC({ ipcMain, dialog, win, app, safeStorage, gateway: networkGateway, assertFrame: assertAppFrame, readDatabase: readAppDatabase, qaLoopback: qaSchedule })
+  const refreshScheduler = installScheduleRefreshIPC({ ipcMain, dialog, win, app, safeStorage, gateway: networkGateway, assertFrame: assertAppFrame, readDatabase: readAppDatabase, qaLoopback: qaSchedule })
+  installCalDAVIPC({ ipcMain, dialog, win, app, safeStorage, gateway: networkGateway, assertFrame: assertAppFrame, readDatabase: readAppDatabase, refreshScheduler, qaLoopback: qaSchedule })
   installFolderWatchIPC({ ipcMain, dialog, win, assertFrame: assertAppFrame, readDatabase: readAppDatabase })
   ipcMain.handle('michi:network-status', async event => {
     assertAppFrame(event)
