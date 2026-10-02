@@ -3,6 +3,7 @@ import { prepareTaskChanges, type ChangeContext, type PreparedChangeSet, type Ta
 import type { VerifiedTaskInstruction } from './task-user-instruction'
 import { db } from './db'
 import { loadTaskEgress, recordEgressAudit, type TaskEgress } from './egress-policy'
+import type { SplitChildDraft } from './task-split-change'
 
 export type CoachTaskSnapshot = Pick<Task,'id'|'title'|'notes'|'scheduledDate'|'dueDate'|'revision'> & { scoreMode?:ScoreMode; manualPoints?:number|null }
 export type CoachTaskProposal = { targetId:string; targetRevision:number; patch:TaskChangePatch; reason:string }
@@ -142,4 +143,59 @@ export function scheduleOnlyPatch(task:Pick<Task,'scheduledDate'>,instruction:st
     if(date===task.scheduledDate)return{notice:`予定日はすでに ${date} です。`}
     return{scheduledDate:date,notice:`相談文から予定日だけを ${date} に入れました（締め切りは変えません）。まだ適用していません。`}
   }catch(error){return{notice:error instanceof Error?error.message:String(error)}}
+}
+
+/** N03 proxy split. Only the owner's own words become child titles; only integers the owner wrote become points. */
+export type CoachSplitRequest = { model: string; message: string; task: { id: string; title: string; revision: number; scoreMode: ScoreMode; manualPoints: number | null } }
+export type CoachSplitProposal = { status: 'proposal'; targetId: string; targetRevision: number; children: SplitChildDraft[]; reason: string; notices: string[] } | { status: 'needs_confirmation'; reason: string }
+const vagueSplit = /半分|半々|いい感じ|良い感じ|適当|おまかせ|お任せ|任せ|うまく|上手く|均等|等分|適宜|よしなに|なんとなく|ざっくり|自動で/
+export function splitRequestNeedsConfirmation(message: string): string | null {
+  const text = typeof message === 'string' ? message.normalize('NFKC') : ''
+  if (!/分け|分割|分解|切り分|分ける/.test(text)) return '分割する指示を確認してください。例：調査15ptと実装25ptに分けて'
+  if (vagueSplit.test(text)) return '分け方とポイント配分を本人が具体的に指定してください。例：調査15ptと実装25ptに分けて'
+  return null
+}
+const escapeRegExp = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+/** True only when the owner's text binds this integer to this title (e.g. 調査15pt / 15ptの調査). */
+export function ownerWrotePoints(message: string, title: string, points: number) {
+  const text = message.normalize('NFKC'), name = escapeRegExp(title.normalize('NFKC')), unit = '\\s*(?:pt|ポイント|点)'
+  return new RegExp(`${name}\\s*(?:は|を|が|に|で|:|：|=|＝)?\\s*${points}${unit}`, 'i').test(text) || new RegExp(`(?<!\\d)${points}${unit}\\s*(?:の|で|を)?\\s*${name}`, 'i').test(text)
+}
+export async function prepareCoachSplitRequest(task: Task, message: string, model: string): Promise<CoachSplitRequest> {
+  checkSelection(task)
+  if (typeof message !== 'string' || !message.trim() || message.length > 4000) throw new Error('分割の相談文は1〜4000文字で入力してください')
+  if (typeof model !== 'string' || !/^[\w~./:-]{3,120}$/.test(model)) throw new Error('モデルIDを確認してください')
+  const vague = splitRequestNeedsConfirmation(message)
+  if (vague) throw new Error(vague)
+  const request = { model, message, task: { id: task.id, title: task.title, revision: task.revision, scoreMode: task.score.mode, manualPoints: task.score.mode === 'manual' || task.score.mode === 'allocated' ? task.score.manualPoints : null } }
+  await db.transaction('rw', db.audits, () => recordEgressAudit({ kind: 'ai-model', route: 'coach-task-change', model }, [{ taskId: task.id, egress: { notes: '', withheldQuotes: 0, notesWithheld: false } }]))
+  return request
+}
+export function parseCoachSplit(answer: string, task: Pick<CoachTaskSnapshot, 'id' | 'revision'> | undefined, message: string): CoachSplitProposal {
+  checkSelection(task as CoachTaskSnapshot)
+  const vague = splitRequestNeedsConfirmation(message)
+  if (vague) return { status: 'needs_confirmation', reason: vague }
+  if (typeof answer !== 'string' || answer.length > 20000) throw new Error('コーチの分割案の大きさが不正です')
+  let parsed: unknown
+  try { parsed = JSON.parse(answer) } catch { throw new Error('コーチの分割案を読めませんでした。相談文は残っています。') }
+  if (record(parsed) && parsed.status === 'needs_confirmation') {
+    if (!exactKeys(parsed, ['status', 'reason']) || typeof parsed.reason !== 'string' || !parsed.reason.trim() || parsed.reason.length > 1000) throw new Error('コーチの確認事項の形式が不正です')
+    return { status: 'needs_confirmation', reason: parsed.reason.trim() }
+  }
+  if (!record(parsed) || !exactKeys(parsed, ['children', 'reason']) || !Array.isArray(parsed.children) || parsed.children.length < 2 || parsed.children.length > 20 || typeof parsed.reason !== 'string' || !parsed.reason.trim() || parsed.reason.length > 1000) throw new Error('コーチの分割案の形式が不正です。2〜20件の子タスクだけを提案できます。')
+  const text = message.normalize('NFKC'), notices: string[] = [], seen = new Set<string>()
+  const children = parsed.children.map((child: unknown) => {
+    if (!record(child) || !exactKeys(child, ['title_quote', 'points']) || typeof child.title_quote !== 'string' || !child.title_quote.trim() || child.title_quote.length > 300) throw new Error('子タスクの形式が不正です')
+    const title = child.title_quote.trim()
+    // No new work: every child name must be the owner's own words.
+    if (!text.includes(title.normalize('NFKC')) || title.normalize('NFKC') === text.trim()) throw new Error(`子タスク「${title}」は本人の相談文にありません。新しい作業は追加しません`)
+    if (seen.has(title)) throw new Error('同じ子タスクが重複しています')
+    seen.add(title)
+    if (child.points !== null && (!Number.isSafeInteger(child.points) || Number(child.points) < 0 || Number(child.points) > 100000)) throw new Error('子タスクのポイント候補が不正です')
+    const points = child.points === null ? null : Number(child.points)
+    if (points !== null && !ownerWrotePoints(message, title, points)) { notices.push(`「${title}」の${points}ptは本人の記載と一致しないため未設定にしました`); return { title, points: null, titleOrigin: 'owner_text' as const, pointsOrigin: null } }
+    return { title, points, titleOrigin: 'owner_text' as const, pointsOrigin: points === null ? null : 'owner_text' as const }
+  })
+  if (children.some(child => child.points === null)) notices.push('未設定のポイントは本人が入力してから差分を作ります')
+  return { status: 'proposal', targetId: task!.id, targetRevision: task!.revision, children, reason: parsed.reason.trim(), notices }
 }

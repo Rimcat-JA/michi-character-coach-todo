@@ -21,6 +21,7 @@ declare global {
       assistTask: (request: { model: string; text: string }) => Promise<string>
       assessScore: (request: { model: string; text: string }) => Promise<string>
       proposeTaskChange: (request: { model: string; message: string; task: { id: string; title: string; notes: string; scheduledDate: string | null; dueDate: string | null; revision: number; scoreMode: Task['score']['mode']; manualPoints: number | null } }) => Promise<string>
+      proposeTaskSplit?: (request: { model: string; message: string; task: { id: string; title: string; revision: number; scoreMode: Task['score']['mode']; manualPoints: number | null } }) => Promise<string>
       proposeRoutine: (request: RoutineAssistRequest) => Promise<string>
       detectObligations: (input: { model: string; request: DetectionRequest }) => Promise<string>
       verifyObligations: (input: { model: string; request: DetectionRequest; change: DetectionChange }) => Promise<string>

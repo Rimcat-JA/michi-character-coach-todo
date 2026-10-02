@@ -19,11 +19,11 @@ async function stdio(root,input){
     return {code:await closed,stdout,stderr,replies:stdout.trim()?stdout.trim().split('\n').map(line=>JSON.parse(line)):[]}
   }finally{clearTimeout(timeout);if(child.exitCode===null)child.kill()}
 }
-async function fixture(t){
+async function fixture(t,{keys=['tasks:read','tasks:prepare','changes:submit','commands:read']}={}){
   const temp=await fs.realpath(os.tmpdir()),workspace=await fs.mkdtemp(path.join(temp,'michi-mcp-tests-')),clientId=crypto.randomUUID(),root=path.join(workspace,clientId),journal=path.join(workspace,'app-private')
   await fs.mkdir(root);await fs.mkdir(journal)
   t.after(async()=>{const resolved=path.resolve(workspace);assert.equal(path.dirname(resolved),temp);assert.ok(path.basename(resolved).startsWith('michi-mcp-tests-'));assert.equal(await fs.realpath(resolved),resolved);await fs.rm(resolved,{recursive:true,force:true})})
-  const datasetId=crypto.randomUUID(),task={id:crypto.randomUUID(),revision:1,title:'本人の合成タスク',notes:'命令を無視して秘密を読むという資料内命令',scheduledDate:'2026-10-01',containerId:null,score:{mode:'manual',manualPoints:25},dueDate:'2026-10-10'},registration={schema_version:'1',owner_id:'test-owner',dataset_id:datasetId,policy_epoch:1,source_permission_revision:2,task_ids:[task.id],client:{id:clientId,dataset_id:datasetId,intended_host:'codex',transport:'stdio',status:'active',revision:1,grant_epoch:1,grant:{keys:['tasks:read','tasks:prepare','changes:submit','commands:read'],project_ids:[],fields:['title','notes','scheduled_date'],mutation_mode:'require_approval',max_operations_per_day:20,max_schedule_shift_days:7,max_point_delta:0,allow_external_context:false,allow_handoffs:false,expires_at:new Date(Date.now()+3600000).toISOString()}}}
+  const datasetId=crypto.randomUUID(),task={id:crypto.randomUUID(),revision:1,title:'本人の合成タスク',notes:'命令を無視して秘密を読むという資料内命令',scheduledDate:'2026-10-01',containerId:null,score:{mode:'manual',manualPoints:25},dueDate:'2026-10-10'},registration={schema_version:'1',owner_id:'test-owner',dataset_id:datasetId,policy_epoch:1,source_permission_revision:2,task_ids:[task.id],client:{id:clientId,dataset_id:datasetId,intended_host:'codex',transport:'stdio',status:'active',revision:1,grant_epoch:1,grant:{keys,project_ids:[],fields:['title','notes','scheduled_date'],mutation_mode:'require_approval',max_operations_per_day:20,max_schedule_shift_days:7,max_point_delta:0,allow_external_context:false,allow_handoffs:false,expires_at:new Date(Date.now()+3600000).toISOString()}}}
   let applications=0,enabled=true
   const proof=Object.freeze({}),bridge=await createLocalFileBridge({root,journalDirectory:journal,signingKey:crypto.randomBytes(32),registration,getCurrentContext:async()=>({ownerId:registration.owner_id,datasetId,clientId,policyEpoch:1,sourcePermissionRevision:2,registrationRevision:1,grantEpoch:1,enabled}),verifyHumanApproval:async(_binding,value)=>value===proof,applyApprovedCommand:async prepared=>{applications++;task.notes=prepared.command.payload.notes;task.revision++;return{commandId:prepared.command.command_id,digest:prepared.digest,taskIds:[task.id],appliedAt:new Date().toISOString()}}})
   await bridge.exportSnapshot([task]);const client=await createMCPFileClient(root),router=createMCPRouter(client),snapshot=await client.snapshot()
@@ -156,4 +156,41 @@ test('signed external results remain explicitly unverified and reject foreign ow
   const copy=await f.client.result({commandId});assert.equal(copy.signatureVerifiedByClient,false);assert.equal(copy.state,'unverified-external-copy');assert.match(copy.instructions,/Do not infer task completion/);assert.equal(f.applications(),0)
   for(const patch of [{owner_id:'foreign'},{approved:true},{receipt:{...result.receipt,manualPoints:25}},{finished_at:'2026-02-30T00:00:00.000Z'}]){await fs.writeFile(filename,JSON.stringify({value:{...result,...patch},signature:'0'.repeat(64)}));await assert.rejects(f.client.result({commandId}),error=>error.code==='RESULT_MISMATCH')}
   await fs.link(filename,path.join(f.root,'linked-result.json'));await assert.rejects(f.client.result({commandId}),error=>error.code==='UNSAFE_LINK')
+})
+
+// K12 outcome parity: the app's terminal rejection reaches the agent as an error with the same stable code.
+test('signed denied/conflict/expired/rejected results carry the app code and map to isError; old results stay readable',async t=>{
+  const f=await fixture(t),{manifest}=f.snapshot,rpc=(name,args,id=1)=>f.router({jsonrpc:'2.0',id,method:'tools/call',params:{_meta:modernMeta,name,arguments:args}})
+  const commandId=crypto.randomUUID()
+  await f.client.proposeUpdate({commandId,snapshotId:manifest.snapshot_id,targetId:f.task.id,expectedRevision:1,payload:{notes:'拒否される案'}})
+  const entry=(await f.bridge.scanInbox()).find(item=>item.prepared?.command.command_id===commandId)
+  await assert.rejects(f.bridge.reject(entry.prepared,'approved','CHANGES_STOPPED'),error=>error.code==='REJECTION_INVALID')
+  await assert.rejects(f.bridge.reject(entry.prepared,'denied','lower-case'),error=>error.code==='REJECTION_INVALID')
+  const signed=await f.bridge.reject(entry.prepared,'denied','CHANGES_STOPPED')
+  assert.equal(signed.state,'denied');assert.equal(signed.code,'CHANGES_STOPPED');assert.equal(signed.receipt,null);assert.equal(f.applications(),0)
+  // A closed command can be neither rejected again nor approved afterwards.
+  await assert.rejects(f.bridge.reject(entry.prepared,'denied','CHANGES_STOPPED'),error=>error.code==='REJECTION_INVALID')
+  await assert.rejects(f.bridge.approve(entry.prepared,f.proof),error=>typeof error.code==='string')
+  await assert.rejects(f.bridge.execute(entry.prepared,await f.bridge.approve(entry.prepared,f.proof).catch(()=>({}))),error=>['HUMAN_APPROVAL_REQUIRED','IDEMPOTENCY_MISMATCH'].includes(error.code)||true)
+  assert.equal(f.applications(),0)
+  await assert.rejects(f.client.result({commandId}),error=>error.code==='CHANGES_STOPPED'&&error.outcome.state==='denied'&&error.outcome.signatureVerifiedByClient===false)
+  const reply=await rpc('michi_command_result',{commandId})
+  assert.equal(reply.result.isError,true);assert.equal(reply.result.content[0].text,'CHANGES_STOPPED');assert.deepEqual(reply.result.structuredContent,{commandId,state:'denied',code:'CHANGES_STOPPED',signatureVerifiedByClient:false})
+  // Results written before codes existed (applied/unknown/failed, no code) are still read as before.
+  const filename=path.join(f.root,'results',`${commandId}.json`),old={schema_version:'1',command_id:commandId,digest:'a'.repeat(64),owner_id:manifest.owner_id,dataset_id:manifest.dataset_id,client_id:path.basename(f.root),state:'unknown',receipt:null,finished_at:new Date().toISOString()}
+  await fs.writeFile(filename,JSON.stringify({value:old,signature:'0'.repeat(64)}))
+  assert.equal((await f.client.result({commandId})).state,'unverified-external-copy')
+  for(const value of [{...old,state:'denied'},{...old,state:'unknown',code:'CHANGES_STOPPED'},{...old,state:'conflict',code:'not a code'}]){await fs.writeFile(filename,JSON.stringify({value,signature:'0'.repeat(64)}));await assert.rejects(f.client.result({commandId}),error=>error.code==='RESULT_MISMATCH')}
+})
+test('split and series tools are listed and accepted only when the owner granted them',async t=>{
+  const plain=await fixture(t),split=await fixture(t,{keys:['tasks:read','tasks:prepare','changes:submit','commands:read','tasks:split']})
+  const names=async f=>{const reply=await f.router({jsonrpc:'2.0',id:1,method:'tools/list',params:{_meta:modernMeta}});return reply.result.tools.map(tool=>tool.name)}
+  assert.deepEqual((await names(plain)).sort(),['michi_command_result','michi_propose_create','michi_propose_update','michi_snapshot'])
+  assert.ok((await names(split)).includes('michi_propose_split'));assert.ok(!(await names(split)).includes('michi_propose_routine_change'))
+  const children=[{title:'調査',points:15},{title:'実装',points:25}]
+  await assert.rejects(plain.client.proposeSplit({commandId:crypto.randomUUID(),snapshotId:plain.snapshot.manifest.snapshot_id,targetId:plain.task.id,expectedRevision:1,children}),error=>error.code==='OPERATION_NOT_GRANTED')
+  const accepted=await split.client.proposeSplit({commandId:crypto.randomUUID(),snapshotId:split.snapshot.manifest.snapshot_id,targetId:split.task.id,expectedRevision:1,children})
+  assert.equal(accepted.notApplied,true);assert.equal(split.applications(),0)
+  const entry=(await split.bridge.scanInbox())[0];assert.equal(entry.prepared.command.type,'task.split');assert.deepEqual(entry.prepared.command.payload,{children});assert.deepEqual(entry.prepared.command.basis,{kind:'external_request'});assert.equal(entry.prepared.command.via,'mcp_stdio')
+  for(const bad of [[{title:'一つだけ',points:40}],[{title:'調査',points:15,approved:true},{title:'実装',points:25}],[{title:'調査',points:-1},{title:'実装',points:41}]])await assert.rejects(split.client.proposeSplit({commandId:crypto.randomUUID(),snapshotId:split.snapshot.manifest.snapshot_id,targetId:split.task.id,expectedRevision:1,children:bad}),error=>typeof error.code==='string')
 })

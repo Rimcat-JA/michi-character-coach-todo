@@ -1,3 +1,4 @@
+import Dexie from 'dexie'
 import { db } from './db'
 import { contentDigest, canonicalJSON } from './canonical'
 import { uid } from './domain'
@@ -50,7 +51,13 @@ async function prepare(instruction: VerifiedRoutineInstruction): Promise<Prepare
   preparedRegistry.set(prepared.id, prepared); return prepared
 }
 export async function prepareRoutineAssistConfiguration(instruction: VerifiedRoutineInstruction): Promise<PreparedRoutineAssistance> {
-  if (instruction.basis === 'verified_detection') throw new Error('検出した周期は根拠付きの採用入口から確認してください')
+  if (instruction.basis === 'verified_detection' || instruction.basis === 'external_request') throw new Error('検出・外部依頼の周期はそれぞれの確認入口から扱ってください')
+  return prepare(instruction)
+}
+/** External command path: the business key makes a replayed command ID yield one configuration. */
+export async function prepareExternalRoutineConfiguration(instruction: VerifiedRoutineInstruction, guard: RoutineSourceGuard): Promise<PreparedRoutineAssistance> {
+  if (instruction.basis !== 'external_request' || !guard || typeof guard.assertCurrent !== 'function' || typeof guard.businessKey !== 'string' || !guard.businessKey || guard.businessKey.length > 1000 || canonicalJSON(guard.detail).length > 10000) throw new Error('外部依頼の周期確認が不正です')
+  sourceGuards.set(instruction.id, { assertCurrent: guard.assertCurrent, businessKey: guard.businessKey, detail: structuredClone(guard.detail) })
   return prepare(instruction)
 }
 export async function prepareSourceRoutineConfiguration(input: RoutineAssistInput, candidate: RoutineAssistCandidate, model: string, guard: RoutineSourceGuard, event: Event): Promise<PreparedRoutineAssistance> {
@@ -68,6 +75,6 @@ export async function applyRoutineAssistConfigurationFromUI(prepared: PreparedRo
   nativeRoutineEvent(event)
   if (!prepared || preparedRegistry.get(prepared.id) !== prepared || prepared.digest !== confirmedDigest) throw new Error('登録済みの周期確認案ではありません。原文と選択内容から確認し直してください')
   const { digest, ...payload } = prepared
-  if (digest !== await contentDigest(payload)) throw new Error('確認後に周期候補が変わりました')
+  if (digest !== await Dexie.waitFor(contentDigest(payload))) throw new Error('確認後に周期候補が変わりました')
   return applyCalendarProposalFromUI(prepared.configuration, event)
 }

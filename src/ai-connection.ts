@@ -7,10 +7,12 @@ import { clearRoutineAssistanceAuthority } from './routine-assist-save'
 import { clearCompletionReconfirmationAuthority } from './completion-reconfirmation'
 import { clearCalendarCSVImportAuthority } from './calendar-csv-import-save'
 import { invalidateExternalConnection } from './external-connection'
+import { clearCommandAuthority } from './command-bus'
+import { clearTaskSplitAuthority } from './task-split-change'
 
 /** Every in-memory proposal/approval authority. ChangeSets may be kept so their epoch check reports POLICY_CHANGED. */
 export function clearVolatileAuthorities(options: { keepChangeSets?: boolean } = {}) {
-  if (!options.keepChangeSets) clearChangeSetAuthority()
+  if (!options.keepChangeSets) { clearChangeSetAuthority(); clearCommandAuthority(); clearTaskSplitAuthority() }
   clearDetectionAuthority()
   clearCoachTurnAuthority()
   clearCalendarRulesAuthority()

@@ -39,6 +39,7 @@ function installFileBridgeIPC({ ipcMain, win, app, safeStorage }) {
       return createFileBridgeService({ agentDirectory, journalDirectory: path.join(privateBase, 'journal'), signingKey,
         getSettings: async () => { const value = await readDB('settings', 'main'); if (!value) throw new Error('設定を読み込んでから接続してください'); return value },
         getTasks: ids => readDB('tasks', ids), getReceipt: key => readDB('commands', key),
+        getRules: async ids => { const state = await readDB('calendarRules', 'main'); return Array.isArray(state?.rules) ? state.rules.filter(rule => ids.includes(rule.id)).map(rule => ({ id: rule.id, revision: rule.revision })) : [] },
         loadConfiguration: async () => { try { return JSON.parse(safeStorage.decryptString(await fs.readFile(configPath))) } catch (error) { if (error.code === 'ENOENT') return null; throw new Error('保存済み接続を読めません') } },
         saveConfiguration: async value => { if (value === null) { await fs.rm(configPath, { force: true }); return }; const temporary = `${configPath}.${crypto.randomUUID()}.tmp`; await fs.writeFile(temporary, safeStorage.encryptString(JSON.stringify(value)), { mode: 0o600, flag: 'wx' }); try { await fs.rename(temporary, configPath) } catch (error) { await fs.unlink(temporary).catch(() => {}); throw error } },
         verifyNativeProof: (kind, reference, nonce) => { const proof = nativeProofs.get(nonce); nativeProofs.delete(nonce); return Boolean(proof && proof.kind === kind && proof.reference === reference && Date.now() - proof.at <= 5000) }
@@ -46,7 +47,7 @@ function installFileBridgeIPC({ ipcMain, win, app, safeStorage }) {
     })().catch(error => { servicePromise = null; throw error })
     return servicePromise
   }
-  for (const method of ['status', 'configure', 'disconnect', 'exportSnapshot', 'scanInbox', 'authorizeApplication', 'authorizeAutomaticApplication', 'recordApplied', 'cancelApplication', 'invalidate']) {
+  for (const method of ['status', 'configure', 'disconnect', 'exportSnapshot', 'scanInbox', 'authorizeApplication', 'authorizeAutomaticApplication', 'recordApplied', 'cancelApplication', 'recordRejected', 'invalidate']) {
     ipcMain.handle(`michi:filebridge-${method}`, async (event, envelope) => {
       assertMain(event)
       const current = await service()

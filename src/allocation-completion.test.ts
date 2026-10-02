@@ -85,7 +85,7 @@ describe('配分後の完了ポイント保存', () => {
     expect(await completion(id)).toMatchObject({ originalPoints: 40, netPoints: 35 })
     expect((await completion(id)).allocationAssessmentId).toBeUndefined()
     const audit = (await db.audits.where('taskId').equals(id).toArray()).filter(value => value.operation === 'complete')
-    expect(audit.some(value => value.detail === '35ptで完了')).toBe(true)
+    expect(audit.some(value => { const detail = JSON.parse(value.detail); return detail.summary === '35ptで完了' && detail.after.completionPoints === 35 })).toBe(true)
     expect(await total()).toBe(35)
   })
 })

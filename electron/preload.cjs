@@ -28,6 +28,7 @@ contextBridge.exposeInMainWorld('michiFileBridge', {
   authorizeAutomaticApplication: request => ipcRenderer.invoke('michi:filebridge-authorizeAutomaticApplication', request),
   recordApplied: request => ipcRenderer.invoke('michi:filebridge-recordApplied', request),
   cancelApplication: request => ipcRenderer.invoke('michi:filebridge-cancelApplication', request),
+  recordRejected: request => ipcRenderer.invoke('michi:filebridge-recordRejected', request),
   invalidate: () => ipcRenderer.invoke('michi:filebridge-invalidate')
 })
 
@@ -95,6 +96,7 @@ contextBridge.exposeInMainWorld('michiAI', {
   assistTask: request => ipcRenderer.invoke('michi:ai-assist-task', request),
   assessScore: request => ipcRenderer.invoke('michi:ai-assess-score', request),
   proposeTaskChange: request => ipcRenderer.invoke('michi:ai-propose-task-change', request),
+  proposeTaskSplit: request => ipcRenderer.invoke('michi:ai-propose-task-split', request),
   proposeRoutine: request => ipcRenderer.invoke('michi:ai-propose-routine', request),
   detectObligations: request => ipcRenderer.invoke('michi:ai-detect-obligations', request),
   verifyObligations: request => ipcRenderer.invoke('michi:ai-verify-obligations', request),
