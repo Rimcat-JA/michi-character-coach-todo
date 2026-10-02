@@ -3,8 +3,8 @@ import { addDays, validateDate } from './domain'
 import { calendarDateAt, resolveLocalCalendarTime, type CalendarRulesState, type ICSComponentVersion, type ScheduleFact } from './calendar-resolver'
 import { loadCalendarRulesState, prepareCalendarConfiguration, type CalendarConfigurationProposal, type CalendarRulesConfiguration } from './calendar-rules-save'
 import { validateCalendarRulesState } from './calendar-rules-validation'
+import { knownCalendarTimezone, separateICSAuxiliary, verifyICSTimezones, type ICSProperty } from './calendar-ics-timezones'
 
-type ICSProperty = { name: string; params: Record<string, string>; value: string; line: number }
 export type ICSTime = { kind: 'date' | 'utc' | 'zoned' | 'floating'; date: string; time: string | null; timezone: string; at: string; key: string }
 export type ICSRecurrence = { frequency: 'DAILY' | 'WEEKLY' | 'MONTHLY'; interval: number; count: number | null; until: ICSTime | null; weekdays: number[] | null; monthDays: number[] | null }
 export type ICSComponent = {
@@ -26,7 +26,7 @@ const dayNames: Record<string, number> = { SU: 0, MO: 1, TU: 2, WE: 3, TH: 4, FR
 const daysBetween = (a: string, b: string) => Math.round((Date.parse(`${b}T12:00:00Z`) - Date.parse(`${a}T12:00:00Z`)) / 86400000)
 const componentKey = (uid: string, recurrenceId: string | null) => JSON.stringify([uid, recurrenceId])
 function error(message: string, line?: number): never { throw new Error(`ICS${line ? ` ${line}行` : ''}: ${message}`) }
-function timezone(value: string) { try { new Intl.DateTimeFormat('en-US', { timeZone: value }); return value } catch { return error(`タイムゾーン ${value} は未対応です`) } }
+function timezone(value: string) { return knownCalendarTimezone(value) }
 function integer(value: string, max: number, name: string) { if (!/^(0|[1-9]\d*)$/.test(value) || Number(value) > max) error(`${name}の値が不正です`); return Number(value) }
 function forbiddenControl(value: string) { return [...value].some(char => { const code = char.charCodeAt(0); return code === 127 || code < 32 && ![9, 10, 13].includes(code) }) }
 function text(value: string, name: string, max = 300) {
@@ -303,7 +303,7 @@ function recurrenceStarts(component: ICSComponent, options: CalendarImportOption
 export function parseCalendarImport(input: string, options: CalendarImportOptions): ParsedCalendarImport {
   timezone(options.timezone); validateDate(options.fromDate, '取込開始日'); validateDate(options.toDate, '取込終了日')
   if (daysBetween(options.fromDate, options.toDate) < 0 || daysBetween(options.fromDate, options.toDate) > 366) error('取込期間は順序の正しい367日以内です')
-  const rows = properties(input), header: ICSProperty[] = [], componentRows: ICSProperty[][] = []; let inCalendar = false, ended = false, current: ICSProperty[] | null = null
+  const auxiliary = separateICSAuxiliary(properties(input)), rows = auxiliary.rows, header: ICSProperty[] = [], componentRows: ICSProperty[][] = []; let inCalendar = false, ended = false, current: ICSProperty[] | null = null
   for (const row of rows) {
     if (row.name === 'BEGIN' || row.name === 'END') {
       assertParams(row, [])
@@ -311,7 +311,7 @@ export function parseCalendarImport(input: string, options: CalendarImportOption
       if (row.name === 'END' && row.value === 'VCALENDAR' && inCalendar && !current) { inCalendar = false; ended = true; continue }
       if (row.name === 'BEGIN' && row.value === 'VEVENT' && inCalendar && !current) { current = []; continue }
       if (row.name === 'END' && row.value === 'VEVENT' && current) { componentRows.push(current); current = null; continue }
-      error(`${row.value}の入れ子・componentは未対応です。VTIMEZONE/VALARM/添付を自動解釈しません`, row.line)
+      error(`${row.value}の入れ子・componentは未対応です`, row.line)
     }
     if (!inCalendar || ended) error('VCALENDAR外の内容があります', row.line)
     if (current) current.push(row); else header.push(row)
@@ -324,7 +324,7 @@ export function parseCalendarImport(input: string, options: CalendarImportOption
   const method = headerOne('METHOD')?.value ?? null
   if (method !== null && !['PUBLISH', 'CANCEL'].includes(method)) error('会議依頼・返信の自動処理は未対応です。PUBLISHの予定を書き出してください')
   if (headerOne('X-WR-TIMEZONE')) timezone(headerOne('X-WR-TIMEZONE')!.value)
-  const selected = new Map<string, ICSComponent>(), warnings: string[] = []
+  const selected = new Map<string, ICSComponent>(), warnings: string[] = [...auxiliary.warnings]
   for (const component of componentRows.map(rows => parseComponent(rows, options, method))) {
     const key = componentKey(component.uid, component.recurrenceId?.key ?? null), previous = selected.get(key)
     if (previous) {
@@ -361,6 +361,9 @@ export function parseCalendarImport(input: string, options: CalendarImportOption
     else if (exception.status !== 'cancelled') error('例外の終了時刻が不明です')
   }
   if (occurrences.length > 1000) error('今回の発生回は1000件までです。期間を短くしてください')
+  const references: { timezone: string; at: string }[] = components.flatMap(component => [component.start, component.end, component.recurrenceId, ...component.rdates, ...component.exdates].filter((value): value is ICSTime => Boolean(value)))
+  references.push(...occurrences.flatMap(row => [row.startAt, row.endAt].map(at => ({ timezone: row.timezone, at }))))
+  verifyICSTimezones(auxiliary.definitions, references, Math.max(Number(options.toDate.slice(0, 4)), ...references.map(row => Number(row.at.slice(0, 4)))) + 1)
   if (components.some(component => component.start?.kind === 'floating')) warnings.push(`タイムゾーンのない日時に本人選択の ${options.timezone} を適用します`)
   warnings.push('通常回は選択期間内に開始する予定を採録します。繰り返しの変更例外は期間外への移動も保持します。欠落を取消と判断せず、手動ファイルを最新の自動同期とは表示しません')
   return { originalText: input, name: headerOne('X-WR-CALNAME') ? text(headerOne('X-WR-CALNAME')!.value, 'カレンダー名') : null, components, occurrences: occurrences.sort((a, b) => a.startAt.localeCompare(b.startAt)), exclusions, warnings: [...new Set(warnings)], fromDate: options.fromDate, toDate: options.toDate, readOnly: true }

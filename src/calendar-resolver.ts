@@ -464,7 +464,7 @@ export function buildCalendarChangePlan(state: CalendarRulesState, current: Curr
     if (!included(spec) && (!before || !included(before.spec))) continue
     if (before?.completed) { skippedCompleted++; continue }
     if (!before) { creates.push(spec); continue }
-    if (before.status === 'active' && canonicalJSON(before.spec) === canonicalJSON(spec)) { unchanged++; continue }
+    if (before.status === 'active' && canonicalJSON(before.spec) === canonicalJSON(spec)) { if (before.spec.kind === 'event' && before.edited) conflicts.push({ key: spec.generationKey, contextId: spec.contextId, reason: '本人編集した予定です。変更を個別に確認してください', sourceRefs: spec.sourceRefs }); else unchanged++; continue }
     // A new provenance alone (e.g. the same shift now reported by a replacement CSV feed) does not ask the
     // person to re-confirm an item they edited or started; nothing they see changes.
     if (before.status === 'active' && (before.edited || before.started) && canonicalJSON({ ...before.spec, sourceRefs: [] }) === canonicalJSON({ ...spec, sourceRefs: [] })) { unchanged++; continue }

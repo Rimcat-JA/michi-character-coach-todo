@@ -78,7 +78,8 @@ export async function createCalendarEvent(input: Pick<CalendarEvent, 'kind' | 't
   return db.transaction('rw', db.calendarEvents, db.tasks, async () => {
     if (input.linkedTaskId && !(await db.tasks.get(input.linkedTaskId))) throw new Error('リンクするタスクがありません')
     const id = uid()
-    await db.calendarEvents.add({ ...input, id, ownerId: settings.profileId, title: input.title.trim(), createdAt: new Date().toISOString() })
+    const at = new Date().toISOString()
+    await db.calendarEvents.add({ ...input, id, ownerId: settings.profileId, title: input.title.trim(), createdAt: at, revision: 1, updatedAt: at })
     return id
   })
 }

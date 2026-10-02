@@ -5,7 +5,7 @@ import { canonicalJSON, contentDigest } from './canonical'
 import { changePolicyFor } from './change-set'
 import { addDays, calculateScore, uid, type CalendarEvent, type Settings, type Task } from './domain'
 import { assertTripTaskScoreChangeAllowed } from './trip-bundles'
-import { buildCalendarChangePlan, prepareCalendarChangePlan, type CalendarChangePlan, type CalendarChangeScope, type CalendarRulesState, type CalendarTruncation, type CurrentCalendarEntity, type ResolvedCalendarSpec, type ResolverConflict, type ResolverNotice } from './calendar-resolver'
+import { buildCalendarChangePlan, prepareCalendarChangePlan, resolveCalendarOccurrences, type CalendarChangePlan, type CalendarChangeScope, type CalendarRulesState, type CalendarTruncation, type CurrentCalendarEntity, type ResolvedCalendarSpec, type ResolverConflict, type ResolverNotice } from './calendar-resolver'
 import { emptyCalendarRulesState, mergeScheduleImport, prepareScheduleImport, validateCalendarRulesState, type ScheduleImportPreview } from './calendar-rules-validation'
 import { redactICSForAudit } from './calendar-import-redaction'
 import { redactCSVForAudit } from './calendar-csv-redaction'
@@ -17,7 +17,7 @@ const table = () => { if (!calendarDB.calendarRules) throw new Error('共通カ�
 export type CalendarRulesConfiguration = Pick<CalendarRulesState, 'contexts' | 'bindings' | 'calendars' | 'activities' | 'sources' | 'facts' | 'rules'>
 type ProposalBase = { id: string; ownerId: string; datasetId: string; stateRevision: number; policyEpoch: number; sourcePermissionRevision: number; createdAt: string; expiresAt: string; digest: string }
 export type CalendarConfigurationProposal = ProposalBase & { kind: 'configuration'; next: CalendarRulesConfiguration; preview: ResolvedCalendarSpec[]; conflicts: ResolverConflict[]; truncatedSeries?: CalendarTruncation[]; notices?: ResolverNotice[]; importPreview: ScheduleImportPreview | null }
-export type CalendarGenerationProposal = ProposalBase & { kind: 'generation'; plan: CalendarChangePlan }
+export type CalendarGenerationProposal = ProposalBase & { kind: 'generation'; plan: CalendarChangePlan; acceptSource?: { generationKey: string; entityId: string; expectedRevision: number; expectedDigest: string } }
 type Proposal = CalendarConfigurationProposal | CalendarGenerationProposal
 const authority = new Map<string, Proposal>()
 export type CalendarConfigurationGuard = {
@@ -60,7 +60,7 @@ export async function currentCalendarEntities(state: CalendarRulesState): Promis
       return { generationKey: instance.generationKey, entityId: task.id, revision: task.revision, status: instance.status, completed: task.status === 'completed', edited: task.revision !== instance.entityRevision || !taskMatches(task, spec) || Boolean(task.deletedAt) !== (instance.status === 'cancelled'), started: sessions.some(session => session.taskId === task.id), spec: structuredClone(spec), completedAt }
     }
     const event = events.find(item => item.id === instance.entityId)
-    return { generationKey: instance.generationKey, entityId: instance.entityId, revision: instance.entityRevision, status: instance.status, completed: false, edited: instance.status === 'active' ? !event || !eventMatches(event, spec, state.ownerId) : Boolean(event), started: false, spec: structuredClone(spec), completedAt: null }
+    return { generationKey: instance.generationKey, entityId: instance.entityId, revision: event?.revision ?? instance.entityRevision, status: instance.status, completed: false, edited: instance.status === 'active' ? !event || event.locallyEdited === true || (event.revision ?? instance.entityRevision) !== instance.entityRevision || !eventMatches(event, spec, state.ownerId) : Boolean(event), started: false, spec: structuredClone(spec), completedAt: null }
   })
 }
 async function captureBase(state: CalendarRulesState): Promise<Omit<ProposalBase, 'digest'>> {
@@ -113,7 +113,17 @@ function assertProposal(proposal: Proposal) {
   const registered = authority.get(proposal.id)
   if (!registered || canonicalJSON(registered) !== canonicalJSON(proposal)) throw new Error('登録済みの確認案ではありません。差分を作り直してください')
 }
-function eventFrom(spec: ResolvedCalendarSpec, id: string, ownerId: string, at: string): CalendarEvent { return { id, ownerId, title: spec.title, kind: spec.eventKind!, startAt: spec.startAt!, endAt: spec.endAt!, timezone: spec.timezone, linkedTaskId: null, createdAt: at } }
+function eventFrom(spec: ResolvedCalendarSpec, id: string, ownerId: string, at: string, revision = 1): CalendarEvent { return { id, ownerId, title: spec.title, kind: spec.eventKind!, startAt: spec.startAt!, endAt: spec.endAt!, timezone: spec.timezone, linkedTaskId: null, createdAt: at, updatedAt: new Date().toISOString(), revision, locallyEdited: false } }
+export async function prepareCalendarSourceAcceptance(generationKey: string, from: string, to: string): Promise<CalendarGenerationProposal> {
+  const state = await loadCalendarRulesState(), entities = await currentCalendarEntities(state), instance = state.instances.find(row => row.generationKey === generationKey), current = instance && await db.calendarEvents.get(instance.entityId)
+  if (!instance || instance.spec.kind !== 'event' || !instance.spec.sourceRefs.length || !current || current.ownerId !== state.ownerId) throw new Error('出典がある予定を選んでください')
+  const accepted = entities.find(row => row.generationKey === generationKey)!; accepted.edited = false
+  const plan = await prepareCalendarChangePlan(state, entities, from, to, { kind: 'this_instance', generationKey })
+  // Accepting identical source values still clears the persistent local-edit marker by an explicit update.
+  if (!plan.updates.length && !plan.cancels.length && !plan.conflicts.length) { const resolved = resolveCalendarOccurrences(state, from, to).occurrences.find(row => row.generationKey === generationKey); if (!resolved) throw new Error('現在の資料からこの予定を確認できません'); plan.updates.push({ before: structuredClone(accepted), after: structuredClone(resolved) }); plan.unchanged = Math.max(0, plan.unchanged - 1) }
+  const { digest: _digest, ...unsigned } = plan; plan.digest = await contentDigest(unsigned)
+  return register<CalendarGenerationProposal>({ ...await captureBase(state), kind: 'generation', plan, acceptSource: { generationKey, entityId: current.id, expectedRevision: current.revision ?? instance.entityRevision, expectedDigest: await contentDigest(current) } })
+}
 export async function applyCalendarProposalFromUI(input: Proposal, event: Event): Promise<string> {
   humanEvent(event)
   // waitFor keeps an enclosing transaction (the K12 file entrance) alive across the digest.
@@ -162,7 +172,14 @@ export async function applyCalendarProposalFromUI(input: Proposal, event: Event)
       await db.audits.add({ id: uid(), taskId: null, operation: 'calendar.configuration', at, detail: JSON.stringify({ proposalId: proposal.id, digest: proposal.digest, approvedBy: current.profileId, policyEpoch: proposal.policyEpoch, fromRevision: state.revision, toRevision: next.revision, before: redactCSVForAudit(redactICSForAudit(config(state))), after: redactCSVForAudit(redactICSForAudit(proposal.next)), import: proposal.importPreview ? { sourceId: proposal.importPreview.source.id, revision: proposal.importPreview.source.revision, coverageFrom: proposal.importPreview.source.coverageFrom, coverageTo: proposal.importPreview.source.coverageTo, bodyHash: proposal.importPreview.source.bodyHash } : null }) })
       assertLive()
     } else {
-      const entities = await currentCalendarEntities(state), rebuilt = buildCalendarChangePlan(state, entities, proposal.plan.from, proposal.plan.to, proposal.plan.scope), { digest: _planDigest, ...expected } = proposal.plan
+      const entities = await currentCalendarEntities(state)
+      if (proposal.acceptSource) {
+        const choice = proposal.acceptSource, event = await db.calendarEvents.get(choice.entityId), selected = entities.find(row => row.generationKey === choice.generationKey)
+        if (proposal.plan.scope.kind !== 'this_instance' || proposal.plan.scope.generationKey !== choice.generationKey || !selected || selected.spec.kind !== 'event' || !event || event.ownerId !== current.profileId || (event.revision ?? 1) !== choice.expectedRevision || await Dexie.waitFor(contentDigest(event)) !== choice.expectedDigest) throw new ConflictError()
+        selected.edited = false
+      }
+      const rebuilt = buildCalendarChangePlan(state, entities, proposal.plan.from, proposal.plan.to, proposal.plan.scope), { digest: _planDigest, ...expected } = proposal.plan
+      if (proposal.acceptSource && !rebuilt.updates.length && !rebuilt.cancels.length && !rebuilt.conflicts.length) { const accepted = entities.find(row => row.generationKey === proposal.acceptSource!.generationKey)!, resolved = resolveCalendarOccurrences(state, proposal.plan.from, proposal.plan.to).occurrences.find(row => row.generationKey === accepted.generationKey); if (!resolved) throw new ConflictError(); rebuilt.updates.push({ before: structuredClone(accepted), after: structuredClone(resolved) }); rebuilt.unchanged = Math.max(0, rebuilt.unchanged - 1) }
       if (canonicalJSON(rebuilt) !== canonicalJSON(expected)) throw new ConflictError()
       if (rebuilt.conflicts.length) throw new Error('矛盾・本人編集・着手済みの回を個別に確認してください')
       const next = structuredClone(state), trips = await db.tripBundles.toArray()
@@ -186,7 +203,8 @@ export async function applyCalendarProposalFromUI(input: Proposal, event: Event)
           instance.entityRevision = task.revision + 1
         } else {
           const old = await db.calendarEvents.get(instance.entityId)
-          await db.calendarEvents.put(eventFrom(update.after, instance.entityId, current.profileId, old?.createdAt ?? at)); instance.entityRevision++
+          const revision = (old?.revision ?? instance.entityRevision) + 1
+          await db.calendarEvents.put(eventFrom(update.after, instance.entityId, current.profileId, old?.createdAt ?? at, revision)); instance.entityRevision = revision
         }
         instance.status = 'active'; instance.spec = structuredClone(update.after)
         assertLive()

@@ -212,6 +212,7 @@ db.version(25).stores({ localDevice: 'id', datasetState: 'id', handoffHeads: 'id
 db.use(datasetGuardMiddleware)
 // Body-free obligation ledger: digests and ids only, so a dismissal survives re-import without keeping quotes.
 db.version(26).stores({ detectedObligations: 'id, ownerId, &[ownerId+canonicalKey], state, linkedTaskId', obligationObservations: 'id, ownerId, obligationId, runId' })
+db.version(27).stores({}).upgrade(async transaction => { await transaction.table('calendarEvents').toCollection().modify(event => { event.revision ??= 1; event.updatedAt ??= event.createdAt }) })
 
 export async function ensureSettings() {
   const current = await db.settings.get('main')

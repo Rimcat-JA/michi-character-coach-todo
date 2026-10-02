@@ -26,7 +26,7 @@ describe('ICSの厳密な読取', () => {
   it.each([
     ['UID欠落', event().replace('UID:meeting@example.test\r\n', '')], ['不正日', event().replace('20261002T000000Z', '20260230T000000Z')],
     ['夏時間gap', event().replace('DTSTART:20261002T000000Z', 'DTSTART;TZID=America/New_York:20260308T023000')], ['夏時間fold', event().replace('DTSTART:20261002T000000Z', 'DTSTART;TZID=America/New_York:20261101T013000')],
-    ['UID重複', event(['UID:other'])], ['VTIMEZONE', 'BEGIN:VTIMEZONE\r\nEND:VTIMEZONE'], ['alarm', event(['BEGIN:VALARM', 'ACTION:DISPLAY', 'END:VALARM'])],
+    ['UID重複', event(['UID:other'])], ['VTIMEZONE', 'BEGIN:VTIMEZONE\r\nEND:VTIMEZONE'],
     ['無終了', event().replace('DTEND:20261002T010000Z\r\n', '')], ['未知zone', event().replace('DTSTART:20261002T000000Z', 'DTSTART;TZID=Unknown/Zone:20261002T090000')],
     ['complex RRULE', event(['RRULE:FREQ=YEARLY'])], ['ordinal BYDAY', event(['RRULE:FREQ=WEEKLY;BYDAY=1FR'])], ['COUNT/UNTIL', event(['RRULE:FREQ=DAILY;COUNT=2;UNTIL=20261020T000000Z'])],
     ['PERIOD RDATE', event(['RDATE;VALUE=PERIOD:20261003T000000Z/20261003T010000Z'])], ['RANGE exception', event(['RECURRENCE-ID;RANGE=THISANDFUTURE:20261002T000000Z'])],
