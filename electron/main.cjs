@@ -19,6 +19,7 @@ const { createScheduleTransport } = require('./schedule-network.cjs')
 const { installScheduleRefreshIPC, scheduleQAFixtureMode } = require('./schedule-refresh-ipc.cjs')
 const { installCalDAVIPC } = require('./caldav-ipc.cjs')
 const { installLocalAPIIPC } = require('./local-api-ipc.cjs')
+const { installWebhookIPC } = require('./webhook-ipc.cjs')
 const { installMediaPermissionPolicy } = require('./media-permission.cjs')
 const { githubQAFetch } = require('./github-qa.cjs')
 const { createOSNotificationGuard, notificationTextAllowed } = require('./notification-delivery.cjs')
@@ -354,6 +355,7 @@ if (hasInstanceLock) app.whenReady().then(() => {
   session.defaultSession.setSpellCheckerEnabled(false)
 
   const win = new BrowserWindow({
+    show: !(!app.isPackaged && process.env.MICHI_QA_HIDDEN === '1' && /[\\/]qa-reminders-profile[\\/]local-integrations$/i.test(app.getPath('userData'))),
     width: 1280, height: 830, minWidth: 380, minHeight: 550,
     backgroundColor: '#f7f7fb', title: 'michi — キャラクターコーチToDo',
     autoHideMenuBar: true,
@@ -363,11 +365,12 @@ if (hasInstanceLock) app.whenReady().then(() => {
   win.webContents.on('will-navigate', (event, url) => { if (!url.startsWith('michi://app/')) event.preventDefault() })
   const qaGitHub = githubQAFetch({ app })
   const qaSchedule = scheduleQAFixtureMode(app)
-  networkGateway = createNetworkGateway({ fetchImpl: qaGitHub.fetchImpl, scheduleTransport: createScheduleTransport({ qaLoopback: qaSchedule }), qaScheduleLoopback: qaSchedule, getPolicy: async () => policyFromSettings(await readAppDatabase(win, 'settings', 'main'), await legacyOnlineConfigured()) })
+  networkGateway = createNetworkGateway({ fetchImpl: qaGitHub.fetchImpl, scheduleTransport: createScheduleTransport({ qaLoopback: qaSchedule }), qaScheduleLoopback: qaSchedule, webhookTransport: createScheduleTransport({ qaLoopback: true }), getPolicy: async () => policyFromSettings(await readAppDatabase(win, 'settings', 'main'), await legacyOnlineConfigured()) })
   const refreshScheduler = installScheduleRefreshIPC({ ipcMain, dialog, win, app, safeStorage, gateway: networkGateway, assertFrame: assertAppFrame, readDatabase: readAppDatabase, qaLoopback: qaSchedule })
   installCalDAVIPC({ ipcMain, dialog, win, app, safeStorage, gateway: networkGateway, assertFrame: assertAppFrame, readDatabase: readAppDatabase, refreshScheduler, qaLoopback: qaSchedule })
   installFolderWatchIPC({ ipcMain, dialog, win, assertFrame: assertAppFrame, readDatabase: readAppDatabase })
   installLocalAPIIPC({ ipcMain, win, app, safeStorage, assertFrame: assertAppFrame, readDatabase: readAppDatabase })
+  installWebhookIPC({ ipcMain, win, app, safeStorage, gateway: networkGateway, assertFrame: assertAppFrame, readDatabase: readAppDatabase })
   installMediaPermissionPolicy({ session: session.defaultSession, ipcMain, win })
   ipcMain.handle('michi:network-status', async event => {
     assertAppFrame(event)

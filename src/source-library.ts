@@ -1,5 +1,4 @@
 import Dexie from 'dexie'
-import { allowWhileFrozen } from './dataset-guard'
 import { db as baseDb } from './db'
 import { ConflictError } from './commands'
 import { changePolicyFor } from './change-set'
@@ -74,7 +73,7 @@ async function bumpPolicy() {
   await db.settings.put({ ...settings, changePolicy: { ...policy, epoch: policy.epoch + 1, sourcePermissionRevision: policy.sourcePermissionRevision + 1 } })
 }
 // Expiry erases the same rows but needs no report, so tasks, receipts and audits stay unlocked.
-const expiryTables = () => [db.contextSources, db.contextSnapshots, db.sourceSummaries, db.sourceArtifacts, db.coachMemories, db.memoryTombstones, db.coachConversations, db.coachMessages, db.settings, db.taskSourceEvidence, db.taskNotes, db.detectedObligations, db.obligationObservations]
+const expiryTables = () => [db.contextSources, db.contextSnapshots, db.sourceSummaries, db.sourceArtifacts, db.coachMemories, db.memoryTombstones, db.coachConversations, db.coachMessages, db.settings, db.taskSourceEvidence, db.detectedObligations, db.obligationObservations]
 const purgeTables = () => [...expiryTables(), db.tasks, db.audits, db.commands]
 /** Redacted deletion record shared by manual deletion, expiry and restore. */
 export function erasedSourceRow(source: ContextSource, at: string): ContextSource {
@@ -88,7 +87,7 @@ function usesSource(memory: CoachMemory, sourceId: string) { return memory.sourc
 async function purgeDerived(source: ContextSource, at: string, quotes: boolean): Promise<Omit<SourceErasure, 'original' | 'legacyCopies'>> {
   await purgeCoachNotificationSource(source.id, at)
   const aiReplies = await purgeChatSourceResponses(source.id, source.ownerId), artifacts = await db.sourceArtifacts.where('sourceId').equals(source.id).toArray()
-  const erased = { summaries: await db.sourceSummaries.where('sourceId').equals(source.id).delete(), caches: artifacts.filter(row => row.kind === 'cache').length, embeddings: artifacts.filter(row => row.kind === 'embedding').length, candidates: artifacts.filter(row => row.kind === 'candidate').length, memories: 0, aiReplies, taskQuotes: quotes ? await purgeTaskSourceEvidence(source.id) + await db.taskNotes.where('ownerId').equals(source.ownerId).filter(note=>note.kind==='source'&&note.sourceId===source.id).delete() : 0 }
+  const erased = { summaries: await db.sourceSummaries.where('sourceId').equals(source.id).delete(), caches: artifacts.filter(row => row.kind === 'cache').length, embeddings: artifacts.filter(row => row.kind === 'embedding').length, candidates: artifacts.filter(row => row.kind === 'candidate').length, memories: 0, aiReplies, taskQuotes: quotes ? await purgeTaskSourceEvidence(source.id) : 0 }
   await db.sourceArtifacts.where('sourceId').equals(source.id).delete()
   // Erasure is 出典失効: open ledger observations are withdrawn, digests stay so a dismissal still suppresses a re-import.
   if (quotes) await withdrawSourceObligations(source.ownerId, source.id, at)
@@ -212,7 +211,6 @@ async function eraseSource(source: ContextSource, report: boolean): Promise<Sour
 }
 async function expireSource(id: string, expectedRevision: number): Promise<void> {
   await db.transaction('rw', expiryTables(), async () => {
-    allowWhileFrozen()
     const settings = await owner(), source = await db.contextSources.get(id)
     if (!source || source.ownerId !== settings.profileId) throw new Error('本人の資料がありません')
     if (source.revision !== expectedRevision) throw new ConflictError()
@@ -272,7 +270,6 @@ export async function sourceDerivedCounts(ownerId: string): Promise<Map<string, 
   for (const summary of await db.sourceSummaries.where('ownerId').equals(ownerId).toArray()) row(summary.sourceId).summaries++
   for (const artifact of await db.sourceArtifacts.where('ownerId').equals(ownerId).toArray()) row(artifact.sourceId)[artifact.kind === 'cache' ? 'caches' : artifact.kind === 'embedding' ? 'embeddings' : 'candidates']++
   for (const evidence of await db.taskSourceEvidence.where('ownerId').equals(ownerId).toArray()) row(evidence.sourceId).taskQuotes++
-  for (const note of await db.taskNotes.where('ownerId').equals(ownerId).toArray()) if(note.sourceId)row(note.sourceId).taskQuotes++
   for (const memory of await db.coachMemories.where('ownerId').equals(ownerId).toArray()) if (!memory.deletedAt && !memory.sourcePurged) for (const ref of memory.sources) { const id = ref.kind === 'derived-summary' && ref.refId.startsWith('library:') ? ref.refId.slice(8) : (ref.kind as string) === 'library' ? ref.refId : null; if (id) row(id).memories++ }
   return counts
 }

@@ -29,7 +29,7 @@ export const OPERATION_INFO: Record<OperationGroup, { label: string; allowed: Op
   'routine.change': { label: '新規ルーティン・系列の変更', allowed: approvalOnly, fixed: 'この版には範囲内で自動適用する経路がありません。' },
   'task.lifecycle': { label: '完了・取消・削除・実績訂正', allowed: approvalOnly, fixed: '完了・取消・削除・実績訂正は自動適用しません。' },
   'notification.send': { label: '通知', allowed: ['deny', 'auto_within_bounds'], fixed: '通知ごとの承認画面はありません。静かな時間・1日上限の範囲で送るか、停止するかを選びます。' },
-  'external.write': { label: '外部送信・カレンダー書込', allowed: approvalOnly, fixed: 'この版では外部への書込みを自動実行しません。' },
+  'external.write': { label: '外部送信・カレンダー書込', allowed: approvalOnly, fixed: '外部への書込みは本人が確認します。別途確認したWebhookの送信先・イベント・公開項目だけを登録できます。' },
   'achievement.publish': { label: 'GitHub実績の公開', allowed: approvalOnly, fixed: '公開は毎回本人が確認します。' },
   'local_action.run': { label: 'PCの許可済み操作', allowed: approvalOnly, fixed: 'PC操作は本人が確認します。別途確認した低リスクのイベント条件・固定引数・期限・回数だけを委任できます。' },
   'authority.expand': { label: '権限拡張・秘密取得・任意SQL/shell', allowed: ['deny'], fixed: 'エージェントには委任できません。本人の設定画面だけで管理します。' },

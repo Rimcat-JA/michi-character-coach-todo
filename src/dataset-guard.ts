@@ -11,6 +11,7 @@ export class DatasetFrozenError extends Error {
   constructor(mode: Exclude<DatasetMode, 'active'>) { super(mode === 'frozen' ? 'この端末のデータは移行のため凍結中です。編集できません（移行を取り消すと再開できます）' : 'この端末のデータは別端末へ移行済みのため読み取り専用です。編集できません') }
 }
 const privileged = new WeakSet<object>()
+export const isPrivilegedDatasetTransaction = (transaction: object): boolean => privileged.has(transaction)
 /** Marks the current transaction as restore/retention bookkeeping that must run regardless of the dataset mode. */
 export function allowWhileFrozen() {
   const trans = Dexie.currentTransaction as unknown as { idbtrans?: object } | null

@@ -239,7 +239,7 @@ function verifyPrepared(prepared: PreparedCommand) {
 /** Scanned-but-unopened external commands, listed in S21 as received. */
 export type ReceivedCommand = Readonly<{ commandId: string; entrance: CommandEntrance; type: string; targetId: string | null; expectedRevision: number | null; principalId: string; host: string | null; fields: string[]; expiresAt: string }>
 const received = new Map<string, ReceivedCommand>()
-export function noteReceivedCommands(entrance: 'file' | 'mcp' | 'external', values: ReceivedCommand[]) {
+export function noteReceivedCommands(entrance: 'file' | 'mcp' | 'api' | 'external', values: ReceivedCommand[]) {
   for (const [key, value] of received) if (entrance === 'external' ? value.entrance === 'file' || value.entrance === 'mcp' : value.entrance === entrance) received.delete(key)
   for (const value of values) received.set(value.commandId, freeze(structuredClone(value)))
   changed()

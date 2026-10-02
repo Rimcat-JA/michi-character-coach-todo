@@ -1,4 +1,24 @@
 const { contextBridge, ipcRenderer } = require('electron')
+let nativeWebhookProof = null
+window.addEventListener('click', event => {
+  if (!event.isTrusted || !(event.target instanceof Element)) return
+  const button = event.target.closest('button[data-webhook-configure]')
+  if (!button || button.disabled) return
+  const proof = { nonce: crypto.randomUUID(), reference: button.getAttribute('data-webhook-configure') ?? '' }
+  nativeWebhookProof = { ...proof, at: Date.now() }
+  ipcRenderer.send('michi:webhook-native-proof', proof)
+}, true)
+contextBridge.exposeInMainWorld('michiWebhooks', {
+  invalidate: () => ipcRenderer.invoke('michi:webhooks', { action: 'invalidate' }),
+  request: value => {
+    if (!value || typeof value !== 'object' || Object.hasOwn(value, 'proofNonce')) return Promise.reject(new Error('Webhook操作の形式が不正です'))
+    if (!['add', 'test'].includes(value.action)) return ipcRenderer.invoke('michi:webhooks', value)
+    const proof = nativeWebhookProof; nativeWebhookProof = null
+    const reference = value.action === 'add' ? 'add' : 'test:' + value.input?.id
+    if (!proof || proof.reference !== reference || Date.now() - proof.at > 5000) return Promise.reject(new Error('本人の確認ボタンから操作してください'))
+    return ipcRenderer.invoke('michi:webhooks', { ...value, proofNonce: proof.nonce })
+  }
+})
 window.addEventListener('click', event => {
   if (!event.isTrusted || !(event.target instanceof Element)) return
   const button=event.target.closest('button[data-voice-input]')

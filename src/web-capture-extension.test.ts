@@ -8,6 +8,7 @@ import { db, ensureSettings } from './db'
 import { newTaskInput } from './commands'
 import { captureSnapshot, restoreBackup } from './backup'
 import { deleteSource } from './source-library'
+import { taskEvidenceDisplay } from './task-source-evidence'
 beforeEach(async()=>{await db.delete();await db.open();await ensureSettings()})
 const capsule=()=>buildCapsule({title:'selected page',url:'https://user:secret@example.org/page#private',quote:'選んだ一文だけ。',timezone:'Asia/Tokyo',capturedAt:'2026-10-02T01:00:00.000Z'})
 const file=(text:string,name='selection.json')=>{const bytes=new TextEncoder().encode(text);return {name,size:bytes.length,arrayBuffer:async()=>bytes.buffer}}
@@ -41,15 +42,15 @@ it('manual handoff attaches only the selected source note, uses explicit blank i
  expect(await db.tasks.count()).toBe(0);expect(draft.quote).toBe(capsule().selection.quote)
  const id=await saveCaptureTask({...newTaskInput(),title:'本人の手動タイトル'},null,draft)
  expect(await db.tasks.get(id)).toMatchObject({title:'本人の手動タイトル',notes:'',effectivePoints:null,dueDate:null,scheduledDate:null,status:'open'})
- expect(await db.taskNotes.toArray()).toMatchObject([{taskId:id,kind:'source',body:capsule().selection.quote}])
+ expect(await db.taskSourceEvidence.toArray()).toMatchObject([{taskId:id,sourceId:receipt.sourceId,quote:capsule().selection.quote}]);expect(await db.taskNotes.count()).toBe(0)
  expect(await db.ledger.count()).toBe(0);expect(await db.completions.count()).toBe(0)
  await expect(saveCaptureTask({...newTaskInput(),title:'clone'},null,{...draft})).rejects.toThrow('確認し直')
 })
 it('source revocation and note-storage failure abort the manual handoff atomically',async()=>{
  const preview=await prepareWebCaptureImport(capsule()),receipt=await saveCaptureImportFromUI(preview,click()),draft=await prepareCaptureTask(receipt)
- const spy=vi.spyOn(db.taskNotes,'add').mockRejectedValueOnce(Error('forced note failure'))
+ const spy=vi.spyOn(db.taskSourceEvidence,'add').mockRejectedValueOnce(Error('forced note failure'))
  await expect(saveCaptureTask({...newTaskInput(),title:'rollback'},null,draft)).rejects.toThrow('forced note')
- expect(await db.tasks.count()).toBe(0);expect(await db.taskNotes.count()).toBe(0);spy.mockRestore()
+ expect(await db.tasks.count()).toBe(0);expect(await db.taskSourceEvidence.count()).toBe(0);spy.mockRestore()
  await db.contextSources.update(receipt.sourceId,{deletedAt:new Date().toISOString()})
  await expect(saveCaptureTask({...newTaskInput(),title:'revoked'},null,draft)).rejects.toThrow('権限')
  expect(await db.tasks.count()).toBe(0)
@@ -58,7 +59,15 @@ it('source erasure and restore of an older backup erase copied source notes whil
  const preview=await prepareWebCaptureImport(capsule()),receipt=await saveCaptureImportFromUI(preview,click()),draft=await prepareCaptureTask(receipt)
  const id=await saveCaptureTask({...newTaskInput(),title:'本人の作業'},null,draft),snapshot=await captureSnapshot(),source=(await db.contextSources.get(receipt.sourceId))!
  const erased=await deleteSource(source.id,source.revision)
- expect(erased.erased.taskQuotes).toBe(1);expect(await db.taskNotes.count()).toBe(0);expect((await db.tasks.get(id))?.title).toBe('本人の作業')
+ expect(erased.erased.taskQuotes).toBe(1);expect(await db.taskSourceEvidence.count()).toBe(0);expect((await db.tasks.get(id))?.title).toBe('本人の作業')
+ expect((await taskEvidenceDisplay((await db.tasks.get(id))!)).erasedSourceIds).toContain(source.id)
  await restoreBackup(snapshot)
- expect(await db.taskNotes.count()).toBe(0);expect(await db.tasks.get(id)).toBeDefined();expect(await db.ledger.count()).toBe(0)
+ expect(await db.taskSourceEvidence.count()).toBe(0);expect(await db.tasks.get(id)).toBeDefined();expect(await db.ledger.count()).toBe(0)
+})
+it('long selected fragments preserve Unicode, order and the bounded backup evidence shape',async()=>{
+ const quote='あ'.repeat(1999)+'🌸'+'続'.repeat(24000),value=buildCapsule({title:'long fragment',url:'https://example.org',quote,timezone:'Asia/Tokyo'})
+ const receipt=await saveCaptureImportFromUI(await prepareWebCaptureImport(value),click()),draft=await prepareCaptureTask(receipt),id=await saveCaptureTask({...newTaskInput(),title:'manual'},null,draft)
+ const rows=(await db.taskSourceEvidence.where('taskId').equals(id).toArray()).sort((a,b)=>a.id.localeCompare(b.id))
+ expect(rows.every(row=>row.quote.length<=2000)).toBe(true);expect(rows.map(row=>row.quote).join('')).toBe(quote)
+ await expect(captureSnapshot()).resolves.toBeDefined()
 })

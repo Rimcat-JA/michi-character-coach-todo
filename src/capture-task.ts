@@ -1,5 +1,5 @@
 import { db } from './db'
-import { addTaskNote } from './materials'
+import { quoteDigest } from './task-source-evidence'
 import { changePolicyFor } from './change-set'
 import { saveTaskWithScoreProvenance } from './score-assessment-save'
 import type { TaskInput } from './commands'
@@ -17,12 +17,14 @@ export async function prepareCaptureTask(receipt:CaptureImportReceipt):Promise<C
 /** A blank editor remains manual: no title, point, schedule or deadline inference. */
 export async function saveCaptureTask(input:TaskInput,accepted:ScoreAcceptanceProvenance|null,draft:CaptureTaskDraft){
  if(!issued.has(draft))throw Error('引用をアプリで確認し直してください。')
- return db.transaction('rw',[db.tasks,db.assessments,db.completions,db.ledger,db.routines,db.sessions,db.commands,db.audits,db.containers,db.settings,db.labelGroups,db.labelDefinitions,db.tripBundles,db.taskNotes,db.contextSources,db.contextSnapshots,db.sourceArtifacts],async()=>{
+ const fragments: {quote:string;offset:number;sha:string}[]=[]
+ for(let offset=0;offset<draft.quote.length;){let end=Math.min(offset+2000,draft.quote.length);if(end<draft.quote.length&&/[\uD800-\uDBFF]/.test(draft.quote[end-1]))end--;const quote=draft.quote.slice(offset,end);fragments.push({quote,offset,sha:await quoteDigest(quote)});offset=end}
+ return db.transaction('rw',[db.tasks,db.assessments,db.completions,db.ledger,db.routines,db.sessions,db.commands,db.audits,db.containers,db.settings,db.labelGroups,db.labelDefinitions,db.tripBundles,db.taskSourceEvidence,db.contextSources,db.contextSnapshots,db.sourceArtifacts],async()=>{
   const s=(await db.settings.get('main'))!,p=changePolicyFor(s),source=await db.contextSources.get(draft.sourceId)
   if(s.profileId!==draft.ownerId||s.datasetId!==draft.datasetId||p.epoch!==draft.policyEpoch||p.sourcePermissionRevision!==draft.sourcePermissionRevision||!source||source.deletedAt||source.permissionRevision!==draft.permissionRevision||source.latestRevision!==draft.sourceRevision||!source.permissions.retain||source.retentionUntil&&Date.parse(source.retentionUntil)<=Date.now())throw Error('引用の保持権限または本人設定が変わりました。')
   const id=await saveTaskWithScoreProvenance(null,input,accepted)
-  const noteId=await addTaskNote(id,draft.quote,'source')
-  await db.taskNotes.update(noteId,{sourceId:draft.sourceId,sourceRevision:draft.sourceRevision})
+  for(const [index,fragment] of fragments.entries())await db.taskSourceEvidence.add({id:`capture:${id}:${String(index).padStart(3,'0')}`,ownerId:draft.ownerId,datasetId:draft.datasetId,taskId:id,sourceId:draft.sourceId,snapshotRevision:draft.sourceRevision,permissionRevision:draft.permissionRevision,spanId:`${draft.sourceId}:${draft.sourceRevision}:selected:${fragment.offset}`,quote:fragment.quote,quoteSha256:fragment.sha,supports:[],runId:`capture:${draft.provenanceId}`,candidateId:`manual:${id}`,createdAt:new Date().toISOString()})
+  await db.audits.add({id:crypto.randomUUID(),taskId:id,operation:'capture.task_created',at:new Date().toISOString(),detail:JSON.stringify({sourceId:draft.sourceId,sourceRevision:draft.sourceRevision})})
   return id
  })
 }

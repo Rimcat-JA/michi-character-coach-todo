@@ -67,7 +67,7 @@ export function createLocalActionController(gateway:LocalActionGateway) {
     status(value);await assertOwner(value.ownerId,value.datasetId,value.deviceId)
     if(current&&canonicalJSON({definitions:current.definitions,enabled:current.enabled})!==canonicalJSON({definitions:value.definitions,enabled:value.enabled}))clear()
     current=freeze(structuredClone(value));for(const result of current.results)results.set(result.requestId,result)
-    for(const row of current.pending??[]){const def=current.definitions.find(d=>d.id===row.review.actionId);if(!def?.automation||row.review.definitionRevision!==def.revision||!def.automation.events.includes(row.event as 'task.completed')||row.review.executable!==def.executable||row.review.cwd!==def.cwd||canonicalJSON(def.argv.map(a=>typeof a==='string'?a:String(def.automation!.params[a.param])))!==canonicalJSON(row.review.argv))fail();requests.set(row.reference,row)}
+    for(const row of current.pending??[]){const def=current.definitions.find(d=>d.id===row.review.actionId);if(!def?.automation||row.review.ownerId!==current.ownerId||row.review.datasetId!==current.datasetId||row.review.deviceId!==current.deviceId||row.review.policyEpoch!==def.automation.policyEpoch||row.review.sourcePermissionRevision!==def.automation.sourcePermissionRevision||row.review.definitionRevision!==def.revision||!def.automation.events.includes(row.event as 'task.completed')||row.review.executable!==def.executable||row.review.cwd!==def.cwd||canonicalJSON(def.argv.map(a=>typeof a==='string'?a:String(def.automation!.params[a.param])))!==canonicalJSON(row.review.argv))fail();requests.set(row.reference,row)}
     return current
   }
   async function persist(result:LocalActionResult):Promise<LocalActionOutcome> {
@@ -87,7 +87,7 @@ export function createLocalActionController(gateway:LocalActionGateway) {
   }
   return {
     clearAuthority:clear,
-    refresh:async()=>adopt(await gateway.status()),
+    refresh:async()=>{const value=await adopt(await gateway.status());for(const result of value.results)if(!await db.commands.get(localActionReceiptKey(result.requestId)))await persist(result);return value},
     async inspectAutomationFromUI(input:Parameters<NonNullable<LocalActionGateway['inspectAutomation']>>[0],event:Event){
       click(event);if(!gateway.inspectAutomation||!current?.definitions.some(d=>d.id===input.actionId))fail()
       const value=await gateway.inspectAutomation(structuredClone(input));automation(value.automation)

@@ -12,9 +12,13 @@ import type { ResourceGrant, SharedInbound, ShareContact, ShareIdentity, SharePr
 import { datasetGuardMiddleware, type DatasetState } from './dataset-guard'
 import type { DetectedObligation, ObligationObservation } from './detection-ledger'
 import type { ScheduleRefreshInbox } from './schedule-refresh-types'
+import type { IntegrationOutbox, IntegrationSettings } from './webhook-types'
+import { webhookOutboxMiddleware } from './webhook-outbox'
 import type { Assessment, Audit, CalendarEvent, ChecklistItem, CommandReceipt, Completion, Container, DayNote, FocusProjectSelection, Goal, GoalCheckIn, Habit, HabitLog, LabelDefinition, LabelGroup, LedgerEntry, PlanningBucket, PomodoroCycle, RolloverEntry, Routine, SavedTemplate, Settings, SmartList, Task, TaskAttachment, TaskComment, TaskDependency, TaskNote, ThemeRule, TimeBlock, TrackerDefinition, TrackerEntry, WorkSession } from './domain'
 
 export const db = new Dexie('character-coach-v1') as Dexie & {
+  integrationOutbox: EntityTable<IntegrationOutbox, 'id'>
+  integrationSettings: EntityTable<IntegrationSettings, 'id'>
   scheduleRefreshInbox: EntityTable<ScheduleRefreshInbox, 'id'>
   tasks: EntityTable<Task, 'id'>
   assessments: EntityTable<Assessment, 'id'>
@@ -216,6 +220,8 @@ db.use(datasetGuardMiddleware)
 db.version(26).stores({ detectedObligations: 'id, ownerId, &[ownerId+canonicalKey], state, linkedTaskId', obligationObservations: 'id, ownerId, obligationId, runId' })
 db.version(27).stores({}).upgrade(async transaction => { await transaction.table('calendarEvents').toCollection().modify(event => { event.revision ??= 1; event.updatedAt ??= event.createdAt }) })
 db.version(28).stores({ scheduleRefreshInbox: 'id, ownerId, datasetId, sourceId, subscriptionId, fetchedAt, state' })
+db.version(29).stores({ integrationOutbox: 'id, at, state', integrationSettings: 'id' })
+db.use(webhookOutboxMiddleware)
 
 export async function ensureSettings() {
   const current = await db.settings.get('main')
