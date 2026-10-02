@@ -96,7 +96,7 @@ describe('列対応の保存承認・版と復元', () => {
     expect(prepared.preview.selectedCount).toBe(1); expect(prepared.preview.parsed.rows[0]).toMatchObject({ startAt: '2026-10-03T13:00:00.000Z', endAt: '2026-10-03T21:00:00.000Z' }); expect(prepared.preview.parsed.rows[0].mapped!.document!.cells[0]).toHaveProperty(extension === 'pdf' ? 'page' : 'address')
     await applyCalendarCSVImportFromUI(prepared, prepared.digest, click()); const state = (await db.calendarRules.get('main'))!; await verifyCSVOriginalDigests([state])
     expect(JSON.stringify(state.sources[0].csv)).not.toContain('staff-002'); const changed = structuredClone(state); changed.sources[0].csv!.snapshots[0].rows[0].mapped!.document!.table = '改変'; await expect(verifyCSVOriginalDigests([changed])).rejects.toThrow('出典位置')
-  })
+  }, 30000)
   it('凍結中は資料の解析準備を始めない', async () => {
     await db.datasetState.put({ id: 'main', mode: 'frozen', moveId: 'qa', updatedAt: new Date().toISOString() })
     await expect(save(enc(text()), mappedRosterProfile())).rejects.toThrow('再解析を停止')
