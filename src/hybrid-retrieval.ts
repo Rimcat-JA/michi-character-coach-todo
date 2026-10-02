@@ -149,5 +149,3 @@ export async function searchHybrid(query: string, fromDate: string, toDate: stri
   const engine = queryVector ? 'hybrid' as const : 'lexical' as const
   return refreshHybridRetrieval({ ...lexical, engine, hits: [...fused.values()], indexStates, notice: `資料は${engine === 'hybrid' ? '文字一致と意味の順位を統合' : '文字検索（ベクトル検索は利用できません）'}、コーチ会話は文字検索です。全履歴・未取得期間は未確認です。索引：最新${indexStates.filter(row => row.state === 'fresh').length}、要再作成${indexStates.filter(row => row.state === 'stale').length}、未作成${indexStates.filter(row => row.state === 'missing').length}。` })
 }
-
-

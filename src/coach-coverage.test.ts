@@ -30,4 +30,3 @@ it('確認後の許可取消は送信開始を拒否し、以前のカード引�
   await expect(beginCoachTurn(id, 1, { text: '依頼', mode: 'ai', sourceIds: [sourceId], expectedContextDigest: preview.digest })).rejects.toThrow()
   expect(await db.coachMessages.count()).toBe(0)
 })
-
