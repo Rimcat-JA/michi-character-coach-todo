@@ -5,15 +5,15 @@ async function createMCPPipeServer({handle}){
  if(process.platform!=='win32')throw Object.assign(Error('WINDOWS_PIPE_ONLY'),{code:'WINDOWS_PIPE_ONLY'})
  const pipeName='michi-'+crypto.randomBytes(16).toString('hex'),sessions=new Map()
  const child=spawn(path.join(process.env.SystemRoot??'C:\\Windows','System32','WindowsPowerShell','v1.0','powershell.exe'),['-NoProfile','-NonInteractive','-File',path.join(__dirname,'mcp-pipe-relay.ps1'),'-PipeName',pipeName],{shell:false,windowsHide:true,stdio:['pipe','pipe','pipe']})
- let closed=false,exited=false,buffer=Buffer.alloc(0),readyResolve,readyReject,stderrBytes=0
+ let closed=false,exited=false,buffer=Buffer.alloc(0),readyResolve,readyReject,stderrBytes=0,diagnostic=''
  const ready=new Promise((resolve,reject)=>{readyResolve=resolve;readyReject=reject}),timer=setTimeout(()=>{readyReject(Error('PIPE_START_TIMEOUT'));child.kill()},15000)
  const write=packet=>{if(closed)return;const line=JSON.stringify(packet)+'\n';if(Buffer.byteLength(line)+child.stdin.writableLength>2*1024*1024)throw Error('PIPE_OUTPUT_LIMIT');child.stdin.write(line)}
  const send=(sessionId,value)=>{if(value!==null)write({sessionId,line:JSON.stringify(value)})}
  const closeSession=sessionId=>{clearTimeout(sessions.get(sessionId)?.timer);sessions.delete(sessionId);write({sessionId,close:true})}
  child.stdin.on('error',()=>{child.kill()})
- child.stderr.on('data',bytes=>{stderrBytes+=bytes.length;if(stderrBytes>8192)child.kill()})
+ child.stderr.on('data',bytes=>{stderrBytes+=bytes.length;if(stderrBytes>8192)return child.kill();diagnostic+=bytes.toString('utf8')})
  child.on('error',()=>readyReject(Error('PIPE_UNAVAILABLE')))
- child.on('close',()=>{closed=true;exited=true;clearTimeout(timer);readyReject(Error('PIPE_UNAVAILABLE'));for(const session of sessions.values())clearTimeout(session.timer);sessions.clear()})
+ child.on('close',()=>{closed=true;exited=true;clearTimeout(timer);const startup=diagnostic.match(/MICHI_PIPE_STARTUP:([A-Za-z]{1,80}):([A-Za-z]{1,40}):(-?\d{1,12}):(CS\d{4})?/);const code=startup?`PIPE_UNAVAILABLE:${startup.slice(1).filter(Boolean).join(':')}`:/PSSecurityException|ScriptNotAllowed|UnauthorizedAccess/.test(diagnostic)?'PIPE_UNAVAILABLE:SCRIPT_POLICY':'PIPE_UNAVAILABLE';diagnostic='';readyReject(Error(code));for(const session of sessions.values())clearTimeout(session.timer);sessions.clear()})
  function packet(value){
   if(value.kind==='ready'){
    if(value.protectedDacl!==true||value.ruleCount!==1||value.rejectRemoteClients!==true||typeof value.ownerSid!=='string'||!value.sddl?.includes(value.ownerSid))return child.kill()
