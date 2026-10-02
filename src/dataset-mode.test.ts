@@ -7,7 +7,9 @@ import { validateSnapshot } from './backup-validation'
 import { captureSnapshot, restoreBackup } from './backup'
 import { purgeExpiredCalendarOriginals } from './calendar-import-retention'
 import { emptyCoachNotificationState, reserveCoachNotification, type NotificationGuard, type NotificationRequest } from './coach-notifications'
-import { prepareCoachNotificationDelivery } from './coach-notification-save'
+import { prepareCoachNotificationDelivery, queueCoachNotification, queueSnoozeNotification } from './coach-notification-save'
+import { changePolicyFor } from './change-set'
+import { catchUpRoutines } from './routine-catchup'
 import { saveAchievementPolicyFromUI } from './achievements-save'
 import { achievementTestGateway } from './achievements-test-fixtures'
 import type { GitHubAchievementsGateway } from './github-publish-types'
@@ -38,8 +40,7 @@ describe('I05 移行中の凍結（DATASET_FROZEN）', () => {
     expect(await rows()).toEqual(before)
   })
 
-  it('凍結中でも記録系（書き出し・引継ぎ記録・保持期限の整理・設定の最終書出日時）は動く', async () => {
-    await switchDevice('A')
+  it('凍結中でも記録系（書き出し・引継ぎ記録・保持期限の整理・設定の最終書出日時）は動く', async () => {    await switchDevice('A')
     await manualTask('記録系', 10)
     await move()
     await expect(purgeExpiredCalendarOriginals()).resolves.toBeUndefined()
@@ -48,6 +49,20 @@ describe('I05 移行中の凍結（DATASET_FROZEN）', () => {
     expect((await db.settings.get('main'))!.lastBackupAt).not.toBeNull()
     expect(await db.handoffHeads.where('direction').equals('export').count()).toBe(2)
     expect(await currentDatasetMode()).toBe('frozen')
+  })
+
+  it('凍結中は起動時追い付き・コーチ通知の予約が実体を作らない', async () => {
+    await switchDevice('A')
+    await manualTask('凍結中の追い付き対象', 10)
+    await move()
+    expect(await currentDatasetMode()).toBe('frozen')
+    const summary = await catchUpRoutines(new Date('2026-10-02T00:00:00.000Z'))
+    expect(summary).toMatchObject({ created: 0, days: 0 })
+    const settings = (await db.settings.get('main'))!, policy = changePolicyFor(settings)
+    const request: NotificationRequest = { id: 'frozen-notice', purpose: 'direct_reply', category: 'reply', target: { kind: 'task', id: 'missing', revision: 1 }, ruleId: 'fixture:frozen', ruleRevision: '1', ruleWindow: 'frozen', notBefore: new Date().toISOString(), expiresAt: '2026-10-03T00:00:00.000Z', destinationIds: ['in-app'], sourceRefs: [], text: { factual: '凍結中の通知文', savedAI: null }, intervalMinutes: null, maxCount: null, endDate: null }
+    const guard: NotificationGuard = { ownerId: settings.profileId, datasetId: settings.datasetId, authorityEpoch: policy.epoch, sourcePermissionRevision: policy.sourcePermissionRevision, aiEnabled: false, target: { ...request.target, active: true }, rule: { id: request.ruleId, revision: '1', active: true, sentCount: 0 }, sources: [], availableDestinationIds: ['in-app'] }
+    expect(await queueCoachNotification(request, guard)).toBeNull()
+    expect(await queueSnoozeNotification('missing')).toBeNull()
   })
 
   it('完了コード前の取消で送出側は再開でき、誤ったコードは拒否されて凍結のまま', async () => {

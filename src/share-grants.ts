@@ -2,7 +2,7 @@ import { db } from './db'
 import { uid } from './domain'
 import { sealShareEnvelope, ShareError } from './share-crypto'
 import { trustedShareClick } from './share-identity'
-import { projectTask, validateShareFields, validateShareNote } from './share-projection'
+import { projectTask, validateShareFields, validateShareNote, validateShareTitle } from './share-projection'
 import { SHARE_ROLES, type ResourceGrant, type ShareField, type ShareProjection, type ShareRole } from './share-types'
 
 export type ShareGrantInput = { taskId: string; recipientId: string; role: ShareRole; sharedFields: ShareField[]; shareNote: string }
@@ -19,7 +19,12 @@ export async function previewSharePayload(input: Pick<ShareGrantInput, 'taskId' 
   validateShareFields(input.sharedFields)
   const [task, completion, settings] = await Promise.all([db.tasks.get(input.taskId), db.completions.where('taskId').equals(input.taskId).first(), db.settings.get('main')])
   if (!task || task.deletedAt || !settings) throw new ShareError('共有するタスクが見つかりません')
-  return { role: input.role, shared_fields: [...input.sharedFields], projection: projectTask(task, completion, shareId, input.sharedFields), share_note: await checkShareNote(input.shareNote) }
+  const projection = projectTask(task, completion, shareId, input.sharedFields)
+  if (input.sharedFields.includes('title') && projection.title !== undefined) {
+    const { texts } = await privateTexts()
+    validateShareTitle(projection.title, texts)
+  }
+  return { role: input.role, shared_fields: [...input.sharedFields], projection, share_note: await checkShareNote(input.shareNote) }
 }
 export async function createShareGrant(input: ShareGrantInput, event: Event): Promise<ResourceGrant> {
   trustedShareClick(event)

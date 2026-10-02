@@ -40,6 +40,17 @@ export function validateProjection(value: unknown, shareId: string, fields: Shar
   if ('effective_points' in row && row.effective_points !== null && (!Number.isInteger(row.effective_points) || (row.effective_points as number) < 0 || (row.effective_points as number) > 100000)) throw new Error('共有されたポイントが不正です')
 }
 const normalize = (value: string) => value.replace(/\s+/g, ' ').trim()
+/** A shared title must not carry a verbatim span of 20+ characters from a private source either (same rule as the share note). References are masked by projectTask; verbatim spans are rejected here. */
+export function validateShareTitle(title: string, privateTexts: string[]): string {
+  const value = normalize(title)
+  if (!value) throw new Error('共有するタイトルがありません')
+  const texts = privateTexts.map(normalize).filter(text => text.length >= SPAN)
+  for (let start = 0; start + SPAN <= value.length; start++) {
+    const span = value.slice(start, start + SPAN)
+    if (texts.some(text => text.includes(span))) throw new Error('共有するタイトルに個人資料の原文（20文字以上の一致）が含まれています')
+  }
+  return title
+}
 /** A note written for the recipient must not carry a verbatim span of 20+ characters from a private source, nor a source reference. */
 export function validateShareNote(note: string, privateTexts: string[], sourceIds: string[]): string {
   if (typeof note !== 'string' || note.length > SHARE_NOTE_MAX) throw new Error(`共有メモは${SHARE_NOTE_MAX}文字以内にしてください`)

@@ -45,6 +45,8 @@ export async function catchUpRoutines(now = new Date()): Promise<RoutineCatchupS
   const settings0 = await db.settings.get('main'), initial = settings0?.routineCatchup ?? emptyState()
   // N09 routine stop: create nothing and keep checkpoints so resume backfills the stopped span (automation-control resume copy).
   if (settings0?.changePolicy?.stops?.routines) return { at, previousRunAt: initial.lastRunAt, days: 0, created: 0, unexpanded: 0, truncatedRoutineIds: [], acknowledgedAt: null }
+  // I05: a frozen or moved-away dataset creates no occurrences here; the receiving device continues the routines.
+  if (((await db.datasetState.get('main'))?.mode ?? 'active') !== 'active') return { at, previousRunAt: initial.lastRunAt, days: 0, created: 0, unexpanded: 0, truncatedRoutineIds: [], acknowledgedAt: null }
   // A stored time after now can only come from a clock that has since gone back.
   const clockBack = initial.lastRunAt !== null && initial.lastRunAt > at, clockSeries = new Set<string>(), overwrite = new Set<string>(), truncated = new Set<string>(), checkpoints: Record<string, string> = {}
   const gapPlans: { routine: Routine; date: string }[] = [], windowPlans: { routine: Routine; date: string }[] = []

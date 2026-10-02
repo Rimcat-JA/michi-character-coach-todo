@@ -37,6 +37,14 @@ describe('I06 共有用の投影（17.4: 共有用本文と個人のsource ref�
     expect(() => validateShareNote('あ'.repeat(2001), [], [])).toThrow('2000')
   })
 
+  it('個人資料の原文をタイトルに含む共有は拒否する（共有メモと同じ20文字規則）', async () => {
+    await enableSyntheticAI()
+    const { taskId } = await adoptDetectedTask()
+    const task = (await db.tasks.get(taskId))!
+    await updateTask(taskId, task.revision, { ...inputOf(task), title: `要対応 ${secretQuote}` })
+    await expect(previewSharePayload({ taskId, role: 'viewer', sharedFields: ['title'], shareNote: '' }, 'share-x')).rejects.toThrow('20文字以上')
+  })
+
   it('タイトル内の出典リンクは隠し、受け手の出典解決は存在してもしなくても同じ文言になる', async () => {
     expect(maskSourceReferences('見積 michi://source/abc123 を送る')).toBe(`見積 ［${SHARE_MASKED_SOURCE}］ を送る`)
     expect(resolveSharedSourceLink('michi://source/real-source-id')).toBe(resolveSharedSourceLink('michi://source/random-404'))

@@ -89,6 +89,9 @@ export async function prepareShareProposal(proposalId: string, event: Event): Pr
   if (!proposal || proposal.state !== 'pending' || !settings) throw new ShareError('確認待ちの提案がありません')
   const grant = await db.resourceGrants.get(proposal.grantId)
   if (!grant || grant.revokedAt) throw new ShareError('この共有は取り消し済みです')
+  // A proposal prepared under an editor grant must not survive a role downgrade:
+  // the current role decides, not the role at import time.
+  if (grant.role !== 'editor') throw new ShareError('この共有では編集の提案を受け付けません')
   const task = await db.tasks.get(proposal.taskId)
   if (!task || task.deletedAt) throw new ShareError('共有したタスクが見つかりません')
   const patch: TaskChangePatch = {}

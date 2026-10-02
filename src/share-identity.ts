@@ -27,7 +27,10 @@ export async function importShareCard(raw: string, relation: ShareContact['relat
   if (own?.card.fingerprint === card.fingerprint) throw new ShareError('自分の共有カードです')
   return db.transaction('rw', db.shareContacts, async () => {
     const prior = await db.shareContacts.get(card.fingerprint)
-    const contact: ShareContact = { id: card.fingerprint, displayName: card.display_name, card, relation: prior?.relation ?? relation, verifiedAt: prior?.verifiedAt ?? null, createdAt: prior?.createdAt ?? new Date().toISOString() }
+    // A verified fingerprint covers the keys, not the display name: a card that renames a
+    // confirmed contact must be re-verified out of band before it can receive anything.
+    const renamed = prior && prior.displayName !== card.display_name
+    const contact: ShareContact = { id: card.fingerprint, displayName: card.display_name, card, relation: prior?.relation ?? relation, verifiedAt: renamed ? null : prior?.verifiedAt ?? null, createdAt: prior?.createdAt ?? new Date().toISOString() }
     await db.shareContacts.put(contact)
     return contact
   })
