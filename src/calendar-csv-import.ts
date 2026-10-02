@@ -5,19 +5,21 @@ import { db } from './db'
 import { loadCalendarRulesState, prepareCalendarConfiguration, type CalendarRulesConfiguration, type CalendarConfigurationProposal } from './calendar-rules-save'
 import { csvEvidenceRowLimit, csvSnapshotLimit, validateCalendarRulesState } from './calendar-rules-validation'
 import { captureCalendarCSVAuthorityGeneration, registerCalendarCSVImport } from './calendar-csv-import-save'
+import { parseMappedCalendarCSV, validateCSVMappingProfile, validateScheduleDocumentEvidence, verifyMappedCSVQuote, type CSVMappingBinding, type CSVMappingProfile, type MappedCSVRowEvidence } from './calendar-csv-mapping'
+import type { ScheduleDocumentEvidence } from './calendar-document-import'
 
 export type CSVImportKind = 'calendar' | 'roster'
 export type CSVImportTarget = { kind: CSVImportKind; contextId: string; bindingId: string; calendarId: string; activityId: string | null; feedId: string; title: string; retentionUntil: string | null }
-export type CSVImportOptions = { fromDate: string; toDate: string }
+export type CSVImportOptions = { fromDate: string; toDate: string; mappingProfile?: CSVMappingProfile; profileChangeConfirmed?: boolean; newerFileConfirmed?: boolean; documentEvidence?: ScheduleDocumentEvidence }
 /** verify re-reads a retained row without resolving UTC instants, so later time-zone rule updates cannot invalidate stored evidence. */
 export type CSVParseOptions = CSVImportOptions & { kind: CSVImportKind; timezone: string; personRef: string | null; verify?: boolean }
 export type CalendarCSVRow = {
   kind: CSVImportKind; externalId: string; recordId: string; revision: number; status: 'open' | 'closed' | 'withdrawn' | 'scheduled' | 'cancelled'
   date: string | null; personRef: string | null; startDate: string | null; startTime: string | null; endDate: string | null; endTime: string | null; startAt: string | null; endAt: string | null
-  digest: string; quote: string; quoteHash: string; recordNumber: number; lineStart: number; lineEnd: number; byteStart: number; byteEnd: number
+  digest: string; quote: string; quoteHash: string; recordNumber: number; lineStart: number; lineEnd: number; byteStart: number; byteEnd: number; mapped?: MappedCSVRowEvidence
 }
 /** outsidePeriodRecords only carries identity and version of the person's own rows outside the period; it is never stored. */
-export type ParsedCalendarCSVImport = { kind: CSVImportKind; fileSha256: string; bodyHash: string; normalizedBody: string; rows: CalendarCSVRow[]; outsidePeriodRecords: { recordId: string; revision: number; recordNumber: number; lineStart: number }[]; fromDate: string; toDate: string; excludedDraft: number; excludedOtherPerson: number; excludedOutsidePeriod: number; warnings: string[] }
+export type ParsedCalendarCSVImport = { kind: CSVImportKind; fileSha256: string; bodyHash: string; normalizedBody: string; rows: CalendarCSVRow[]; outsidePeriodRecords: { recordId: string; revision: number; recordNumber: number; lineStart: number }[]; fromDate: string; toDate: string; excludedDraft: number; excludedOtherPerson: number; excludedOutsidePeriod: number; warnings: string[]; mapping?: CSVMappingBinding }
 /** retentionShortened: the new deadline also reaches earlier stored copies, including records absent from this file. */
 export type CalendarCSVImportPreview = { sourceId: string; noOp: boolean; retentionShortened: { snapshots: number; otherRecords: number; until: string } | null; added: number; updated: number; canceled: number; unchanged: number; selectedCount: number; excludedDraft: number; excludedOtherPerson: number; excludedOutsidePeriod: number; warnings: string[]; changes: { before: ScheduleFact | null; after: ScheduleFact | null; recordId: string; status: string }[]; parsed: ParsedCalendarCSVImport }
 export type PreparedCalendarCSVImport = Readonly<{ id: string; digest: string; preview: CalendarCSVImportPreview; configuration: CalendarConfigurationProposal | null; target: CSVImportTarget; ownerId: string; datasetId: string; policyEpoch: number; sourcePermissionRevision: number; baseDigest: string; referencesDigest: string; createdAt: string; expiresAt: string }>
@@ -25,9 +27,9 @@ export const calendarCSVHeaders = { calendar: ['record_id', 'record_revision', '
 type RawRecord = { cells: string[]; quote: string; recordNumber: number; lineStart: number; lineEnd: number; byteStart: number; byteEnd: number }
 function fail(message: string, record?: Pick<RawRecord, 'recordNumber' | 'lineStart'>): never { throw new Error(`CSV${record ? ` レコード${record.recordNumber}（${record.lineStart}行）` : ''}: ${message}`) }
 export async function csvUTF8Digest(text: string) { return csvBytesDigest(new TextEncoder().encode(text)) }
-async function csvBytesDigest(bytes: Uint8Array) { const digest = await crypto.subtle.digest('SHA-256', new Uint8Array(bytes)); return [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, '0')).join('') }
+export async function csvBytesDigest(bytes: Uint8Array) { const digest = await crypto.subtle.digest('SHA-256', new Uint8Array(bytes)); return [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, '0')).join('') }
 /** Hash of the saved selected rows, in record order, so reordering the file does not count as a change. */
-export function csvEvidenceBodyProjection(format: CSVImportKind, rows: CSVRowEvidence[]) { return { format: 'coach-calendar-csv-selected', version: 1, profile: format, rows: rows.map(({ recordId, recordRevision, digest, factId, quoteSha256, value }) => ({ recordId, recordRevision, digest, factId, quoteSha256, value })).sort((a, b) => a.recordId < b.recordId ? -1 : a.recordId > b.recordId ? 1 : 0) } }
+export function csvEvidenceBodyProjection(format: CSVImportKind, rows: CSVRowEvidence[]) { return { format: 'coach-calendar-csv-selected', version: 1, profile: format, rows: rows.map(({ recordId, recordRevision, digest, factId, quoteSha256, value, mapped }) => ({ recordId, recordRevision, digest, factId, quoteSha256, value, ...(mapped ? { profileDigest: mapped.profileDigest, ...(mapped.documentDigest ? { documentDigest: mapped.documentDigest } : {}) } : {}) })).sort((a, b) => a.recordId < b.recordId ? -1 : a.recordId > b.recordId ? 1 : 0) } }
 function records(text: string, bomBytes: number): RawRecord[] {
   const positions = new Uint32Array(text.length + 1)
   let byte = bomBytes, character = 0
@@ -69,8 +71,8 @@ function revision(value: string, record: RawRecord) { if (!/^[1-9]\d*$/.test(val
 function clock(value: string, record: RawRecord) { if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(value)) fail('時刻はHH:MMで明示してください', record); return value }
 function semantic(row: Omit<CalendarCSVRow, 'digest' | 'quote' | 'quoteHash' | 'recordNumber' | 'lineStart' | 'lineEnd' | 'byteStart' | 'byteEnd'>) { return { kind: row.kind, externalId: row.externalId, revision: row.revision, status: row.status, date: row.date, personRef: row.personRef, startDate: row.startDate, startTime: row.startTime, endDate: row.endDate, endTime: row.endTime, startAt: row.startAt, endAt: row.endAt } }
 const rowValue = (row: CalendarCSVRow): CSVRecordValue => row.kind === 'calendar' ? { kind: 'calendar', date: row.date!, status: row.status as 'open' | 'closed' | 'withdrawn' } : { kind: 'roster', status: row.status as 'scheduled' | 'cancelled', startAt: row.startAt!, endAt: row.endAt!, startLocal: `${row.startDate}T${row.startTime}`, endLocal: `${row.endDate}T${row.endTime}` }
-export async function csvRecordValueDigest(recordId: string, recordRevision: number, value: CSVRecordValue, target: CSVImportMetadata['target']) { return contentDigest({ recordId, recordRevision, value, target: { bindingId: target.bindingId, calendarId: target.calendarId, activityId: target.activityId, timezone: target.timezone, personRefHash: target.personRefHash } }) }
-async function boundRecordDigest(row: CalendarCSVRow, target: CSVImportMetadata['target']) { return csvRecordValueDigest(row.recordId, row.revision, rowValue(row), target) }
+export async function csvRecordValueDigest(recordId: string, recordRevision: number, value: CSVRecordValue, target: CSVImportMetadata['target'], profileDigest?: string, documentDigest?: string) { return contentDigest({ recordId, recordRevision, value, target: { bindingId: target.bindingId, calendarId: target.calendarId, activityId: target.activityId, timezone: target.timezone, personRefHash: target.personRefHash }, ...(profileDigest ? { profileDigest } : {}), ...(documentDigest ? { documentDigest } : {}) }) }
+async function boundRecordDigest(row: CalendarCSVRow, target: CSVImportMetadata['target']) { return csvRecordValueDigest(row.recordId, row.revision, rowValue(row), target, row.mapped?.profileDigest, row.mapped?.documentDigest) }
 export async function parseCalendarCSVImport(input: Uint8Array, options: CSVParseOptions): Promise<ParsedCalendarCSVImport> {
   options = structuredClone(options)
   if (!(input instanceof Uint8Array) || !input.byteLength || input.byteLength > 1048576) fail('UTF-8の1MiB以内のCSVファイルを選んでください')
@@ -184,7 +186,7 @@ export async function prepareCSVConfiguration(state: CalendarRulesState, target:
     const digest = await boundRecordDigest(row, csvTarget), prior = heads.get(row.recordId), existingBefore = prior?.factId ? next.facts.find(fact => fact.id === prior.factId) ?? null : null, before = existingBefore ? structuredClone(existingBefore) : null
     const where = `（レコード${row.recordNumber}・${row.lineStart}行）`, known = prior ? undefined : lineageHeads.get(row.recordId)
     if (prior && row.revision < prior.recordRevision) fail(`既存レコードより古い版です${where}。元資料を確認してください`)
-    if (prior && row.revision === prior.recordRevision && digest !== prior.digest) {
+    if (prior && row.revision === prior.recordRevision && digest !== prior.digest && !(parsed.mapping && canonicalJSON(storedValue(csv!, prior)) === canonicalJSON(rowValue(row)))) {
       const stored = storedValue(csv!, prior)
       // Same local times but another UTC instant can only come from a time-zone rule update, not from the file.
       fail(stored && sameLocalValue(stored, rowValue(row)) ? `タイムゾーン規則の更新により、同じ版の勤務の現地時刻に対応するUTC時刻が変わりました${where}。この取込元の時刻は登録時のまま保持しています。新しい規則で反映するには「取込元の終了」で終了し、新しい取込元で取り込んでください` : `同じ版で内容が異なります${where}。元資料を確認してください`)
@@ -203,7 +205,7 @@ export async function prepareCSVConfiguration(state: CalendarRulesState, target:
     else if (withdrawn || row.status === 'cancelled' && before?.kind === 'roster_assignment' && before.status !== 'cancelled') preview.canceled++
     else preview.updated++
     const { recordNumber, lineStart, lineEnd, byteStart, byteEnd, quote, quoteHash } = row
-    evidence.push({ recordId: row.recordId, recordRevision: row.revision, digest, factId, rowIndex: recordNumber, lineStart, lineEnd, byteStart, byteEnd, quote, quoteSha256: quoteHash, value: rowValue(row) })
+    evidence.push({ recordId: row.recordId, recordRevision: row.revision, digest, factId, rowIndex: recordNumber, lineStart, lineEnd, byteStart, byteEnd, quote, quoteSha256: quoteHash, value: rowValue(row), ...(row.mapped ? { mapped: row.mapped } : {}) })
     heads.set(row.recordId, { recordId: row.recordId, recordRevision: row.revision, digest, factId, status: withdrawn ? 'withdrawn' : 'current', snapshotRevision: nextRevision, rowIndex: recordNumber })
     if (!prior || row.revision !== prior.recordRevision || prior.status === 'expired') preview.changes.push({ before: before ? structuredClone(before) : null, after: after ? structuredClone(after) : null, recordId: row.recordId, status: row.status })
   }
@@ -213,7 +215,7 @@ export async function prepareCSVConfiguration(state: CalendarRulesState, target:
   preview.noOp = Boolean(previous?.status === 'current' && previous.title === target.title.trim() && canonicalJSON(csv!.target) === canonicalJSON(csvTarget) && last?.bodyHash === bodyHash && last.fromDate === parsed.fromDate && last.toDate === parsed.toDate && csv?.retentionUntil === target.retentionUntil && !preview.added && !preview.updated && !preview.canceled)
   preview.parsed.normalizedBody = canonicalJSON(bodyProjection); preview.parsed.bodyHash = bodyHash
   if (preview.noOp) return { preview, next: configuration(state) }
-  const snapshot = { revision: nextRevision, fingerprint: parsed.fileSha256, bodyHash, importedAt: at, fromDate: parsed.fromDate, toDate: parsed.toDate, retentionUntil: target.retentionUntil, rows: evidence }
+  const snapshot = { revision: nextRevision, fingerprint: parsed.fileSha256, bodyHash, importedAt: at, fromDate: parsed.fromDate, toDate: parsed.toDate, retentionUntil: target.retentionUntil, rows: evidence, ...(parsed.mapping ? { mapping: parsed.mapping } : {}) }
   // A shorter deadline applies to every earlier copy of the originals; a longer one never extends them.
   const shorten = (value: string | null) => target.retentionUntil !== null && (value === null || value > target.retentionUntil) ? target.retentionUntil : value
   const headRows = [...heads.values()].sort((a, b) => a.recordId < b.recordId ? -1 : 1), kept = [...(csv?.snapshots ?? []).map(row => ({ ...row, retentionUntil: shorten(row.retentionUntil) })), snapshot]
@@ -226,18 +228,51 @@ export async function prepareCSVConfiguration(state: CalendarRulesState, target:
     if (!headRows.some(head => head.snapshotRevision === old.revision) && old.rows.every(row => row.factId === null || others.some(other => other.rows.some(item => item.factId === row.factId)))) kept.splice(kept.indexOf(old), 1)
   }
   if (kept.length > csvSnapshotLimit || kept.reduce((sum, row) => sum + row.rows.length, 0) > csvEvidenceRowLimit || headRows.length > 1000) fail('この取込元に保存できる記録の上限に達しました。「取込元の終了」で終了してから、新しい取込元で取り込んでください。既存の予定・実績は保持します')
-  const source = { id: sourceId, contextId: context.id, title: target.title.trim(), authorityScope: target.kind === 'calendar' ? 'calendar' as const : 'roster' as const, coverageFrom: [parsed.fromDate, previous?.coverageFrom ?? parsed.fromDate].sort()[0], coverageTo: [parsed.toDate, previous?.coverageTo ?? parsed.toDate].sort().at(-1)!, status: 'current' as const, revision: nextRevision, importedAt: at, bodyHash, csv: { format: target.kind, feedId: target.feedId, readOnly: true as const, retentionUntil: target.retentionUntil, retiredAt: null, target: csvTarget, heads: headRows, snapshots: kept } }
+  const source = { id: sourceId, contextId: context.id, title: target.title.trim(), authorityScope: target.kind === 'calendar' ? 'calendar' as const : 'roster' as const, coverageFrom: [parsed.fromDate, previous?.coverageFrom ?? parsed.fromDate].sort()[0], coverageTo: [parsed.toDate, previous?.coverageTo ?? parsed.toDate].sort().at(-1)!, status: 'current' as const, ...(previous?.acquisition ? { acquisition: { ...previous.acquisition, staleByFetch: false } } : {}), revision: nextRevision, importedAt: at, bodyHash, csv: { format: target.kind, feedId: target.feedId, readOnly: true as const, retentionUntil: target.retentionUntil, retiredAt: null, target: csvTarget, heads: headRows, snapshots: kept } }
+  if (parsed.mapping) {
+    const history = [...(csv?.mappingHistory ?? [])]
+    if (!history.some(row => row.fingerprint === parsed.fileSha256)) history.push({ fingerprint: parsed.fileSha256, sequence: parsed.mapping.sequence })
+    if (history.length > 1000) fail('資料の取込履歴が1000版を超えました。取込元を終了して新しい資料を作ってください')
+    Object.assign(source.csv, { mapping: parsed.mapping, mappingHistory: history, identityReview: Boolean(csv?.identityReview || parsed.mapping.profile.recordIdStrategy === 'derived' && parsed.rows.some(row => !csv?.heads.some(head => head.recordId === row.recordId)) && csv?.heads.some(head => head.status === 'current' && !parsed.rows.some(row => row.recordId === head.recordId))) })
+    if ((source.csv as CSVImportMetadata).identityReview) preview.warnings.push('日付から作ったIDが変わりました。古い記録を保持し、この系列の生成を確認待ちにします。取込元の終了と新しい対象を本人が確認してください')
+  }
   next.sources = [...next.sources.filter(row => row.id !== sourceId), source]
   validateCalendarRulesState({ ...state, ...next, revision: state.revision + 1 })
   return { preview, next }
 }
 export async function prepareCalendarCSVImport(target: CSVImportTarget, bytes: Uint8Array, options: CSVImportOptions): Promise<PreparedCalendarCSVImport> {
+  const mode = await db.datasetState.get('main'); if (mode && mode.mode !== 'active') fail('移行中・読み取り専用のデータでは予定資料の再解析を停止しています')
   const generation = captureCalendarCSVAuthorityGeneration(), state = await loadCalendarRulesState(), settings = await db.settings.get('main')
   if (!settings) fail('本人の保存先がありません')
   await verifyCSVOriginalDigests([state])
   target = structuredClone(target); options = structuredClone(options)
   const refs = validateTarget(state, target, options, new Date().toISOString())
-  const parsed = await parseCalendarCSVImport(bytes, { ...options, kind: target.kind, timezone: refs.context.timezone, personRef: target.kind === 'roster' ? refs.binding.personRef : null })
+  const parseOptions = { ...options, kind: target.kind, timezone: refs.context.timezone, personRef: target.kind === 'roster' ? refs.binding.personRef : null }
+  const previous = state.sources.find(source => source.contextId === target.contextId && source.csv?.feedId === target.feedId && source.csv.format === target.kind)?.csv
+  let parsed: ParsedCalendarCSVImport
+  if (options.mappingProfile) {
+    validateCSVMappingProfile(options.mappingProfile)
+    const digest = await contentDigest(options.mappingProfile), old = previous?.mapping, fingerprint = options.documentEvidence?.fileSha256 ?? await csvBytesDigest(bytes), last = previous?.snapshots.at(-1)
+    if (previous && old?.digest !== digest && !options.profileChangeConfirmed) fail('既存資料の列対応変更を明示確認してください')
+    if (previous && (options.mappingProfile.recordIdStrategy !== (old?.profile.recordIdStrategy ?? 'column') || options.mappingProfile.revisionStrategy !== (old?.profile.revisionStrategy ?? 'column'))) fail('ID・版の方式変更は取込元を終了して新しい資料へ行ってください')
+    if (old && old.digest !== digest && options.mappingProfile.revision <= old.profile.revision) fail('列対応設定の版を進めてください')
+    const importOrder = options.mappingProfile.revisionStrategy === 'import_order'
+    if (importOrder && last?.fingerprint !== fingerprint && (previous?.mappingHistory?.some(row => row.fingerprint === fingerprint) || previous?.snapshots.slice(0, -1).some(row => row.fingerprint === fingerprint))) fail('既に取り込んだ古い資料は再取込できません')
+    if (importOrder && last?.fingerprint !== fingerprint && !options.newerFileConfirmed) fail('この資料が前回より新しいことを本人が確認してください')
+    const sequence = last?.fingerprint === fingerprint && old ? old.sequence : (old?.sequence ?? 0) + 1
+    parsed = await parseMappedCalendarCSV(bytes, parseOptions, { profile: options.mappingProfile, digest, sequence })
+  } else { if (previous?.mapping) fail('既存の列対応設定を使ってください'); parsed = await parseCalendarCSVImport(bytes, parseOptions) }
+  if (options.documentEvidence) {
+    if (!parsed.mapping || parsed.mapping.profile.encoding !== 'utf-8' || parsed.mapping.profile.delimiter !== ',') fail('文書の仮想表はUTF-8・カンマの列対応で確認してください')
+    const { rows, ...document } = options.documentEvidence
+    for (const row of parsed.rows) {
+      const cells = rows.find(record => record.row === row.recordNumber)?.cells
+      const evidence = { ...document, cells }; validateScheduleDocumentEvidence(evidence)
+      row.mapped!.document = evidence as NonNullable<MappedCSVRowEvidence['document']>; row.mapped!.documentDigest = await contentDigest(evidence)
+    }
+    parsed.fileSha256 = document.fileSha256
+    parsed.warnings.push('元のPDF/XLSXは保存しません。選択した行の抽出文字・出典位置・原ファイルhashだけを保持します。byte範囲は仮想表のUTF-8上の位置です')
+  }
   const { preview, next } = await prepareCSVConfiguration(state, target, parsed)
   const configuration = preview.noOp ? null : await prepareCalendarConfiguration(next, state.revision, options.fromDate, options.toDate)
   return registerCalendarCSVImport({ preview, configuration, target }, settings, state, generation)
@@ -257,7 +292,7 @@ export async function prepareCalendarCSVRetirement(sourceId: string, fromDate: s
   source.csv.retiredAt = new Date().toISOString()
   if (eraseOriginals) {
     // Same effect as reaching the deadline now: originals and the CSV person ID go; facts stay as withdrawn history.
-    for (const snapshot of source.csv.snapshots) for (const row of snapshot.rows) row.quote = null
+    for (const snapshot of source.csv.snapshots) for (const row of snapshot.rows) { row.quote = null; if (row.mapped) { row.mapped.rawBase64 = ''; row.mapped.normalizedQuote = '' } }
     for (const head of source.csv.heads) { head.status = 'expired'; const fact = next.facts.find(item => item.id === head.factId && item.sourceId === source.id); if (fact) fact.validity = 'withdrawn' }
     source.csv.target.personRef = null; source.status = 'stale'
   }
@@ -271,17 +306,23 @@ export async function verifyCSVOriginalDigests(states: CalendarRulesState[]): Pr
       const csv = source.csv; if (!csv) continue
       if (csv.target.personRef !== null && `sha256:${await contentDigest(csv.target.personRef)}` !== csv.target.personRefHash) fail('本人識別子の匿名hashが一致しません')
       for (const snapshot of csv.snapshots) {
+        if (snapshot.mapping && await contentDigest(snapshot.mapping.profile) !== snapshot.mapping.digest) fail('列対応設定のhashが一致しません')
         if (await contentDigest(csvEvidenceBodyProjection(csv.format, snapshot.rows)) !== snapshot.bodyHash) fail('選択行の正規化hashが一致しません')
         for (const row of snapshot.rows) {
-          if (await csvRecordValueDigest(row.recordId, row.recordRevision, row.value, csv.target) !== row.digest) fail('選択行の記録値と根拠hashが一致しません')
+          if (await csvRecordValueDigest(row.recordId, row.recordRevision, row.value, csv.target, row.mapped?.profileDigest, row.mapped?.documentDigest) !== row.digest) fail('選択行の記録値と根拠hashが一致しません')
+          if (row.mapped?.document && await contentDigest(row.mapped.document) !== row.mapped.documentDigest) fail('文書の出典位置のhashが一致しません')
           const fact = row.factId ? state.facts.find(item => item.id === row.factId) : null, value = row.value
           if (row.factId && (!fact || fact.sourceId !== source.id || fact.contextId !== source.contextId || fact.revision !== row.recordRevision || (value.kind === 'calendar' ? !['open', 'closed'].includes(fact.kind) || !('date' in fact) || fact.date !== value.date || fact.kind !== value.status || !('calendarId' in fact) || fact.calendarId !== csv.target.calendarId : fact.kind !== 'roster_assignment' || fact.activityId !== csv.target.activityId || fact.externalId !== row.recordId || fact.personRef !== csv.target.personRefHash || fact.published !== true || fact.status !== value.status || fact.startAt !== value.startAt || fact.endAt !== value.endAt))) fail('選択行と保存した日程の事実が一致しません')
           if (value.kind === 'calendar' && value.status === 'withdrawn' ? row.factId !== null : row.factId === null) fail('撤回状態と事実参照が一致しません')
           if (row.quote === null) continue
-          if (await csvUTF8Digest(row.quote) !== row.quoteSha256) fail('保持した選択行の引用hashが一致しません')
+          if (row.mapped) {
+            if (!snapshot.mapping || row.mapped.profileDigest !== snapshot.mapping.digest) fail('選択行の列対応設定が一致しません')
+            const raw = await verifyMappedCSVQuote(row.mapped.rawBase64, row.quote, row.mapped.normalizedQuote, snapshot.mapping, { kind: csv.format, timezone: csv.target.timezone, personRef: csv.target.personRef, fromDate: snapshot.fromDate, toDate: snapshot.toDate, verify: true })
+            if (await csvBytesDigest(raw) !== row.quoteSha256) fail('原文bytesのhashが一致しません')
+          } else if (await csvUTF8Digest(row.quote) !== row.quoteSha256) fail('保持した選択行の引用hashが一致しません')
           // Compare the local values read from the quote with the stored evidence. The UTC instants stay as
           // resolved at import time (bound by row.digest), so a later tz-data update cannot fail backups.
-          const parsed = await parseCalendarCSVImport(new TextEncoder().encode(calendarCSVHeaders[csv.format].join(',') + '\n' + row.quote), { kind: csv.format, timezone: csv.target.timezone, personRef: csv.target.personRef, fromDate: snapshot.fromDate, toDate: snapshot.toDate, verify: true })
+          const parsed = await parseCalendarCSVImport(new TextEncoder().encode(calendarCSVHeaders[csv.format].join(',') + '\n' + (row.mapped?.normalizedQuote ?? row.quote)), { kind: csv.format, timezone: csv.target.timezone, personRef: csv.target.personRef, fromDate: snapshot.fromDate, toDate: snapshot.toDate, verify: true })
           const retained = parsed.rows[0]
           // A retained quote is exactly one selected row: no extra, other-person or draft record may ride along.
           if (parsed.rows.length !== 1 || parsed.excludedDraft + parsed.excludedOtherPerson + parsed.excludedOutsidePeriod !== 0 || !retained || retained.recordId !== row.recordId || retained.revision !== row.recordRevision || retained.status !== value.status || (value.kind === 'calendar' ? retained.date !== value.date : `${retained.startDate}T${retained.startTime}` !== value.startLocal || `${retained.endDate}T${retained.endTime}` !== value.endLocal)) fail('保持した選択行とレコードの根拠が一致しません')

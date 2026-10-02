@@ -1,5 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { zipSync, strToU8 } from 'fflate'
 import { extractDocument } from './document-extract.cjs'
 
@@ -24,7 +25,8 @@ function pdfFixture() {
   return new Uint8Array(Buffer.from(text))
 }
 test('PDF reads text layer and records a blank page as unread, without OCR claims', async () => {
-  const result = await extractDocument({ name: 'fixture.pdf', bytes: pdfFixture() })
+  const bytes = pdfFixture(), result = await extractDocument({ name: 'fixture.pdf', bytes })
+  assert.equal(result.document.size, bytes.length); assert.equal(result.document.fileSha256, createHash('sha256').update(bytes).digest('hex'))
   assert.match(result.text, /Submit report/); assert.equal(result.document.locations[0], 'ページ1'); assert.equal(result.document.unread[0].location, 'ページ2')
 })
 test('bad magic, broken XML, DTD, oversized files and zip bombs are rejected', async () => {

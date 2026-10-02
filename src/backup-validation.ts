@@ -298,6 +298,7 @@ export function validateSnapshot(input: unknown): asserts input is Snapshot {
     validateDate(block.date, '時間枠の日付')
   }
   for (const event of events) if (event.ownerId !== settings.profileId || !['meeting', 'class', 'other'].includes(event.kind) || !filled(event.title) || event.title.length > 300 || !filled(event.timezone) || !timestamp(event.createdAt) || !nullableString(event.linkedTaskId) || (event.linkedTaskId !== null && !taskIds.has(event.linkedTaskId)) || !filled(event.startAt) || !filled(event.endAt) || !Number.isFinite(Date.parse(event.startAt)) || !Number.isFinite(Date.parse(event.endAt)) || Date.parse(event.endAt) <= Date.parse(event.startAt)) throw new Error('予定が不正です')
+  for (const event of events) { if (event.revision !== undefined && (!Number.isSafeInteger(event.revision) || event.revision < 1) || event.updatedAt !== undefined && !timestamp(event.updatedAt) || event.locallyEdited !== undefined && typeof event.locallyEdited !== 'boolean') throw new Error('予定の版・本人変更が不正です'); event.revision ??= 1; event.updatedAt ??= event.createdAt }
   if (planningBuckets.some(bucket => bucket.ownerId !== settings.profileId)) throw new Error('計画枠の所有者が不正です')
   if (input.labelGroups !== undefined && !Array.isArray(input.labelGroups)) throw new Error('labelGroupsが不正です')
   if (input.labelDefinitions !== undefined && !Array.isArray(input.labelDefinitions)) throw new Error('labelDefinitionsが不正です')

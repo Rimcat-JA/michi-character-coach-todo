@@ -9,7 +9,7 @@ const zonedDate = (iso: string, timezone: string) => new Intl.DateTimeFormat('sv
 
 export function calendarItems(events: CalendarEvent[], blocks: TimeBlock[], tasks: Task[], timezone: string): CalendarItem[] {
   const result: CalendarItem[] = []
-  for (const event of events) result.push({ id: `event:${event.id}`, source: 'event', title: event.title, date: zonedDate(event.startAt, event.timezone), startAt: event.startAt, endAt: event.endAt, timezone: event.timezone, revision: 1, allDay: false })
+  for (const event of events) result.push({ id: `event:${event.id}`, source: 'event', title: event.title, date: zonedDate(event.startAt, event.timezone), startAt: event.startAt, endAt: event.endAt, timezone: event.timezone, revision: event.revision ?? 1, allDay: false })
   for (const block of blocks) result.push({ id: `block:${block.id}`, source: 'block', title: block.category, date: block.date, startAt: `${block.date}T${clock(block.startMinute)}:00`, endAt: `${block.date}T${clock(block.endMinute)}:00`, timezone: block.timezone, revision: block.revision, allDay: false })
   for (const task of tasks) if (!task.deletedAt && task.scheduledDate) result.push({ id: `task:${task.id}`, source: 'task', title: task.title, date: task.scheduledDate, startAt: task.scheduledDate, endAt: null, timezone, revision: task.revision, allDay: true })
   // A clock deadline is a point in time in its own zone; date-only deadlines stay off the time views.

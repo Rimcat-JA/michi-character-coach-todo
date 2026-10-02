@@ -3,8 +3,10 @@ import { validateDate, validateScore, type CalendarEvent, type ScoreInput, type 
 import { calendarDateAt, type CalendarRulesState, type ScheduleFact, type ScheduleSource, type ResolvedCalendarSpec } from './calendar-resolver'
 import { canonicalRRule } from './rrule'
 import { validLocalDateTime } from './zoned-time'
+import { base64Bytes, validateCSVMappingProfile, validateScheduleDocumentEvidence, type CSVMappingBinding } from './calendar-csv-mapping'
 
 type Row = Record<string, unknown>
+const optional = (value: unknown, keys: string[]) => value && typeof value === 'object' ? keys.filter(key => Object.hasOwn(value, key)) : []
 function object(value: unknown, keys: string[]): asserts value is Row {
   if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).some(key => !keys.includes(key)) || keys.some(key => !(key in value))) throw new Error('カレンダー資料の項目が不正です')
 }
@@ -12,7 +14,7 @@ function text(value: unknown, name: string, max = 300): asserts value is string 
 function id(value: unknown) { text(value, 'ID', 200); if (!/^[A-Za-z0-9_.:-]+$/.test(value)) throw new Error('IDには英数字・_ . : - を使ってください') }
 function integer(value: unknown, low: number, high: number) { if (!Number.isInteger(value) || Number(value) < low || Number(value) > high) throw new Error('カレンダーの数値が範囲外です') }
 function revision(value: unknown) { integer(value, 1, Number.MAX_SAFE_INTEGER) }
-function hash(value: unknown) { if (typeof value !== 'string' || !/^[a-f0-9]{64}$/.test(value)) throw new Error('CSVの内容hashが不正です') }
+function hash(value: unknown): asserts value is string { if (typeof value !== 'string' || !/^[a-f0-9]{64}$/.test(value)) throw new Error('内容hashが不正です') }
 function anonymousId(value: unknown) { if (typeof value !== 'string' || !/^sha256:[a-f0-9]{64}$/.test(value)) throw new Error('CSVの外部ID・本人参照は匿名hashです') }
 function date(value: unknown) { if (typeof value !== 'string') throw new Error('日付が不正です'); validateDate(value, 'カレンダー日付'); if (!value) throw new Error('日付を指定してください') }
 function range(from: unknown, to: unknown) { date(from); date(to); if (String(from) > String(to)) throw new Error('有効期間の順序が不正です') }
@@ -88,10 +90,21 @@ export function validateCalendarRulesState(value: unknown, ownerId?: string, dat
   rows(value.activities, ['id', 'contextId', 'bindingId', 'calendarId', 'title', 'eventKind', 'weekdays', 'startTime', 'endTime', 'endDayOffset', 'validFrom', 'validTo', 'revision'], 1000)
   value.activities.forEach(row => { id(row.contextId); id(row.bindingId); id(row.calendarId); text(row.title, '活動名'); choice(row.eventKind, ['class', 'meeting', 'other']); weekdays(row.weekdays); clock(row.startTime); clock(row.endTime); integer(row.endDayOffset, 0, 6); range(row.validFrom, row.validTo); revision(row.revision); if (row.endDayOffset === 0 && String(row.startTime) >= String(row.endTime)) throw new Error('開始・終了の順序を確認してください') })
   array(value.sources, 1000)
-  for (const source of value.sources) { if (!source || typeof source !== 'object') throw new Error('資料が不正です'); object(source, ['id', 'contextId', 'title', 'authorityScope', 'coverageFrom', 'coverageTo', 'status', 'revision', 'importedAt', 'bodyHash', ...('ics' in source ? ['ics'] : []), ...('csv' in source ? ['csv'] : [])]); id(source.id); if ('ics' in source && 'csv' in source) throw new Error('ICSとCSVの資料を混ぜられません') }
+  for (const source of value.sources) { if (!source || typeof source !== 'object') throw new Error('資料が不正です'); object(source, ['id', 'contextId', 'title', 'authorityScope', 'coverageFrom', 'coverageTo', 'status', 'revision', 'importedAt', 'bodyHash', ...('ics' in source ? ['ics'] : []), ...('csv' in source ? ['csv'] : []), ...('acquisition' in source ? ['acquisition'] : []), ...('caldav' in source ? ['caldav'] : [])]); id(source.id); if ('acquisition' in source) { object(source.acquisition, ['provider', 'qaFixture', 'staleByFetch']); choice(source.acquisition.provider, ['ics_url', 'file_watch', 'caldav']); bool(source.acquisition.qaFixture); bool(source.acquisition.staleByFetch) }; if ('ics' in source && 'csv' in source) throw new Error('ICSとCSVの資料を混ぜられません') }
   if (new Set(value.sources.map(source => (source as Row).id)).size !== value.sources.length) throw new Error('資料IDが重複しています')
   const sourceRows = value.sources as Row[]
   let originalBytes = 0
+  for (const source of sourceRows) if (source.caldav !== undefined) {
+    object(source.caldav, ['accountId', 'collectionHash', 'readOnly', 'objects', 'snapshots'])
+    if (!source.ics || source.caldav.readOnly !== true || (source.acquisition as Row | undefined)?.provider !== 'caldav') throw new Error('CalDAVは読取対象のICS資料として保持してください')
+    id(source.caldav.accountId);hash(source.caldav.collectionHash)
+    array(source.caldav.objects,1000)
+    const hrefs=new Set<string>()
+    for (const entry of source.caldav.objects) { object(entry,['hrefHash','etag','uidHashes']);hash(entry.hrefHash);if(hrefs.has(entry.hrefHash))throw new Error('CalDAVのオブジェクトが重複しています');hrefs.add(entry.hrefHash);text(entry.etag,'CalDAV ETag',1000);if((!/^"[^"]+"$/.test(entry.etag)||[...entry.etag].some(char=>char.charCodeAt(0)<32||char.charCodeAt(0)===127)))throw new Error('CalDAV ETagが不正です');array(entry.uidHashes,1000);for(const uid of entry.uidHashes)if(typeof uid!=='string'||!/^sha256:[a-f0-9]{64}$/.test(uid))throw new Error('CalDAV UIDは匿名hashです') }
+    array(source.caldav.snapshots,20);let prior=0
+    for(const snapshot of source.caldav.snapshots){object(snapshot,['revision','sha256','originalJSON','fetchedAt']);revision(snapshot.revision);if(Number(snapshot.revision)<=prior||Number(snapshot.revision)>Number(source.revision))throw new Error('CalDAV取得原本の版が不正です');prior=Number(snapshot.revision);hash(snapshot.sha256);instant(snapshot.fetchedAt);if(snapshot.originalJSON!==null){if(typeof snapshot.originalJSON!=='string'||!snapshot.originalJSON||new TextEncoder().encode(snapshot.originalJSON).length>1048576)throw new Error('CalDAV取得原本は1MiB以内です');originalBytes+=new TextEncoder().encode(snapshot.originalJSON).length}}
+    if(prior!==source.revision)throw new Error('CalDAV取得原本と資料の最新版が一致しません')
+  }
   for (const source of sourceRows) if (source.ics !== undefined) {
     object(source.ics, ['feedId', 'readOnly', 'retentionUntil', 'snapshots', 'components']); text(source.ics.feedId, 'ICS取込元', 120); if (source.ics.readOnly !== true || source.authorityScope !== 'activity') throw new Error('ICSは読取専用の活動資料です')
     if (source.ics.retentionUntil !== null) instant(source.ics.retentionUntil)
@@ -112,8 +125,12 @@ export function validateCalendarRulesState(value: unknown, ownerId?: string, dat
     }
   }
   for (const source of sourceRows) if (source.csv !== undefined) {
-    object(source.csv, ['format', 'feedId', 'readOnly', 'retentionUntil', 'retiredAt', 'target', 'heads', 'snapshots'])
+    object(source.csv, ['format', 'feedId', 'readOnly', 'retentionUntil', 'retiredAt', 'target', 'heads', 'snapshots', ...optional(source.csv, ['mapping', 'mappingHistory', 'identityReview'])])
     const csv = source.csv
+    const mapping = (value: unknown) => { object(value, ['profile', 'digest', 'sequence']); validateCSVMappingProfile(value.profile); hash(value.digest); integer(value.sequence, 1, 2147483647); if (value.profile.kind !== csv.format) throw new Error('列対応の対象が一致しません') }
+    if ('mapping' in csv) mapping(csv.mapping)
+    if ('mappingHistory' in csv) { array(csv.mappingHistory, 1000); const seen = new Set<string>(); for (const entry of csv.mappingHistory) { object(entry, ['fingerprint', 'sequence']); hash(entry.fingerprint); integer(entry.sequence, 1, Number((csv.mapping as CSVMappingBinding)?.sequence)); if (seen.has(String(entry.fingerprint))) throw new Error('資料の取込履歴が重複しています'); seen.add(String(entry.fingerprint)) } }
+    if ('identityReview' in csv) { bool(csv.identityReview); if (!csv.mapping) throw new Error('ID確認には列対応設定が必要です') }
     choice(csv.format, ['calendar', 'roster']); text(csv.feedId, 'CSV取込元', 120)
     if (csv.readOnly !== true || source.authorityScope !== csv.format) throw new Error('CSVは読取専用の会社暦・本人勤務表です')
     if (csv.retentionUntil !== null) instant(csv.retentionUntil)
@@ -126,12 +143,19 @@ export function validateCalendarRulesState(value: unknown, ownerId?: string, dat
     if ((csv.snapshots as Row[]).reduce((sum, snapshot) => sum + (Array.isArray(snapshot?.rows) ? snapshot.rows.length : 0), 0) > csvEvidenceRowLimit) throw new Error('CSV取込元の保存行数が上限を超えています')
     let previous = 0
     for (const raw of csv.snapshots) {
-      object(raw, ['revision', 'fingerprint', 'bodyHash', 'importedAt', 'fromDate', 'toDate', 'retentionUntil', 'rows'])
+      object(raw, ['revision', 'fingerprint', 'bodyHash', 'importedAt', 'fromDate', 'toDate', 'retentionUntil', 'rows', ...optional(raw, ['mapping'])])
+      if ('mapping' in raw) mapping(raw.mapping)
       revision(raw.revision); if (Number(raw.revision) <= previous || Number(raw.revision) > Number(source.revision)) throw new Error('CSV記録の版が不正です'); previous = Number(raw.revision)
       hash(raw.fingerprint); hash(raw.bodyHash); instant(raw.importedAt); range(raw.fromDate, raw.toDate); if (raw.retentionUntil !== null) instant(raw.retentionUntil)
       array(raw.rows, 1000); const rowIndices = new Set<number>(), recordIds = new Set<string>(); let priorByteEnd = 0
       for (const row of raw.rows) {
-        object(row, ['recordId', 'recordRevision', 'value', 'digest', 'factId', 'rowIndex', 'lineStart', 'lineEnd', 'byteStart', 'byteEnd', 'quote', 'quoteSha256'])
+        object(row, ['recordId', 'recordRevision', 'value', 'digest', 'factId', 'rowIndex', 'lineStart', 'lineEnd', 'byteStart', 'byteEnd', 'quote', 'quoteSha256', ...optional(row, ['mapped'])])
+        if ('mapped' in row) {
+          object(row.mapped, ['rawBase64', 'normalizedQuote', 'profileDigest', ...optional(row.mapped, ['document', 'documentDigest'])]); hash(row.mapped.profileDigest)
+          if ('document' in row.mapped || 'documentDigest' in row.mapped) { validateScheduleDocumentEvidence(row.mapped.document); hash(row.mapped.documentDigest) }
+          if (!raw.mapping || row.mapped.profileDigest !== (raw.mapping as CSVMappingBinding).digest || typeof row.mapped.rawBase64 !== 'string' || typeof row.mapped.normalizedQuote !== 'string' || row.mapped.normalizedQuote.length > 65536) throw new Error('選択行の列対応が不正です')
+          if (row.quote === null ? row.mapped.rawBase64 !== '' || row.mapped.normalizedQuote !== '' : !row.mapped.rawBase64 || !row.mapped.normalizedQuote) throw new Error('原文bytesの保持状態が不正です')
+        } else if (raw.mapping) throw new Error('列対応資料の元bytesがありません')
         anonymousId(row.recordId); integer(row.recordRevision, 1, 2147483647); hash(row.digest); if (row.factId !== null) id(row.factId)
         if (csv.format === 'calendar') { object(row.value, ['kind', 'date', 'status']); if (row.value.kind !== 'calendar') throw new Error('CSV選択行の内容型が不正です'); date(row.value.date); choice(row.value.status, ['open', 'closed', 'withdrawn']); if ((row.value.status === 'withdrawn') !== (row.factId === null)) throw new Error('CSV撤回行と事実参照が不正です') }
         else { object(row.value, ['kind', 'status', 'startAt', 'endAt', 'startLocal', 'endLocal']); if (row.value.kind !== 'roster') throw new Error('CSV選択行の内容型が不正です'); choice(row.value.status, ['scheduled', 'cancelled']); instant(row.value.startAt); instant(row.value.endAt); localDateTime(row.value.startLocal); localDateTime(row.value.endLocal); if (String(row.value.startAt) >= String(row.value.endAt) || Date.parse(String(row.value.endAt)) - Date.parse(String(row.value.startAt)) > 7 * 86400000 || row.factId === null) throw new Error('CSV勤務表行の時刻・事実参照が不正です') }
@@ -139,14 +163,16 @@ export function validateCalendarRulesState(value: unknown, ownerId?: string, dat
         integer(row.byteStart, priorByteEnd, 1048576); integer(row.byteEnd, Number(row.byteStart) + 1, 1048576); priorByteEnd = Number(row.byteEnd)
         hash(row.quoteSha256)
         if (row.quote !== null) {
-          if (typeof row.quote !== 'string' || !row.quote || new TextDecoder().decode(new TextEncoder().encode(row.quote)) !== row.quote || new TextEncoder().encode(row.quote).length !== Number(row.byteEnd) - Number(row.byteStart)) throw new Error('CSV選択行の原文・byte範囲が不正です')
-          originalBytes += new TextEncoder().encode(row.quote).length
+          const mapped = row.mapped as { rawBase64: string } | undefined, bytes = mapped ? base64Bytes(mapped.rawBase64) : new TextEncoder().encode(String(row.quote))
+          if (typeof row.quote !== 'string' || !row.quote || (mapped ? new TextDecoder((raw.mapping as CSVMappingBinding).profile.encoding, { fatal: true }).decode(bytes) : new TextDecoder().decode(bytes)) !== row.quote || bytes.length !== Number(row.byteEnd) - Number(row.byteStart)) throw new Error('CSV選択行の原文・byte範囲が不正です')
+          originalBytes += bytes.length
         }
         if (rowIndices.has(Number(row.rowIndex)) || recordIds.has(String(row.recordId))) throw new Error('CSV選択行が重複しています')
         rowIndices.add(Number(row.rowIndex)); recordIds.add(String(row.recordId))
       }
     }
     const latest = csv.snapshots.at(-1) as Row
+    if (canonicalJSON(csv.mapping ?? null) !== canonicalJSON(latest.mapping ?? null)) throw new Error('最新版の列対応設定が一致しません')
     if (latest.revision !== source.revision || latest.bodyHash !== source.bodyHash || latest.retentionUntil !== csv.retentionUntil) throw new Error('CSV選択行の最新版・hash・保持期限が一致しません')
     array(csv.heads, 1000); const records = new Set<string>(), factIds = new Set<string>()
     for (const head of csv.heads) {

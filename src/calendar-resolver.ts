@@ -1,4 +1,5 @@
 import { canonicalJSON, contentDigest } from './canonical'
+import type { CSVMappingBinding, MappedCSVRowEvidence } from './calendar-csv-mapping'
 import { addDays, emptyScore, validateDate, validateScore, type ScoreInput } from './domain'
 import { expandRRule, parseRRule, rruleSeriesLimit } from './rrule'
 import { resolveZonedLocalTime, type AmbiguousTimePolicy, type NonexistentTimePolicy } from './zoned-time'
@@ -11,11 +12,12 @@ export type ICSComponentVersion = { uid: string; recurrenceId: string | null; se
 export type ICSImportMetadata = { feedId: string; readOnly: true; retentionUntil: string | null; snapshots: { revision: number; sha256: string; originalText: string | null; importedAt: string; fromDate: string; toDate: string }[]; components: ICSComponentVersion[] }
 /** Roster rows keep the local wall times read from the file, so evidence checks do not depend on later time-zone rule updates. */
 export type CSVRecordValue = { kind: 'calendar'; date: string; status: 'open' | 'closed' | 'withdrawn' } | { kind: 'roster'; status: 'scheduled' | 'cancelled'; startAt: string; endAt: string; startLocal: string; endLocal: string }
-export type CSVRowEvidence = { recordId: string; recordRevision: number; value: CSVRecordValue; digest: string; factId: string | null; rowIndex: number; lineStart: number; lineEnd: number; byteStart: number; byteEnd: number; quote: string | null; quoteSha256: string }
+export type CSVRowEvidence = { recordId: string; recordRevision: number; value: CSVRecordValue; digest: string; factId: string | null; rowIndex: number; lineStart: number; lineEnd: number; byteStart: number; byteEnd: number; quote: string | null; quoteSha256: string; mapped?: MappedCSVRowEvidence }
 export type CSVRecordHead = { recordId: string; recordRevision: number; digest: string; factId: string | null; status: 'current' | 'expired' | 'withdrawn'; snapshotRevision: number; rowIndex: number }
-export type CSVImportSnapshot = { revision: number; fingerprint: string; bodyHash: string; importedAt: string; fromDate: string; toDate: string; retentionUntil: string | null; rows: CSVRowEvidence[] }
-export type CSVImportMetadata = { format: 'calendar' | 'roster'; feedId: string; readOnly: true; retentionUntil: string | null; retiredAt: string | null; target: { bindingId: string; bindingRevision: number; calendarId: string; activityId: string | null; timezone: string; personRef: string | null; personRefHash: string | null }; heads: CSVRecordHead[]; snapshots: CSVImportSnapshot[] }
-export type ScheduleSource = { id: string; contextId: string; title: string; authorityScope: 'calendar' | 'activity' | 'roster'; coverageFrom: string; coverageTo: string; status: 'current' | 'stale'; revision: number; importedAt: string; bodyHash: string; ics?: ICSImportMetadata; csv?: CSVImportMetadata }
+export type CSVImportSnapshot = { revision: number; fingerprint: string; bodyHash: string; importedAt: string; fromDate: string; toDate: string; retentionUntil: string | null; rows: CSVRowEvidence[]; mapping?: CSVMappingBinding }
+export type CSVImportMetadata = { format: 'calendar' | 'roster'; feedId: string; readOnly: true; retentionUntil: string | null; retiredAt: string | null; target: { bindingId: string; bindingRevision: number; calendarId: string; activityId: string | null; timezone: string; personRef: string | null; personRefHash: string | null }; heads: CSVRecordHead[]; snapshots: CSVImportSnapshot[]; mapping?: CSVMappingBinding; mappingHistory?: { fingerprint: string; sequence: number }[]; identityReview?: boolean }
+export type CalDAVImportMetadata = { accountId: string; collectionHash: string; readOnly: true; objects: { hrefHash: string; etag: string; uidHashes: string[] }[]; snapshots: { revision: number; sha256: string; originalJSON: string | null; fetchedAt: string }[] }
+export type ScheduleSource = { id: string; contextId: string; title: string; authorityScope: 'calendar' | 'activity' | 'roster'; coverageFrom: string; coverageTo: string; status: 'current' | 'stale'; revision: number; importedAt: string; bodyHash: string; ics?: ICSImportMetadata; csv?: CSVImportMetadata; caldav?: CalDAVImportMetadata; acquisition?: { provider: 'ics_url' | 'file_watch' | 'caldav'; qaFixture: boolean; staleByFetch: boolean } }
 type FactBase = { id: string; sourceId: string; contextId: string; revision: number; validity: 'active' | 'withdrawn'; supersedes: string[] }
 export type ScheduleFact = FactBase & (
   { kind: 'open'; calendarId: string; date: string } |
@@ -124,6 +126,7 @@ function csvSourceNeedsReview(state: CalendarRulesState, source: ScheduleSource,
   const csv = source.csv
   // A source the person retired contributes no facts and no longer holds its series for review.
   if (!csv || csv.retiredAt) return false
+  if (csv.identityReview) return true
   const overlaps = (left: string, right: string) => left <= to && right >= from
   const binding = state.bindings.find(row => row.id === csv.target.bindingId && row.contextId === source.contextId)
   const context = state.contexts.find(row => row.id === source.contextId)
@@ -456,13 +459,17 @@ export function buildCalendarChangePlan(state: CalendarRulesState, current: Curr
     const date = spec.scheduledDate ?? calendarDateAt(spec.startAt!, spec.timezone)
     return inRange(date, from, to) && (scope.kind === 'all_uncompleted' || scope.kind === 'this_and_future' && date >= scope.fromDate || scope.kind === 'this_instance' && spec.generationKey === scope.generationKey)
   }
-  const resolved = resolveCalendarOccurrences(state, from, to, current.filter(item => included(item.spec)).map(item => item.generationKey), { progress: calendarProgress(current), ...(options.today ? { today: options.today } : {}) }), conflicts = [...resolved.conflicts]
+  const resolved = resolveCalendarOccurrences(state, from, to, current.filter(item => included(item.spec)).map(item => item.generationKey), { progress: calendarProgress(current), ...(options.today ? { today: options.today } : {}) })
+  const selected = scope.kind === 'this_instance' ? current.find(item => item.generationKey === scope.generationKey)?.spec ?? resolved.occurrences.find(item => item.generationKey === scope.generationKey) : null
+  // A per-occurrence approval cannot change other series. Keep every conflict if
+  // this series is blocked or unknown; unrelated feeds do not block this choice.
+  const conflicts = scope.kind === 'this_instance' && selected && !resolved.blockedSeries.includes(series(selected)) ? resolved.conflicts.filter(item => item.key === selected.generationKey) : [...resolved.conflicts]
   for (const spec of resolved.occurrences) {
     const before = current.find(item => item.generationKey === spec.generationKey)
     if (!included(spec) && (!before || !included(before.spec))) continue
     if (before?.completed) { skippedCompleted++; continue }
     if (!before) { creates.push(spec); continue }
-    if (before.status === 'active' && canonicalJSON(before.spec) === canonicalJSON(spec)) { unchanged++; continue }
+    if (before.status === 'active' && canonicalJSON(before.spec) === canonicalJSON(spec)) { if (before.spec.kind === 'event' && before.edited) conflicts.push({ key: spec.generationKey, contextId: spec.contextId, reason: '本人編集した予定です。変更を個別に確認してください', sourceRefs: spec.sourceRefs }); else unchanged++; continue }
     // A new provenance alone (e.g. the same shift now reported by a replacement CSV feed) does not ask the
     // person to re-confirm an item they edited or started; nothing they see changes.
     if (before.status === 'active' && (before.edited || before.started) && canonicalJSON({ ...before.spec, sourceRefs: [] }) === canonicalJSON({ ...spec, sourceRefs: [] })) { unchanged++; continue }

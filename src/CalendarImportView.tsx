@@ -3,11 +3,14 @@ import { addDays, today, uid } from './domain'
 import { type CalendarRulesState } from './calendar-resolver'
 import { applyCalendarProposalFromUI, prepareCalendarGeneration, type CalendarGenerationProposal } from './calendar-rules-save'
 import { prepareCalendarICSImport, type PreparedCalendarImport } from './calendar-import'
+import { bindScheduleRefreshPreview } from './schedule-refresh'
+import type { ScheduleRefreshInbox } from './schedule-refresh-types'
 
-type Props = { state: CalendarRulesState; onApplied?: () => void | Promise<void> }
-export default function CalendarImportView({ state, onApplied }: Props) {
-  const [contextId, setContextId] = useState(state.contexts[0]?.id ?? ''), [sourceId, setSourceId] = useState(''), [newFeedId, setNewFeedId] = useState(`feed-${uid()}`)
-  const [title, setTitle] = useState('本人が選んだICS予定'), [from, setFrom] = useState(today()), [to, setTo] = useState(addDays(today(), 30)), [retentionDate, setRetentionDate] = useState(addDays(today(), 90))
+type Props = { state: CalendarRulesState; onApplied?: () => void | Promise<void>; refreshInput?: { row: ScheduleRefreshInbox; file: File } }
+export default function CalendarImportView({ state, onApplied, refreshInput }: Props) {
+  const refreshSource = state.sources.find(row => row.id === refreshInput?.row.sourceId)
+  const [contextId, setContextId] = useState(refreshSource?.contextId ?? state.contexts[0]?.id ?? ''), [sourceId, setSourceId] = useState(refreshSource?.id ?? ''), [newFeedId, setNewFeedId] = useState(`feed-${uid()}`)
+  const [title, setTitle] = useState(refreshSource?.title ?? '本人が選んだICS予定'), [from, setFrom] = useState(refreshSource?.coverageFrom ?? today()), [to, setTo] = useState(refreshSource?.coverageTo ?? addDays(today(), 30)), [retentionDate, setRetentionDate] = useState(refreshSource?.ics?.retentionUntil?.slice(0, 10) ?? addDays(today(), 90))
   const [floatingConfirmed, setFloatingConfirmed] = useState(false), [applicabilityConfirmed, setApplicabilityConfirmed] = useState(false), [applyConfirmed, setApplyConfirmed] = useState(false)
   const [busy, setBusy] = useState(false), [message, setMessage] = useState(''), [prepared, setPrepared] = useState<PreparedCalendarImport | null>(null), [generation, setGeneration] = useState<CalendarGenerationProposal | null>(null)
   const chosenContext = state.contexts.find(item => item.id === (contextId || state.contexts[0]?.id)), binding = state.bindings.find(item => item.contextId === chosenContext?.id && item.personId === state.ownerId && item.confirmed), calendar = state.calendars.find(item => item.contextId === chosenContext?.id)
@@ -19,7 +22,10 @@ export default function CalendarImportView({ state, onApplied }: Props) {
       if (!chosenContext || !binding || !calendar || !applicabilityConfirmed) throw new Error('対象と本人への適用を確認してください')
       if (file.size > 1048576) throw new Error('ICSファイルは1MiB以内です')
       const input = new TextDecoder('utf-8', { fatal: true }).decode(await file.arrayBuffer())
-      setPrepared(await prepareCalendarICSImport({ contextId: chosenContext.id, bindingId: binding.id, calendarId: calendar.id, feedId: source?.ics?.feedId ?? newFeedId, title: title.trim(), retentionUntil: retentionDate ? new Date(`${retentionDate}T23:59:59.999Z`).toISOString() : null }, input, { fromDate: from, toDate: to, allowFloating: floatingConfirmed }))
+      if (refreshInput && (source?.id !== refreshInput.row.sourceId || file !== refreshInput.file)) throw new Error('更新取得の取込元を変更できません')
+      const next = await prepareCalendarICSImport({ contextId: chosenContext.id, bindingId: binding.id, calendarId: calendar.id, feedId: source?.ics?.feedId ?? newFeedId, title: title.trim(), retentionUntil: retentionDate ? new Date(`${retentionDate}T23:59:59.999Z`).toISOString() : null }, input, { fromDate: from, toDate: to, allowFloating: floatingConfirmed })
+      if (refreshInput && next.proposal) await bindScheduleRefreshPreview(next.proposal, refreshInput.row.id, refreshInput.row.bodySha256)
+      setPrepared(next)
     } catch (error) { setMessage(String(error)) } finally { setBusy(false) }
   }
   async function apply(event: Event) {
@@ -27,7 +33,7 @@ export default function CalendarImportView({ state, onApplied }: Props) {
     if (!proposal || !applyConfirmed) return
     setBusy(true); setMessage('')
     try {
-      await applyCalendarProposalFromUI(proposal, event); await onApplied?.(); setApplyConfirmed(false)
+      await applyCalendarProposalFromUI(proposal, event); if (proposal.kind === 'configuration') await onApplied?.(); setApplyConfirmed(false)
       if (proposal.kind === 'configuration') { if (prepared) setSourceId(prepared.preview.sourceId); setPrepared(null); setMessage('読取専用の資料を保存しました。発生回への反映は別の差分確認が必要です。') }
       else { setGeneration(null); setMessage('確認した予定の差分を反映しました。') }
     } catch (error) { setMessage(String(error)) } finally { setBusy(false) }
@@ -36,7 +42,8 @@ export default function CalendarImportView({ state, onApplied }: Props) {
   const when = (start: string | null, end: string | null, zone: string) => `${start ? new Date(start).toLocaleString('ja-JP', { timeZone: zone }) : '日時なし'}${end ? `〜${new Date(end).toLocaleString('ja-JP', { timeZone: zone })}` : ''} (${zone})`
   return <section className="card setting-section calendar-rules-view calendar-import-view"><h2>ICS予定の読取専用取込</h2>
     <p>本人が選んだローカルファイルを保存します。元カレンダーへの書き戻し、招待への返信、Google・OutlookのOAuth同期は未接続です。予定だけからタスク、締切、ポイントを作りません。</p>
-    <p>UTCまたはIANAタイムゾーン、終日予定と日・週・月の基本周期に対応します。VTIMEZONE、VALARM、複雑な周期、終了時刻が不明な予定は確認が必要として取り込みを保留します。</p>
+    <p>UTC、IANA・Windowsタイムゾーン、終日予定と日・週・月の基本周期に対応します。VTIMEZONEは各参照日時で検証し、アラームは警告付きで除外します。複雑な周期や終了不明の予定は保留します。</p>
+    {refreshInput && <button type="button" disabled={busy || !applicabilityConfirmed} onClick={() => void read(refreshInput.file)}>取得したICSの差分を確認</button>}
     {message && <p role="status">{message}</p>}
     <label>対象<select disabled={busy} value={chosenContext?.id ?? ''} onChange={event => { setContextId(event.target.value); setSourceId(''); setNewFeedId(`feed-${uid()}`); setApplicabilityConfirmed(false); reset() }}><option value="">選択してください</option>{state.contexts.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>
     <p>本人適用：{binding ? `${binding.validFrom}〜${binding.validTo}` : '共通カレンダーで本人の適用条件を先に登録してください'} / タイムゾーン：{chosenContext?.timezone ?? '未選択'}</p>

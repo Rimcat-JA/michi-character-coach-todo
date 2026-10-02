@@ -106,6 +106,7 @@ contextBridge.exposeInMainWorld('michiAI', {
   verifyObligations: request => ipcRenderer.invoke('michi:ai-verify-obligations', request),
   embedTexts: request => ipcRenderer.invoke('michi:ai-embed', request),
   extractDocument: request => ipcRenderer.invoke('michi:document-extract', request),
+  extractScheduleDocument: request => ipcRenderer.invoke('michi:schedule-document-extract', request),
   folderWatch: request => ipcRenderer.invoke('michi:folder-watch', request),
   notificationText: request => ipcRenderer.invoke('michi:ai-notification-text', request),
   resolveTarget: request => ipcRenderer.invoke('michi:ai-resolve-target', request),
@@ -124,3 +125,10 @@ contextBridge.exposeInMainWorld('michiDesktop', {
   setTrayMode: enabled => ipcRenderer.invoke('michi:set-tray-mode', enabled),
   onTrayStopNotifications: callback => { const listener = () => callback(); ipcRenderer.on('michi:tray-stop-notifications', listener); return () => ipcRenderer.removeListener('michi:tray-stop-notifications', listener) }
 })
+contextBridge.exposeInMainWorld('michiScheduleRefresh', {
+  request: value => ipcRenderer.invoke('michi:schedule-refresh', value),
+  onChanged: callback => { const listener = (_event, value) => callback(value); ipcRenderer.on('michi:schedule-refresh-changed', listener); return () => ipcRenderer.removeListener('michi:schedule-refresh-changed', listener) },
+  onStatus: callback => { const listener = (_event, value) => callback(value); ipcRenderer.on('michi:schedule-refresh-status', listener); return () => ipcRenderer.removeListener('michi:schedule-refresh-status', listener) },
+  onNotify: callback => { const listener = (_event, value) => callback(value); ipcRenderer.on('michi:schedule-refresh-notify', listener); return () => ipcRenderer.removeListener('michi:schedule-refresh-notify', listener) }
+})
+contextBridge.exposeInMainWorld('michiCalDAV', { request: value => ipcRenderer.invoke('michi:caldav', value) })

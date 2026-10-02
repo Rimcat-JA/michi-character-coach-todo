@@ -6,7 +6,7 @@ const expiredTitle = '保持期限に達した外部予定'
 /** Audits keep hashes and versions, never a second copy of the imported original. */
 export function redactICSForAudit<T>(value: T): T {
   if (Array.isArray(value)) return value.map(redactICSForAudit) as T
-  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, key === 'originalText' ? null : redactICSForAudit(item)])) as T
+  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, key === 'originalText' || key === 'originalJSON' ? null : redactICSForAudit(item)])) as T
   return value
 }
 export type ICSRetentionRecords = { calendarRules: CalendarRulesState[]; calendarEvents: CalendarEvent[]; audits: Audit[]; commands?: CommandReceipt[] }
@@ -22,6 +22,7 @@ export function redactExpiredICSRecords<T extends ICSRetentionRecords>(records: 
       const before = canonicalJSON(source)
       source.status = 'stale'; source.title = '保持期限に達したICS資料'
       source.ics.snapshots = [ { ...source.ics.snapshots.at(-1)!, originalText: null } ]
+      if (source.caldav) source.caldav.snapshots = [{...source.caldav.snapshots.at(-1)!,originalJSON:null}]
       if (canonicalJSON(source) !== before) changed = true
       for (const fact of state.facts) if (fact.sourceId === source.id && fact.kind === 'external_event') { activityIds.add(fact.activityId); if (fact.title !== expiredTitle) { fact.title = expiredTitle; changed = true } }
     }
@@ -34,7 +35,7 @@ export function redactExpiredICSRecords<T extends ICSRetentionRecords>(records: 
     if (Array.isArray(value)) return value.map(scrub)
     if (!value || typeof value !== 'object') return value
     const object = value as Record<string, unknown>, related = sourceIds.has(String(object.id)) || sourceIds.has(String(object.sourceId)) || activityIds.has(String(object.id)) || activityIds.has(String(object.activityId)) || Array.isArray(object.sourceRefs) && object.sourceRefs.some(item => item && typeof item === 'object' && sourceIds.has(String((item as Record<string, unknown>).sourceId)))
-    return Object.fromEntries(Object.entries(object).map(([key, item]) => [key, key === 'originalText' ? null : related && key === 'title' ? expiredTitle : scrub(item)]))
+    return Object.fromEntries(Object.entries(object).map(([key, item]) => [key, key === 'originalText' || key === 'originalJSON' ? null : related && key === 'title' ? expiredTitle : scrub(item)]))
   }
   for (const audit of next.audits) if (audit.operation.startsWith('calendar.') && sourceIds.size) { try { audit.detail = JSON.stringify(scrub(JSON.parse(audit.detail))) } catch { audit.detail = JSON.stringify({ redacted: '期限到達したICS資料の監査', at }) } }
   // Legacy receipts encoded the full proposal. Erase that second copy and fail closed on replay.

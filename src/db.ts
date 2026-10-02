@@ -11,9 +11,11 @@ import type { HandoffRecord, LocalDevice } from './handoff-heads'
 import type { ResourceGrant, SharedInbound, ShareContact, ShareIdentity, ShareProposal } from './share-types'
 import { datasetGuardMiddleware, type DatasetState } from './dataset-guard'
 import type { DetectedObligation, ObligationObservation } from './detection-ledger'
+import type { ScheduleRefreshInbox } from './schedule-refresh-types'
 import type { Assessment, Audit, CalendarEvent, ChecklistItem, CommandReceipt, Completion, Container, DayNote, FocusProjectSelection, Goal, GoalCheckIn, Habit, HabitLog, LabelDefinition, LabelGroup, LedgerEntry, PlanningBucket, PomodoroCycle, RolloverEntry, Routine, SavedTemplate, Settings, SmartList, Task, TaskAttachment, TaskComment, TaskDependency, TaskNote, ThemeRule, TimeBlock, TrackerDefinition, TrackerEntry, WorkSession } from './domain'
 
 export const db = new Dexie('character-coach-v1') as Dexie & {
+  scheduleRefreshInbox: EntityTable<ScheduleRefreshInbox, 'id'>
   tasks: EntityTable<Task, 'id'>
   assessments: EntityTable<Assessment, 'id'>
   completions: EntityTable<Completion, 'id'>
@@ -212,6 +214,8 @@ db.version(25).stores({ localDevice: 'id', datasetState: 'id', handoffHeads: 'id
 db.use(datasetGuardMiddleware)
 // Body-free obligation ledger: digests and ids only, so a dismissal survives re-import without keeping quotes.
 db.version(26).stores({ detectedObligations: 'id, ownerId, &[ownerId+canonicalKey], state, linkedTaskId', obligationObservations: 'id, ownerId, obligationId, runId' })
+db.version(27).stores({}).upgrade(async transaction => { await transaction.table('calendarEvents').toCollection().modify(event => { event.revision ??= 1; event.updatedAt ??= event.createdAt }) })
+db.version(28).stores({ scheduleRefreshInbox: 'id, ownerId, datasetId, sourceId, subscriptionId, fetchedAt, state' })
 
 export async function ensureSettings() {
   const current = await db.settings.get('main')

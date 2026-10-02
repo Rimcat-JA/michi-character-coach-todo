@@ -1,0 +1,7 @@
+.calendar-caldav > label, .schedule-sources > label { display: block; margin: 16px 0; font-size: 14px; font-weight: 500; }
+.calendar-caldav label > input:not([type=checkbox]), .calendar-caldav label > select, .schedule-sources label > input:not([type=checkbox]), .schedule-sources label > select { display: block; width: 100%; box-sizing: border-box; margin-top: 6px; padding: 10px 12px; border: 1px solid var(--border, #dddde8); border-radius: 8px; font: inherit; background: var(--surface, white); color: inherit; }
+.calendar-caldav input[type=checkbox], .schedule-sources input[type=checkbox] { margin-right: 8px; }
+.calendar-caldav button, .schedule-sources button { margin: 5px 8px 5px 0; }
+.calendar-caldav li, .schedule-sources li { margin: 12px 0; }
+.calendar-caldav pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+.calendar-caldav [role=status], .schedule-sources [role=status] { overflow-wrap: anywhere; }

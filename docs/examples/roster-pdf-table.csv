@@ -1,0 +1,3 @@
+shift_id,record_revision,person_ref,published,status,start_date,start_time,end_date,end_time
+night,1,staff-001,true,scheduled,2026-10-03,22:00,2026-10-04,06:00
+other,1,staff-002,true,scheduled,2026-10-03,09:00,2026-10-03,17:00
