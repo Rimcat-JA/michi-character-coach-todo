@@ -258,7 +258,10 @@ export async function legacyRoutineHandedOver(routineId: string): Promise<boolea
 }
 export async function expandRoutines(from = addDays(today(), -30), days = 120) {
   // N09 routine stop switch: manual tasks keep working, no occurrences are generated.
-  if ((await db.settings.get('main'))?.changePolicy?.stops?.routines) return 0
+  const owner = await db.settings.get('main')
+  if (owner?.changePolicy?.stops?.routines) return 0
+  // I05: a frozen or moved-away dataset generates nothing; the receiving device continues the routines.
+  if (((await db.datasetState.get('main'))?.mode ?? 'active') !== 'active') return 0
   const routines = await db.routines.filter(r => r.active).toArray()
   let count = 0
   for (const r of routines) {

@@ -79,6 +79,7 @@ async function currentGuard(settings: Settings, intent: CoachNotificationIntent,
 }
 /** The snooze selected by the person supplies the factual trigger and stable window. */
 export async function queueSnoozeNotification(taskId: string, at = new Date().toISOString()): Promise<CoachNotificationIntent | null> {
+  if (((await db.datasetState.get('main'))?.mode ?? 'active') !== 'active') return null
   return db.transaction('rw', db.settings, db.tasks, async () => {
     const settings = await db.settings.get('main'), task = await db.tasks.get(taskId)
     if (!settings || !settings.notifications || !task || task.deletedAt || task.status !== 'open' || !task.snoozedUntil || task.snoozedUntil > at) return null
@@ -91,6 +92,9 @@ export async function queueSnoozeNotification(taskId: string, at = new Date().to
 }
 /** Used by registered, factual trigger adapters. Arbitrary model output is never a trigger. */
 export async function queueCoachNotification(request: NotificationRequest, guard: NotificationGuard, at = new Date().toISOString()): Promise<CoachNotificationIntent | null> {
+  // I05: while the dataset is frozen for a move (or read-only after moving away),
+  // no new notification entities are reserved here; the receiving device notifies.
+  if (((await db.datasetState.get('main'))?.mode ?? 'active') !== 'active') return null
   return db.transaction('rw', db.settings, async () => {
     const settings = await db.settings.get('main'); if (!settings) throw new Error('本人の設定がありません')
     const policy = changePolicyFor(settings)

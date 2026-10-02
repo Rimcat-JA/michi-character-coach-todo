@@ -1,0 +1,18 @@
+.handoff-review, .sharing-view, .device-handoff { min-width: 0; }
+.handoff-review :is(p, small, strong, td, th, code, pre, label) { overflow-wrap: anywhere; }
+.handoff-table-wrap { max-width: 100%; overflow-x: auto; margin: 10px 0; }
+.handoff-table { border-collapse: collapse; font-size: 13px; min-width: 560px; width: 100%; }
+.handoff-table th, .handoff-table td { border-bottom: 1px solid #e9e5f3; padding: 6px 8px; text-align: left; vertical-align: top; }
+.handoff-table td small { display: block; margin-top: 3px; }
+.handoff-table td .secondary-button { margin-top: 6px; }
+.handoff-manual { background: #fff6e8; }
+.handoff-state { color: #6b6f86; }
+.handoff-attention { color: #9a4a00; }
+.handoff-code { font-size: 28px; font-weight: 700; letter-spacing: 0.12em; font-family: ui-monospace, monospace; }
+.sharing-view pre, .device-handoff pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; background: #f4f2fa; padding: 8px; border-radius: 8px; max-height: 260px; overflow: auto; }
+.sharing-view .fingerprint { font-family: ui-monospace, monospace; font-size: 12px; word-break: break-all; }
+.sharing-view ul, .device-handoff ul { padding-left: 18px; }
+.sharing-view .share-fields, .sharing-view .share-actions, .device-handoff .share-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0; }
+.sharing-view :is(input:not([type=checkbox]), select, textarea), .device-handoff input:not([type=checkbox]) { max-width: 100%; box-sizing: border-box; }
+.shared-item { border: 1px solid #e9e5f3; border-radius: 9px; padding: 10px; margin: 8px 0; }
+.dataset-mode-banner { background: #fff1d6; color: #7a4300; border-radius: 9px; padding: 8px 12px; margin: 0 0 12px; }

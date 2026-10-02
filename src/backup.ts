@@ -28,12 +28,14 @@ import { applyCurrentCSVRetention, redactExpiredCSVRecords } from './calendar-cs
 import { clearCalendarCSVImportAuthority } from './calendar-csv-import-save'
 import { clearAchievementAuthority, reconcileAchievementExports } from './achievements-save'
 import { restoreAchievementExports, verifyAchievementDigests } from './achievements-validation'
+import { allowWhileFrozen } from './dataset-guard'
+import { recordHandoff, stampHandoff } from './handoff-heads'
 
 type Envelope = { format: 'coachbundle-encrypted'; version: 1; kdf: 'PBKDF2-SHA256'; iterations: 250000; cipher: 'AES-256-GCM'; salt: string; iv: string; data: string }
 const bytes = (s: string) => new TextEncoder().encode(s)
 const b64 = (a: Uint8Array) => btoa(Array.from(a, x => String.fromCharCode(x)).join(''))
 const fromB64 = (s: string) => Uint8Array.from(atob(s), c => c.charCodeAt(0))
-function download(content: BlobPart, name: string, type: string) {
+export function download(content: BlobPart, name: string, type: string) {
   const url = URL.createObjectURL(new Blob([content], { type }))
   const anchor = document.createElement('a')
   anchor.href = url; anchor.download = name; anchor.click()
@@ -66,13 +68,23 @@ export async function captureSnapshot(): Promise<Snapshot> {
   await verifyAchievementDigests(snapshot.achievementEvidence ?? [], snapshot.achievementExports ?? [])
   return snapshot
 }
-export async function exportBackup(password: string) {
+/** Encrypts a validated snapshot with the .coachbundle envelope (PBKDF2-SHA256 + AES-256-GCM). */
+export async function encryptSnapshot(snapshot: Snapshot, password: string): Promise<string> {
   if (password.length < 10) throw new Error('バックアップのパスワードは10文字以上にしてください')
-  const snapshot = await captureSnapshot()
+  validateSnapshot(snapshot)
   const salt = crypto.getRandomValues(new Uint8Array(16)), iv = crypto.getRandomValues(new Uint8Array(12))
   const data = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, await key(password, salt), bytes(JSON.stringify(snapshot))))
   const envelope: Envelope = { format: 'coachbundle-encrypted', version: 1, kdf: 'PBKDF2-SHA256', iterations: 250000, cipher: 'AES-256-GCM', salt: b64(salt), iv: b64(iv), data: b64(data) }
-  download(JSON.stringify(envelope), `character-coach-${dateStamp()}.coachbundle`, 'application/json')
+  return JSON.stringify(envelope)
+}
+export function downloadBundle(content: string, label = 'character-coach') { download(content, `${label}-${dateStamp()}.coachbundle`, 'application/json') }
+export async function exportBackup(password: string) {
+  if (password.length < 10) throw new Error('バックアップのパスワードは10文字以上にしてください')
+  const snapshot = await captureSnapshot()
+  // I05: every encrypted backup carries a handoff manifest so another device can review divergence against it.
+  snapshot.handoff = await stampHandoff(snapshot, 'backup')
+  downloadBundle(await encryptSnapshot(snapshot, password))
+  await recordHandoff(snapshot, 'export', 'exported')
   await db.settings.update('main', { lastBackupAt: new Date().toISOString() })
 }
 export async function exportPortableJson() {
@@ -155,7 +167,10 @@ export async function restoreBackup(snapshot: Snapshot) {
   await invalidateExternalConnection()
   clearCompletionReconfirmationAuthority()
   clearCalendarCSVImportAuthority()
-  await db.transaction('rw', [db.tasks, db.assessments, db.completions, db.ledger, db.routines, db.sessions, db.commands, db.audits, db.settings, db.containers, db.checklistItems, db.labelGroups, db.labelDefinitions, db.savedTemplates, db.taskNotes, db.taskComments, db.taskAttachments, db.taskDependencies, db.planningBuckets, db.timeBlocks, db.calendarEvents, db.rollovers, db.themeRules, db.smartLists, db.focusSelections, db.habits, db.habitLogs, db.goals, db.goalCheckIns, db.trackerDefinitions, db.trackerEntries, db.dayNotes, db.pomodoroCycles, db.reviewRecords, db.tripBundles, db.coachMemories, db.memoryTombstones, db.contextSources, db.contextSnapshots, db.sourceSummaries, db.sourceArtifacts, db.coachConversations, db.coachMessages, db.calendarRules, db.achievementPolicies, db.achievementEvidence, db.achievementExports, db.taskSourceEvidence], async () => {
+  await db.transaction('rw', [db.tasks, db.assessments, db.completions, db.ledger, db.routines, db.sessions, db.commands, db.audits, db.settings, db.containers, db.checklistItems, db.labelGroups, db.labelDefinitions, db.savedTemplates, db.taskNotes, db.taskComments, db.taskAttachments, db.taskDependencies, db.planningBuckets, db.timeBlocks, db.calendarEvents, db.rollovers, db.themeRules, db.smartLists, db.focusSelections, db.habits, db.habitLogs, db.goals, db.goalCheckIns, db.trackerDefinitions, db.trackerEntries, db.dayNotes, db.pomodoroCycles, db.reviewRecords, db.tripBundles, db.coachMemories, db.memoryTombstones, db.contextSources, db.contextSnapshots, db.sourceSummaries, db.sourceArtifacts, db.coachConversations, db.coachMessages, db.calendarRules, db.achievementPolicies, db.achievementEvidence, db.achievementExports, db.taskSourceEvidence, db.datasetState, db.localDevice], async () => {
+    allowWhileFrozen() // the owner's explicit restore replaces a frozen or read-only dataset too
+    // A restored dataset is active on this device, and a pending move is void once another dataset is restored.
+    await db.datasetState.put({ id: 'main', mode: 'active', updatedAt: at, moveId: null }); await db.localDevice.where('id').equals('main').modify({ pendingMove: null })
     await Promise.all([db.taskSourceEvidence.clear(), db.tasks.clear(), db.assessments.clear(), db.completions.clear(), db.ledger.clear(), db.routines.clear(), db.sessions.clear(), db.commands.clear(), db.audits.clear(), db.settings.clear(), db.containers.clear(), db.checklistItems.clear(), db.labelGroups.clear(), db.labelDefinitions.clear(), db.savedTemplates.clear(), db.taskNotes.clear(), db.taskComments.clear(), db.taskAttachments.clear(), db.taskDependencies.clear(), db.planningBuckets.clear(), db.timeBlocks.clear(), db.calendarEvents.clear(), db.rollovers.clear(), db.themeRules.clear(), db.smartLists.clear(), db.focusSelections.clear(), db.habits.clear(), db.habitLogs.clear(), db.goals.clear(), db.goalCheckIns.clear(), db.trackerDefinitions.clear(), db.trackerEntries.clear(), db.dayNotes.clear(), db.pomodoroCycles.clear(), db.reviewRecords.clear(), db.tripBundles.clear(), db.coachMemories.clear(), db.memoryTombstones.clear(), db.contextSources.clear(), db.contextSnapshots.clear(), db.sourceSummaries.clear(), db.sourceArtifacts.clear(), db.coachConversations.clear(), db.coachMessages.clear(), db.calendarRules.clear(), db.achievementPolicies.clear(), db.achievementEvidence.clear(), db.achievementExports.clear()])
     await db.tasks.bulkAdd(prepared.tasks); await db.assessments.bulkAdd(prepared.assessments); await db.completions.bulkAdd(prepared.completions); await db.ledger.bulkAdd(prepared.ledger)
     await db.routines.bulkAdd(prepared.routines); await db.sessions.bulkAdd(prepared.sessions); await db.commands.bulkAdd(prepared.commands); await db.audits.bulkAdd(prepared.audits); await db.settings.bulkAdd(prepared.settings); await db.containers.bulkAdd(prepared.containers ?? []); await db.checklistItems.bulkAdd(prepared.checklistItems ?? []); await db.labelGroups.bulkAdd(prepared.labelGroups ?? []); await db.labelDefinitions.bulkAdd(prepared.labelDefinitions ?? []); await db.savedTemplates.bulkAdd(prepared.savedTemplates ?? []); await db.taskNotes.bulkAdd(prepared.taskNotes ?? []); await db.taskComments.bulkAdd(prepared.taskComments ?? []); await db.taskAttachments.bulkAdd(attachments); await db.taskDependencies.bulkAdd(prepared.taskDependencies ?? []); await db.planningBuckets.bulkAdd(prepared.planningBuckets ?? []); await db.timeBlocks.bulkAdd(prepared.timeBlocks ?? []); await db.calendarEvents.bulkAdd(prepared.calendarEvents ?? []); await db.rollovers.bulkAdd(prepared.rollovers ?? []); await db.themeRules.bulkAdd(prepared.themeRules ?? []); await db.smartLists.bulkAdd(prepared.smartLists ?? []); await db.focusSelections.bulkAdd(prepared.focusSelections ?? []); await db.habits.bulkAdd(prepared.habits ?? []); await db.habitLogs.bulkAdd(prepared.habitLogs ?? []); await db.goals.bulkAdd(prepared.goals ?? []); await db.goalCheckIns.bulkAdd(prepared.goalCheckIns ?? []); await db.trackerDefinitions.bulkAdd(prepared.trackerDefinitions ?? []); await db.trackerEntries.bulkAdd(prepared.trackerEntries ?? []); await db.dayNotes.bulkAdd(prepared.dayNotes ?? []); await db.pomodoroCycles.bulkAdd(prepared.pomodoroCycles ?? []); await db.reviewRecords.bulkAdd(prepared.reviewRecords ?? []); await db.tripBundles.bulkAdd(prepared.tripBundles ?? []); await db.coachMemories.bulkAdd(prepared.coachMemories ?? []); await db.memoryTombstones.bulkAdd(prepared.memoryTombstones ?? []); await db.contextSources.bulkAdd(prepared.contextSources ?? []); await db.contextSnapshots.bulkAdd(prepared.contextSnapshots ?? []); await db.sourceSummaries.bulkAdd(prepared.sourceSummaries ?? []); await db.sourceArtifacts.bulkAdd(prepared.sourceArtifacts ?? []); await db.coachConversations.bulkAdd(prepared.coachConversations ?? []); await db.coachMessages.bulkAdd(prepared.coachMessages ?? []); await db.calendarRules.bulkAdd(prepared.calendarRules ?? []); await db.achievementPolicies.bulkAdd(prepared.achievementPolicies ?? []); await db.achievementEvidence.bulkAdd(prepared.achievementEvidence ?? []); await db.achievementExports.bulkAdd(prepared.achievementExports ?? []); await db.taskSourceEvidence.bulkAdd(prepared.taskSourceEvidence ?? [])

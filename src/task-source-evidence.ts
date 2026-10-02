@@ -1,4 +1,5 @@
 import { db } from './db'
+import { allowWhileFrozen } from './dataset-guard'
 import { uid, type Audit, type CommandReceipt, type Task } from './domain'
 import type { ContextSource } from './source-library'
 
@@ -137,6 +138,7 @@ export async function migrateLegacyDetectionNotes(): Promise<LegacyMigrationResu
       if (!copies) continue
       const { approval, parsed } = copies, source = copies.exact ? await db.contextSources.get(approval.sourceId) : undefined, digests = copies.exact ? await Promise.all(parsed.citations.map(citation => quoteDigest(citation.quote))) : []
       const changed = await db.transaction('rw', [db.tasks, db.audits, db.commands, db.taskSourceEvidence, db.contextSources, db.contextSnapshots, db.settings], async () => {
+        allowWhileFrozen() // privacy migration: quotes leave task notes even on a frozen dataset
         const current = await db.tasks.get(task.id), owner = await db.settings.get('main')
         if (!current || current.notes !== task.notes || !owner || owner.profileId !== settings.profileId || owner.datasetId !== settings.datasetId) return null
         let moved = 0

@@ -1,4 +1,5 @@
 import { db } from './db'
+import { allowWhileFrozen } from './dataset-guard'
 import { canonicalJSON } from './canonical'
 import { changePolicyFor } from './change-set'
 import { clearCalendarRulesAuthority } from './calendar-rules-save'
@@ -10,6 +11,7 @@ let running: Promise<void> | null = null
 export async function purgeExpiredCalendarOriginals(at = new Date().toISOString()): Promise<void> {
   if (running) return running
   running = db.transaction('rw', [db.calendarRules, db.calendarEvents, db.audits, db.commands, db.settings], async () => {
+    allowWhileFrozen()
     const settings = await db.settings.get('main'); if (!settings) return
     const records = { calendarRules: await db.calendarRules.toArray(), calendarEvents: await db.calendarEvents.toArray(), audits: await db.audits.toArray(), commands: await db.commands.toArray() }, result = redactExpiredICSRecords(records, at)
     if (canonicalJSON(records) === canonicalJSON({ calendarRules: result.calendarRules, calendarEvents: result.calendarEvents, audits: result.audits, commands: result.commands })) return
