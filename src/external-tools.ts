@@ -10,18 +10,14 @@ import { assertSchema } from '../electron/plugin-schema.mjs'
 
 export type ExternalToolContext={registration:FileBridgeRegistration;ownerId:string;datasetId:string;externalEpoch:number;policyEpoch:number;sourcePermissionRevision:number}
 function fail(code:string):never{throw Object.assign(Error(code),{code})}
-export const implementedExternalTools=['coach_get_capabilities','coach_search_tasks','coach_get_task','coach_preview_score','coach_search_context'] as const
+export const implementedExternalTools=['coach_get_capabilities','coach_search_tasks','coach_get_task','coach_preview_score','coach_search_context','coach_prepare_change','coach_submit_change','coach_get_command_result'] as const
 function summary(task:Task,registration:FileBridgeRegistration){
  const fields=registration.client.grant.fields
  return {id:task.id,title:fields.includes('title')?task.title:'非共有',revision:task.revision,status:task.status,scheduled_date:fields.includes('scheduled_date')?task.scheduledDate:null,points:fields.includes('manual_points')?task.effectivePoints:null,score_mode:fields.includes('manual_points')?task.score.mode:'unset',source_state:'unverified'}
 }
 /** Main authenticates the caller; the renderer rechecks current app scope at the DB read.
  * No conversations, memory, source titles, source counts or keys are exposed by the read slice. */
-export async function dispatchExternalReadTool(name:string,args:Record<string,unknown>,context:ExternalToolContext):Promise<unknown>{
- const tool=catalog.tools.find(tool=>tool.name===name)
- if(!tool)fail('TOOL_NOT_FOUND')
- assertSchema(tool.inputSchema,args)
- return db.transaction('r',db.settings,db.tasks,db.datasetState,async()=>{
+export async function assertExternalToolAuthority(context:ExternalToolContext){
   const settings=await db.settings.get('main')
   if(!settings||settings.profileId!==context.ownerId||settings.datasetId!==context.datasetId)fail('NOT_FOUND')
   const external=externalAIFor(settings),client=external.clients.find(row=>row.registration.client.id===context.registration.client.id),policy=changePolicyFor(settings)
@@ -30,8 +26,16 @@ export async function dispatchExternalReadTool(name:string,args:Record<string,un
   if(external.epoch!==context.externalEpoch||policy.epoch!==context.policyEpoch||policy.sourcePermissionRevision!==context.sourcePermissionRevision||canonicalJSON(client.registration)!==canonicalJSON(context.registration))fail('STALE_GRANT')
   if((settings.datasetMode??'active')!=='active'||((await db.datasetState.get('main'))?.mode??'active')!=='active')fail('DATASET_FROZEN')
   const registration=client.registration
+  return {settings,registration,policy,external}
+}
+export async function dispatchExternalReadTool(name:string,args:Record<string,unknown>,context:ExternalToolContext):Promise<unknown>{
+ const tool=catalog.tools.find(tool=>tool.name===name)
+ if(!tool)fail('TOOL_NOT_FOUND')
+ assertSchema(tool.inputSchema,args)
+ return db.transaction('r',db.settings,db.tasks,db.datasetState,async()=>{
+  const {registration}=await assertExternalToolAuthority(context)
   if(!registration.client.grant.keys.includes('tasks:read'))fail('INSUFFICIENT_SCOPE')
-  if(name==='coach_get_capabilities')return {enabled:true,operations:[...implementedExternalTools],limitations:['ローカルアプリの許可タスクのみ。資料・会話・記憶は非共有。','この読み取り段階では変更・引継ぎツールを提供しません。','実host未確認。アプリ終了・取消で接続は無効になります。']}
+  if(name==='coach_get_capabilities')return {enabled:true,operations:[...implementedExternalTools],limitations:['ローカルアプリの許可タスクのみ。資料・会話・記憶は非共有。','変更案は最新の書出しを使い、既存の受信箱と本人確認を経て保存します。引継ぎ・参照根拠は未対応。','新規の点数指定、ラベル、時刻付き期限は未対応。実host未確認。アプリ終了・取消で接続は無効になります。']}
   if(name==='coach_search_context')return {excerpts:[],coverage_note:'文脈の開示は許可されていません。資料の存在・件数・名称を返しません。'}
   if(name==='coach_preview_score'){
    const input=args.score as {mode:'manual'|'unset'|'formula';points?:number}

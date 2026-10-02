@@ -224,7 +224,14 @@ async function createFileBridgeService({ agentDirectory, journalDirectory, signi
     if (connection && request.clientId !== connection.registration.client.id) fail('AUTHORITY_CHANGED')
     await invalidate(); return status()
   }
-  return Object.freeze({ status, configure, disconnect, exportSnapshot, scanInbox, authorizeApplication, authorizeAutomaticApplication, recordApplied, cancelApplication, recordRejected, invalidate })
+  async function commandResult(commandId) {
+    if (!uuid(commandId)) fail('COMMAND_ID_INVALID')
+    const current = await ensure(), statusValue = await status()
+    if (!current || !statusValue.connected) fail('NOT_CONNECTED')
+    try { return await current.bridge.readResult(commandId) }
+    catch (error) { if (error.code === 'ENOENT') return null; throw error }
+  }
+  return Object.freeze({ status, configure, disconnect, exportSnapshot, scanInbox, authorizeApplication, authorizeAutomaticApplication, recordApplied, cancelApplication, recordRejected, commandResult, invalidate })
 }
 
 module.exports = { createFileBridgeService }

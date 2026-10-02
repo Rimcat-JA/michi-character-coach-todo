@@ -1,6 +1,7 @@
 import { db } from './db'
 import { assertTrustedOwnerEvent, clearChangeSetAuthority } from './change-set'
 import { clearCommandAuthority } from './command-bus'
+import { clearExternalInstructionAuthority } from './external-instructions'
 import { clearTaskSplitAuthority } from './task-split-change'
 import { externalAIFor, validateExternalAI } from './external-authority'
 import { stopConnection } from './external-connection'
@@ -22,6 +23,7 @@ export async function setExternalAIEnabled(enabled: boolean, event?: Event) {
   })
   clearChangeSetAuthority({ externalOnly: true })
   clearCommandAuthority({ externalOnly: true })
+  clearExternalInstructionAuthority()
   clearTaskSplitAuthority({ externalOnly: true })
   await stopConnection('fileBridge')
 }

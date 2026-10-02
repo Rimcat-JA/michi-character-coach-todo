@@ -1,6 +1,7 @@
 const crypto=require('node:crypto'),path=require('node:path')
 const {createMCPCore}=require('./mcp-core.cjs'),{createMCPPipeServer}=require('./mcp-pipe-server.cjs')
-const implemented=['coach_get_capabilities','coach_search_tasks','coach_get_task','coach_preview_score','coach_search_context']
+const {createAppChangeDispatcher}=require('./mcp-app-changes.cjs')
+const implemented=['coach_get_capabilities','coach_search_tasks','coach_get_task','coach_preview_score','coach_search_context','coach_prepare_change','coach_submit_change','coach_get_command_result']
 const uuid=value=>typeof value==='string'&&/^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(value)
 function installAppMCPIPC({ipcMain,win,app,getHub,assertMain,readDB}){
  const credentials=new Map(),pending=new Map();let starting=null,server=null,generation=0
@@ -25,7 +26,7 @@ function installAppMCPIPC({ipcMain,win,app,getHub,assertMain,readDB}){
     if(!identity||!uuid(identity.clientId)||typeof identity.credential!=='string'||!/^[a-f0-9]{64}$/.test(identity.credential))return null
     const grant=credentials.get(identity.clientId)
     return grant&&crypto.timingSafeEqual(Buffer.from(grant.credential,'hex'),Buffer.from(identity.credential,'hex'))?grant:null
-   },getContext,dispatch,implemented})
+   },getContext,dispatch:createAppChangeDispatcher({getHub,readDB,dispatch}),implemented})
    const next=await createMCPPipeServer({handle:core.handle})
    if(expected!==generation||win.isDestroyed()){await next.close();throw Error('APP_NOT_RUNNING')}
    server=next;return next
@@ -41,7 +42,7 @@ function installAppMCPIPC({ipcMain,win,app,getHub,assertMain,readDB}){
   if(expected!==generation||!latest.active||!latest.externalEnabled||latest.externalEpoch!==context.externalEpoch)throw Error('AUTHORITY_CHANGED')
   const credential=crypto.randomBytes(32).toString('hex'),registration=context.registration
   credentials.set(request.clientId,{clientId:request.clientId,credential,externalEpoch:context.externalEpoch,revision:registration.client.revision,grantEpoch:registration.client.grant_epoch})
-  return {mcpServers:{michi:{command:process.execPath,args:[path.join(app.getAppPath(),'scripts','michi-mcp.mjs'),'--connect',request.clientId],env:{ELECTRON_RUN_AS_NODE:'1',MICHI_MCP_ENDPOINT:pipe.endpoint,MICHI_MCP_CREDENTIAL:credential}}},state:'implemented',limitations:['Windowsローカルの読み取り段階。アプリ再起動・設定の再表示で資格情報が変わります。','外部hostの実接続は未確認。']}
+  return {mcpServers:{michi:{command:process.execPath,args:[path.join(app.getAppPath(),'scripts','michi-mcp.mjs'),'--connect',request.clientId],env:{ELECTRON_RUN_AS_NODE:'1',MICHI_MCP_ENDPOINT:pipe.endpoint,MICHI_MCP_CREDENTIAL:credential}}},state:'implemented',limitations:['Windowsローカルの選択タスクと受信箱への変更案送信。アプリ再起動・設定の再表示で資格情報が変わります。','外部hostの実接続は未確認。']}
  })
  async function stop(){generation++;credentials.clear();for(const row of pending.values()){clearTimeout(row.timer);row.reject(Object.assign(Error('GRANT_REVOKED'),{code:'GRANT_REVOKED'}))}pending.clear();const current=server;server=null;if(current)await current.close()}
  win.on('closed',()=>{void stop()})

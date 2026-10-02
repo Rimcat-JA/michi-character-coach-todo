@@ -152,6 +152,7 @@ async function createFileBridgeHub(options) {
   const initial = await options.getSettings()
   if (initial.externalAI?.enabled !== true || initial.externalAI.version !== 1 || initial.changePolicy?.aiChangesEnabled === false || initial.datasetMode && initial.datasetMode !== 'active') await invalidate()
   return Object.freeze({ status, configure, selectClient, listConnections, disconnect, invalidate, exportSnapshot, scanInbox,
+    commandResult: async request => { if (!request || Object.keys(request).length!==2 || !uuid(request.clientId) || !uuid(request.commandId)) fail('COMMAND_ID_INVALID'); return (await getSlot(request.clientId)).service.commandResult(request.commandId) },
     clientStatus: async request => { if (!request || Object.keys(request).length!==1 || !uuid(request.clientId)) fail('CONFIG_INVALID'); return (await getSlot(request.clientId)).service.status() },
     authorizeApplication: (request, proof) => authorize('authorizeApplication', request, proof),
     authorizeAutomaticApplication: request => authorize('authorizeAutomaticApplication', request),
