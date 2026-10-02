@@ -10,7 +10,7 @@ import { confirmTaskInstructionFromUI, type VerifiedTaskInstruction } from './ta
 export const COMMAND_BASIS_KINDS = ['app_instruction', 'verified_detection', 'approved_rule_instance', 'external_request'] as const
 export type CommandBasisKind = typeof COMMAND_BASIS_KINDS[number]
 export type CommandBasis = { kind: CommandBasisKind; note?: string }
-export type CommandEntrance = 'ui_human' | 'ui_coach' | 'file' | 'mcp'
+export type CommandEntrance = 'ui_human' | 'ui_coach' | 'file' | 'mcp' | 'api'
 export type CommandEnvelope = { schema_version: '1'; command_id: string; type: string; target_id: string | null; expected_revision: number | null; payload: Record<string, unknown>; basis: CommandBasis }
 /** The single snake_case (envelope) to camelCase (ChangeSet) field adapter. */
 export const commandFieldMap = { title: 'title', notes: 'notes', scheduled_date: 'scheduledDate', due_date: 'dueDate', due_at: 'dueAt', manual_points: 'manualPoints' } as const satisfies Record<string, TaskChangeField>
@@ -19,7 +19,7 @@ export const commandFields = Object.keys(commandFieldMap) as CommandField[]
 export const protectedCommandFields: CommandField[] = ['title', 'due_date', 'due_at', 'manual_points']
 export type CommandGrant = Readonly<{ fields: CommandField[]; operations: string[]; mutationMode: 'require_approval' | 'auto_within_bounds'; maxScheduleShiftDays: number | null; autoMaxScheduleShiftDays?: number | null }>
 /** Built only by trusted entrance adapters below; a cloned or JSON actor is never accepted. */
-export type ActorContext = Readonly<{ entrance: CommandEntrance; principal: ChangePrincipal; ownerId: string; datasetId: string; grant: CommandGrant | null; sourceRevisions: SourceRevision[]; fieldOrigins?: Partial<Record<TaskChangeField, TaskFieldOrigin>>; label: string | null }>
+export type ActorContext = Readonly<{ entrance: CommandEntrance; principal: ChangePrincipal; ownerId: string; datasetId: string; grant: CommandGrant | null; sourceRevisions: SourceRevision[]; fieldOrigins?: Partial<Record<TaskChangeField, TaskFieldOrigin>>; label: string | null; creationContainerId?: string | null }>
 export type CommandState = 'applied' | 'awaiting_approval' | 'denied' | 'conflict' | 'expired' | 'rejected' | 'failed'
 export type CommandReceipt = Readonly<{ commandId: string; changeSetId: string; digest: string; taskIds: string[]; appliedAt: string }>
 export type CommandOutcome = Readonly<{ commandId: string | null; entrance: CommandEntrance | null; state: CommandState; code: string | null; message: string; receipt: CommandReceipt | null }>
@@ -64,7 +64,7 @@ const STATES: Record<string, CommandState> = {
   DIGEST_MISMATCH: 'rejected', UNVERIFIED_CHANGE_SET: 'rejected', INVALID_CHANGE_SET: 'rejected', COMMAND_SCHEMA: 'rejected', UNSUPPORTED_FIELD: 'rejected', UNSUPPORTED_OPERATION: 'rejected', INVALID_PAYLOAD: 'rejected', INVALID_TARGET: 'rejected', INVALID_INPUT: 'rejected', BASIS_UNVERIFIED: 'rejected', NO_CHANGE: 'rejected', APPROVAL_CONSUMED: 'rejected', INVALID_JSON: 'rejected', COMMAND_FILENAME: 'rejected', COMMAND_TOO_LARGE: 'rejected', COMMAND_CHANGED: 'rejected', SPLIT_INVALID: 'rejected', ROUTINE_INVALID: 'rejected',
 }
 /** Shared labels and outcome text so S06, S21, file and MCP read the same (K12). */
-export const ENTRANCE_LABELS = { ui_human: 'アプリ（本人）', ui_coach: 'アプリ内コーチ', file: 'ファイル受信箱', mcp: 'ローカルMCP', app: 'アプリの確認画面' } as const
+export const ENTRANCE_LABELS = { ui_human: 'アプリ（本人）', ui_coach: 'アプリ内コーチ', file: 'ファイル受信箱', mcp: 'ローカルMCP', api: 'このPC内のAPI', app: 'アプリの確認画面' } as const
 /** Shared Japanese labels for the codes S21 shows on rejected/cancelled commands. */
 export const COMMAND_CODE_LABELS: Record<string, string> = {
   CHANGES_STOPPED: 'AIによる変更の停止中', UNAUTHORIZED: '許可していない操作・項目', SCHEDULE_BOUND: '予定日の移動範囲を超過', DAILY_BOUND: '1日の上限に到達', AUTHORITY_UNVERIFIED: '権限を確認できません', SPLIT_NOT_ALLOWED: '分割できない状態',
@@ -117,8 +117,8 @@ export function uiCoachActor(settings: Pick<Settings, 'profileId' | 'datasetId'>
   return issue({ entrance: 'ui_coach', principal: { id: 'app-coach', kind: 'coach', model }, ownerId: settings.profileId, datasetId: settings.datasetId, grant: options.grant ?? null, sourceRevisions: [], ...(options.fieldOrigins ? { fieldOrigins: options.fieldOrigins } : {}), label: null })
 }
 /** Only the file controller calls this, after main verified the signed registration. */
-export function externalAgentActor(binding: { ownerId: string; datasetId: string; clientId: string; registrationRevision: number; grantEpoch: number; host: string }, entrance: 'file' | 'mcp', grant: CommandGrant): ActorContext {
-  return issue({ entrance, principal: { id: binding.clientId, kind: 'external-agent', model: null }, ownerId: binding.ownerId, datasetId: binding.datasetId, grant, sourceRevisions: [{ id: `external-registration:${binding.clientId}`, revision: binding.registrationRevision }, { id: `external-grant:${binding.clientId}`, revision: binding.grantEpoch }], label: binding.host })
+export function externalAgentActor(binding: { ownerId: string; datasetId: string; clientId: string; registrationRevision: number; grantEpoch: number; host: string }, entrance: 'file' | 'mcp' | 'api', grant: CommandGrant, creationContainerId?: string | null): ActorContext {
+  return issue({ entrance, principal: { id: binding.clientId, kind: 'external-agent', model: null }, ownerId: binding.ownerId, datasetId: binding.datasetId, grant, sourceRevisions: [{ id: `external-registration:${binding.clientId}`, revision: binding.registrationRevision }, { id: `external-grant:${binding.clientId}`, revision: binding.grantEpoch }], label: binding.host, ...(entrance==='api' ? {creationContainerId:creationContainerId??null} : {}) })
 }
 export function changeContextFor(actor: ActorContext): ChangeContext {
   const allowedFields = actor.grant ? actor.grant.fields.map(field => commandFieldMap[field]) : [...taskChangeFields]
@@ -148,7 +148,7 @@ export function validateCommandEnvelope(value: unknown): asserts value is Comman
 }
 /** Each entrance may only claim the basis it can actually produce; others need app-side verification not offered here. */
 function verifyBasis(envelope: CommandEnvelope, actor: ActorContext) {
-  const allowed: CommandBasisKind = actor.entrance === 'file' || actor.entrance === 'mcp' ? 'external_request' : 'app_instruction'
+  const allowed: CommandBasisKind = actor.entrance === 'file' || actor.entrance === 'mcp' || actor.entrance === 'api' ? 'external_request' : 'app_instruction'
   if (envelope.basis.kind !== allowed) fail('BASIS_UNVERIFIED', 'この入口からの根拠は確認できません。本人の確認で扱います')
 }
 export function validateTaskPayload(payload: Record<string, unknown>, allowed: readonly string[]) {
@@ -299,7 +299,7 @@ const externalApplyCapabilities = new WeakMap<object, PreparedCommand>()
 export function issueExternalApplyCapability(prepared: PreparedCommand): object { const token = Object.freeze({}); externalApplyCapabilities.set(token, prepared); return token }
 export async function applyCommand(prepared: PreparedCommand, approval: unknown, requestKey: string, capability?: object): Promise<CommandReceipt> {
   const saved = verifyPrepared(prepared)
-  if (saved.actor.entrance === 'file' || saved.actor.entrance === 'mcp') {
+  if (saved.actor.entrance === 'file' || saved.actor.entrance === 'mcp' || saved.actor.entrance === 'api') {
     if (!capability || externalApplyCapabilities.get(capability) !== saved) fail('LEASE_INVALID', 'ローカルエージェント接続の画面から承認してください')
     externalApplyCapabilities.delete(capability)
   }

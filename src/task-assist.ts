@@ -8,9 +8,9 @@ import Dexie from 'dexie'
 export type AssistedDraft = { input: TaskInput; notices: string[] }
 export type SourcedDraft = AssistedDraft & { source: string }
 /** The verified external actor behind a file/MCP creation; covered by the digest the owner approves (S21 shows it, not the coach). */
-export type AssistActor = { kind: 'external-agent'; id: string; entrance: 'file' | 'mcp'; commandId: string }
+export type AssistActor = { kind: 'external-agent'; id: string; entrance: 'file' | 'mcp' | 'api'; commandId: string }
 export type PreparedAssistedTasks = { id: string; profileId: string; datasetId: string; expiresAt: string; inputs: TaskInput[]; sources: string[]; origin: 'manual' | 'ai'; policyEpoch: number | null; actor?: AssistActor; digest: string }
-const assistActorValid = (actor: unknown) => Boolean(actor && typeof actor === 'object' && !Array.isArray(actor) && Object.keys(actor).length === 4 && (actor as AssistActor).kind === 'external-agent' && ['file', 'mcp'].includes((actor as AssistActor).entrance) && [(actor as AssistActor).id, (actor as AssistActor).commandId].every(value => typeof value === 'string' && /^[\w.:-]{1,200}$/.test(value)))
+const assistActorValid = (actor: unknown) => Boolean(actor && typeof actor === 'object' && !Array.isArray(actor) && Object.keys(actor).length === 4 && (actor as AssistActor).kind === 'external-agent' && ['file', 'mcp', 'api'].includes((actor as AssistActor).entrance) && [(actor as AssistActor).id, (actor as AssistActor).commandId].every(value => typeof value === 'string' && /^[\w.:-]{1,200}$/.test(value)))
 
 function uniqueNumber(raw: string, pattern: RegExp, maximum: number): number | null {
   const values = [...raw.matchAll(pattern)].map(match => Number(match[1]))
