@@ -64,7 +64,11 @@ public static class MichiPipeRelay {
     security.AddAccessRule(new PipeAccessRule(sid, PipeAccessRights.FullControl, AccessControlType.Allow));
     var first = new List<NamedPipeServerStream>(); for (int i=0; i<8; i++) first.Add(Create(name, security));
     var actual = first[0].GetAccessControl();
-    Emit(new { kind = "ready", ownerSid = sid.Value, sddl = actual.GetSecurityDescriptorSddlForm(AccessControlSections.Owner | AccessControlSections.Access), protectedDacl = actual.AreAccessRulesProtected, ruleCount = actual.GetAccessRules(true, true, typeof(SecurityIdentifier)).Count, rejectRemoteClients = true });
+    var rules = actual.GetAccessRules(true, true, typeof(SecurityIdentifier));
+    var ownerMatches = sid.Equals(actual.GetOwner(typeof(SecurityIdentifier)));
+    var ownerRule = rules.Count == 1 ? rules[0] as PipeAccessRule : null;
+    var ownerOnly = ownerRule != null && sid.Equals(ownerRule.IdentityReference) && ownerRule.AccessControlType == AccessControlType.Allow && ownerRule.PipeAccessRights == PipeAccessRights.FullControl && !ownerRule.IsInherited;
+    Emit(new { kind = "ready", ownerSid = sid.Value, sddl = actual.GetSecurityDescriptorSddlForm(AccessControlSections.Owner | AccessControlSections.Access), protectedDacl = actual.AreAccessRulesProtected, ruleCount = rules.Count, ownerMatches = ownerMatches, ownerOnly = ownerOnly, rejectRemoteClients = true });
     foreach (var initial in first) { var captured = initial; var thread = new Thread(() => Listen(name, security, captured)) { IsBackground = true }; thread.Start(); }
     try {
       string line; while ((line = Line(Console.In, 2097152)) != null) {

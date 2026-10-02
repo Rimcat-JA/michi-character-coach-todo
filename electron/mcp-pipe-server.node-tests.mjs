@@ -10,6 +10,7 @@ test('Windows owner-only ACL pipe authenticates independent sessions and closes 
  t.after(()=>server.close())
  assert.equal(server.acl.protectedDacl,true);assert.equal(server.acl.ruleCount,1);assert.match(server.acl.sddl,/D:P\(A;/);assert.equal(server.acl.sddl.includes(';;;WD)'),false)
  assert.equal(server.acl.rejectRemoteClients,true)
+ assert.equal(server.acl.ownerMatches,true);assert.equal(server.acl.ownerOnly,true)
  async function peer(secret){
   const socket=net.connect(server.endpoint),lines=[],waiters=[];let buffer=''
   socket.on('data',bytes=>{buffer+=bytes.toString('utf8');let i;while((i=buffer.indexOf('\n'))>=0){const line=JSON.parse(buffer.slice(0,i));buffer=buffer.slice(i+1);const waiter=waiters.shift();if(waiter)waiter(line);else lines.push(line)}})

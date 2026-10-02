@@ -16,8 +16,8 @@ async function createMCPPipeServer({handle}){
  child.on('close',exitCode=>{closed=true;exited=true;clearTimeout(timer);const startup=diagnostic.replaceAll('\0','').match(/MICHI_PIPE_STARTUP:([A-Za-z]{1,80}):([A-Za-z]{1,40}):(-?\d{1,12}):(CS\d{4})?/);const code=startup?`PIPE_UNAVAILABLE:${startup.slice(1).filter(Boolean).join(':')}`:/PSSecurityException|ScriptNotAllowed|UnauthorizedAccess/.test(diagnostic)?'PIPE_UNAVAILABLE:SCRIPT_POLICY':`PIPE_UNAVAILABLE:${startupFailure||'EXIT'}:${Number.isInteger(exitCode)?exitCode:'SIGNAL'}:${stderrBytes}`;diagnostic='';readyReject(Error(code));for(const session of sessions.values())clearTimeout(session.timer);sessions.clear()})
  function packet(value){
   if(value.kind==='ready'){
-   if(value.protectedDacl!==true||value.ruleCount!==1||value.rejectRemoteClients!==true||typeof value.ownerSid!=='string'||!value.sddl?.includes(value.ownerSid)){startupFailure=`ACL_${value.protectedDacl===true?1:0}_${Number.isInteger(value.ruleCount)?value.ruleCount:-1}`;return child.kill()}
-   clearTimeout(timer);readyResolve({ownerSid:value.ownerSid,sddl:value.sddl,protectedDacl:value.protectedDacl,ruleCount:value.ruleCount,rejectRemoteClients:true});return
+   if(value.protectedDacl!==true||value.ruleCount!==1||value.rejectRemoteClients!==true||typeof value.ownerSid!=='string'||value.ownerMatches!==true||value.ownerOnly!==true){startupFailure=`ACL_${value.protectedDacl===true?1:0}_${Number.isInteger(value.ruleCount)?value.ruleCount:-1}_${value.ownerMatches===true?1:0}_${value.ownerOnly===true?1:0}`;return child.kill()}
+   clearTimeout(timer);readyResolve({ownerSid:value.ownerSid,sddl:value.sddl,protectedDacl:value.protectedDacl,ruleCount:value.ruleCount,ownerMatches:true,ownerOnly:true,rejectRemoteClients:true});return
   }
   if(value.kind==='connected'){
    if(sessions.size>=8)return child.kill()

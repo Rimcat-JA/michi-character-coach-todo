@@ -34,11 +34,4 @@ jobs:
       - run: npm test
       - name: Test Electron notification and local bridges
         run: npm run test:electron
-      - name: Diagnose Windows pipe helper startup after failure
-        if: failure() && runner.os == 'Windows'
-        shell: powershell
-        run: |
-          $PSVersionTable.PSVersion
-          Get-ExecutionPolicy -List
-          Add-Type -Path electron/mcp-pipe-relay.cs -ReferencedAssemblies System,System.Core,System.Web.Extensions
       - run: npm run build
