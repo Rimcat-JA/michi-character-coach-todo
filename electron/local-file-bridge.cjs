@@ -215,9 +215,12 @@ async function createLocalFileBridge({ root, journalDirectory, signingKey, regis
     }
     return manifest
   }
-  async function readSnapshot() {
+  async function readSnapshot({allowStaleRegistration=false}={}) {
     await currentRegistration()
     const value = verify(JSON.parse((await read('manifest.json')).toString('utf8')))
+    // A native grant revision keeps edit copies intact until the owner exports again.
+    // Recognize an older, app-signed same-client mirror without treating it as usable.
+    if(allowStaleRegistration&&value.owner_id===reg.owner_id&&value.dataset_id===reg.dataset_id&&value.client_id===reg.client.id&&value.policy_epoch===reg.policy_epoch&&value.source_permission_revision===reg.source_permission_revision&&integer(value.registration_revision,1)&&value.registration_revision<reg.client.revision&&integer(value.grant_epoch,1)&&value.grant_epoch<reg.client.grant_epoch)return null
     const manifest = await manifestFor({ snapshot_id: value.snapshot_id, type: 'task.create' })
     return freeze(structuredClone(manifest))
   }

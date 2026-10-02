@@ -1,4 +1,8 @@
 import { externalAIFor } from './external-authority'
+import { clearExternalInstructionAuthority } from './external-instructions'
+import { clearChangeSetAuthority } from './change-set'
+import { clearCommandAuthority } from './command-bus'
+import type { FileBridgeRevise } from './file-bridge-types'
 import './external-task-create'
 import Dexie from 'dexie'
 import { db } from './db'
@@ -99,7 +103,7 @@ export function createFileBridgeController(gateway:FileBridgeGateway) {
       const key=fileBridgeScopeKey(value.profileId,value.datasetId,registration?.client.id??currentStatus?.registration?.client.id),previous=await db.commands.get(key)
       if(previous&&registration){try{const old=JSON.parse(previous.resultId).registration as FileBridgeRegistration|null;if(old?.client.id===registration.client.id&&(old.client.revision>registration.client.revision||old.client.grant_epoch>registration.client.grant_epoch))rejectFileBridge('REGISTRATION_ROLLBACK')}catch(error){if(error instanceof Error&&'code'in error)throw error}}
       const external=externalAIFor(value), clients=external.clients.filter(client=>client.registration.client.id!==registration?.client.id).map(client=>!registration&&client.registration.client.id===currentStatus?.registration?.client.id?{...client,status:'revoked' as const}:client)
-      if(registration)clients.push({registration:structuredClone(registration),status:'active',capabilityChecks:external.clients.find(client=>client.registration.client.id===registration.client.id)?.capabilityChecks??[],shippingState:'implemented'})
+      if(registration){const previous=external.clients.find(client=>client.registration.client.id===registration.client.id);clients.push({registration:structuredClone(registration),status:'active',capabilityChecks:previous?.registration.client.revision===registration.client.revision&&previous?.registration.client.grant_epoch===registration.client.grant_epoch?previous.capabilityChecks:[],shippingState:'implemented'})}
       await db.settings.put({...value,externalAI:{...external,clients:clients.slice(-50)}})
       await db.commands.put({key,hash:await Dexie.waitFor(contentDigest(payload)),resultId:JSON.stringify(payload),at:new Date().toISOString()})
     })
@@ -217,6 +221,30 @@ export function createFileBridgeController(gateway:FileBridgeGateway) {
       const {allowSplit,ruleIds,...basic}=structuredClone(request),extended=allowSplit||ruleIds?.length?{allowSplit:Boolean(allowSplit),ruleIds:ruleIds??[]}:{}
       const value={...basic,automation:request.automation??null,...extended,ownerId:current.profileId,datasetId:current.datasetId,policyEpoch:policy.epoch,sourcePermissionRevision:policy.sourcePermissionRevision}
       return adoptStatus(await gateway.configure(value))
+    },
+    async revise(request:FileBridgeRevise,event?:Event){
+      if(event)trustedClick(event)
+      if(!gateway.revise||!gateway.invalidateClient)rejectFileBridge('FEATURE_NOT_IMPLEMENTED')
+      request=structuredClone(request)
+      const reg=currentStatus?.registration
+      if(!reg||request.clientId!==reg.client.id||request.expectedRevision!==reg.client.revision)rejectFileBridge('REVISION_CONFLICT')
+      await db.transaction('rw',db.settings,db.commands,db.datasetState,async()=>{
+        const current=await settings(),external=externalAIFor(current),client=external.clients.find(value=>value.registration.client.id===reg.client.id)
+        if(!external.enabled||!client||client.status!=='active'||canonicalJSON(client.registration)!==canonicalJSON(reg))rejectFileBridge('AUTHORITY_CHANGED')
+        if((await db.datasetState.get('main'))?.mode&&((await db.datasetState.get('main'))!.mode!=='active')||(current.datasetMode??'active')!=='active')rejectFileBridge('DATASET_FROZEN')
+        await db.settings.put({...current,externalAI:{...external,clients:external.clients.map(value=>value===client?{...value,status:'needs_reauth' as const}:value)}})
+        const payload={version:1,registration:null}
+        await db.commands.put({key:fileBridgeScopeKey(reg.owner_id,reg.dataset_id,reg.client.id),hash:await Dexie.waitFor(contentDigest(payload)),resultId:JSON.stringify(payload),at:new Date().toISOString()})
+      })
+      // This transaction serializes with old applies; no old capability survives the scope latch.
+      clearCommandAuthority({clientId:reg.client.id});clearChangeSetAuthority({clientId:reg.client.id});clearExternalInstructionAuthority(reg.client.id)
+      await dropPrepared();entries.clear();leases.clear();noteReceivedCommands('external',[],reg.client.id)
+      try{return await adoptStatus(await gateway.revise(request))}
+      catch(error){
+        await gateway.invalidateClient({clientId:reg.client.id}).catch(()=>{})
+        await db.transaction('rw',db.settings,async()=>{const current=await settings(),external=externalAIFor(current);await db.settings.put({...current,externalAI:{...external,clients:external.clients.map(value=>value.registration.client.id===reg.client.id?{...value,status:'revoked' as const}:value)}})})
+        throw error
+      }
     },
     async disconnect(event:Event) {
       trustedClick(event)

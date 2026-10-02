@@ -35,4 +35,4 @@ export async function verifiedExternalInstruction(request:ExternalChangeRequest,
  if(!row||row.hash!==await contentDigest({action:value.action,context,instructionId:value.instruction.id}))return null
  try{const {settings,registration}=await assertExternalToolAuthority(context),actor=externalAgentActor({ownerId:context.ownerId,datasetId:context.datasetId,clientId:registration.client.id,registrationRevision:registration.client.revision,grantEpoch:registration.client.grant_epoch,host:registration.client.intended_host},'mcp',{fields:registration.client.grant.fields as CommandField[],operations:['task.update'],mutationMode:'require_approval',maxScheduleShiftDays:registration.client.grant.max_schedule_shift_days});assertTaskInstruction(value.instruction,changes,changeContextFor(actor),settings);return value.instruction}catch{return null}
 }
-export function clearExternalInstructionAuthority(){issued.clear()}
+export function clearExternalInstructionAuthority(clientId?:string){if(clientId){for(const [id,value]of issued)if(value.context.registration.client.id===clientId)issued.delete(id)}else issued.clear()}

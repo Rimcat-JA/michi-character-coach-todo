@@ -40,6 +40,7 @@ export default function LocalFileBridgeView({settings,tasks,gateway,onApplied}: 
   const [valueMessage,setValueMessage]=useState(''),[splitDraft,setSplitDraft]=useState<{id:string;children:SplitChildDraft[]}|null>(null)
   const [mcpConfig,setMcpConfig]=useState<{scopeKey:string;root:string;json:string;cli:string;references:ReturnType<typeof mcpHostReferences>}|null>(null)
   const [autoMode,setAutoMode]=useState(false),[autoDays,setAutoDays]=useState(2),[autoCount,setAutoCount]=useState(5)
+  const [grantEdit,setGrantEdit]=useState<{clientId:string;revision:number;expiresAt:string}|null>(null),[grantDays,setGrantDays]=useState(7),[grantCount,setGrantCount]=useState(20)
   const [appConfig,setAppConfig]=useState<{scopeKey:string;clientId:string;json:string}|null>(null)
   const appMCP=(window as Window&{michiAppMCP?:AppMCPGateway}).michiAppMCP
   const autoAllowed=fileBridgeAutomationAllowed(policy,fields,autoDays)
@@ -54,7 +55,19 @@ export default function LocalFileBridgeView({settings,tasks,gateway,onApplied}: 
   },[controller,scopeKey])
   useEffect(()=>()=>{controller?.clearAuthority()},[controller])
   async function run(action:()=>Promise<void>) {if(busy)return;setBusy(true);setNotice('');try{await action()}catch(error){setNotice(error instanceof Error?`${error.message}${'code' in error&&typeof error.code==='string'?`（${error.code}）`:''}`:String(error))}finally{setBusy(false)}}
-  function replaceStatus(status:FileBridgeStatus) {setView({scopeKey,status,entries:[],prepared:null,outcome:null})}
+  function replaceStatus(status:FileBridgeStatus) {setView({scopeKey,status,entries:[],prepared:null,outcome:null});setAppConfig(null);setGrantEdit(null)}
+  function editGrant(){
+    const reg=status?.registration;if(!reg)return
+    const grant=reg.client.grant
+    setTaskIds([...reg.task_ids]);setFields([...grant.fields]);setRuleIds([...(reg.rule_ids??[])]);setAllowSplit(grant.keys.includes('tasks:split'));setHost(reg.client.intended_host)
+    setAutoMode(Boolean(grant.automation));setAutoDays(grant.automation?.max_schedule_shift_days??2);setAutoCount(grant.automation?.max_operations_per_day??5);setGrantDays(grant.max_schedule_shift_days);setGrantCount(grant.max_operations_per_day)
+    setGrantEdit({clientId:reg.client.id,revision:reg.client.revision,expiresAt:grant.expires_at});setNotice('現在の許可を編集欄へ読み込みました。更新すると、この接続の古い変更案と資格情報が失効します。')
+  }
+  async function reviseGrant(event:Event){
+    if(!controller||!grantEdit)return
+    try{replaceStatus(await controller.revise({clientId:grantEdit.clientId,expectedRevision:grantEdit.revision,taskIds,fields,expiresAt:grantEdit.expiresAt,automation:autoMode&&autoAllowed?{maxScheduleShiftDays:autoDays,maxOperationsPerDay:autoCount}:null,maxScheduleShiftDays:grantDays,maxOperationsPerDay:grantCount,allowSplit,ruleIds},event));setNotice('この接続の許可を更新しました。書出しとMCP設定を更新してください。共有済みコピーは相手側に残る場合があります。')}
+    catch(error){replaceStatus(await controller.refresh());throw error}
+  }
   async function scan() {
     if(!controller)return
     let scanned=await controller.scanInbox(),applied=0,waiting=0
@@ -92,7 +105,7 @@ export default function LocalFileBridgeView({settings,tasks,gateway,onApplied}: 
       <details open={!status?.connected}><summary>共有する項目とタスク</summary>
         <p>選択した内容をフォルダーへ書き出します。このフォルダーを渡す相手は内容を読めます。資料から検出したタスクの引用（資料の根拠・旧形式メモの引用行）は書き出しません。</p>
         <label className="field"><span>利用するクライアント</span><select value={host} disabled={busy} onChange={event=>setHost(event.target.value as FileBridgeHost)}><option value="codex">Codex</option><option value="claude_code">Claude Code</option><option value="chatgpt">ChatGPT</option><option value="claude">Claude</option><option value="other">その他</option></select></label>
-        <label className="field"><span>許可の有効時間</span><select value={hours} disabled={busy} onChange={event=>setHours(Number(event.target.value))}>{[1,4,12,24].map(value=><option key={value} value={value}>{value}時間</option>)}</select></label>
+        <label className="field"><span>許可の有効時間</span><select value={hours} disabled={busy} onChange={event=>{const value=Number(event.target.value);setHours(value);setGrantEdit(previous=>previous?{...previous,expiresAt:new Date(Date.now()+value*3600000).toISOString()}:null)}}>{[1,4,12,24].map(value=><option key={value} value={value}>{value}時間</option>)}</select></label>
         <fieldset disabled={busy}><legend>共有・変更依頼を受ける項目</legend>{(['title','notes','scheduled_date','due_date','manual_points'] as FileBridgeField[]).map(field=><label key={field} className="field"><span><input type="checkbox" checked={fields.includes(field)} onChange={event=>setFields(event.target.checked?[...fields,field]:fields.filter(item=>item!==field))}/> {labels[field]}{valueFields.includes(field)?'（依頼のたびに本人が値を確認）':''}</span></label>)}</fieldset>
         <label className="field"><span><input type="checkbox" checked={allowSplit} disabled={busy} onChange={event=>setAllowSplit(event.target.checked)}/> 選択タスクの分割案を受け付ける（配分は毎回本人が確認）</span></label>
         {editableRules.length?<fieldset disabled={busy}><legend>周期の変更案を受け付ける系列（名称・点数は変更不可。RRULE・完了起点の系列は対象外）</legend>{editableRules.map(rule=><label key={rule.id} className="field"><span><input type="checkbox" checked={ruleIds.includes(rule.id)} onChange={event=>setRuleIds(event.target.checked?[...ruleIds,rule.id]:ruleIds.filter(id=>id!==rule.id))}/> {calendarRuleEditorDefinition(rule).title}（{triggerText(calendarRuleEditorDefinition(rule).trigger)}）</span></label>)}</fieldset>:null}
@@ -102,6 +115,7 @@ export default function LocalFileBridgeView({settings,tasks,gateway,onApplied}: 
           <div className="form-grid"><label className="field">予定日を動かせる日数<input type="number" min={0} max={7} step={1} value={autoDays} onChange={event=>setAutoDays(Number(event.target.value))}/></label><label className="field">1日の自動件数<input type="number" min={1} max={20} step={1} value={autoCount} onChange={event=>setAutoCount(Number(event.target.value))}/></label></div>
           <small>{autoAllowed?'共有項目がメモ・予定日だけで、自動化設定（S20）でも範囲内自動を許可している場合に使えます。範囲外・タイトル・新規作成は毎回本人が承認します。':'自動化設定（S20）でメモ・予定日を「範囲内で自動」にし、共有項目をメモ・予定日だけにすると選べます。'}</small></fieldset>
         <button type="button" data-file-bridge-configure="true" className="primary-button" disabled={busy||!fields.length||taskIds.length>100||!external.enabled||!policy.aiChangesEnabled} onClick={event=>{const native=event.nativeEvent;void run(async()=>replaceStatus(await controller.configure({intendedHost:host,taskIds,fields,lifetimeHours:hours,allowSplit,ruleIds,automation:autoMode&&autoAllowed?{maxScheduleShiftDays:autoDays,maxOperationsPerDay:autoCount}:null},native)))}}>選択した範囲だけを許可して接続</button>
+        {connection?.revise&&status?.registration?<div><button type="button" className="secondary-button" disabled={busy} onClick={editGrant}>現在の許可を編集欄へ読み込む</button>{grantEdit?.clientId===status.registration.client.id&&grantEdit.revision===status.registration.client.revision?<><p>接続 {grantEdit.clientId.slice(0,8)}・版 {grantEdit.revision} を更新します。上のタスク・項目・自動化の選択を使います。有効期限：{new Date(grantEdit.expiresAt).toLocaleString('ja-JP')}。有効時間の選択を変えると期限も更新します。</p><div className="form-grid"><label className="field">承認できる予定日移動の上限<input type="number" min={0} max={31} step={1} value={grantDays} disabled={busy} onChange={event=>setGrantDays(Number(event.target.value))}/></label><label className="field">1日の接続操作上限<input type="number" min={0} max={100} step={1} value={grantCount} disabled={busy} onChange={event=>setGrantCount(Number(event.target.value))}/></label></div><p className="muted">範囲の縮小はすぐ反映できます。共有の追加・期限や上限の拡大・自動適用の追加は、下の本人確認ボタンから行います。更新に失敗した場合、この接続を停止します。他の接続は継続します。</p><button type="button" data-file-bridge-revise={grantEdit.clientId} className="primary-button" disabled={busy||taskIds.length>100||!external.enabled||!policy.aiChangesEnabled} onClick={event=>{const native=event.nativeEvent;void run(()=>reviseGrant(native))}}>この接続の許可を更新</button></>:null}</div>:null}
       </details>
       {status?.connected&&status.registration?<div>
         <h4>登録した接続</h4><p>{status.registration.client.intended_host} / {status.root}</p>

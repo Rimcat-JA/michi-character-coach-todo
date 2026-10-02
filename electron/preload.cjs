@@ -60,9 +60,9 @@ contextBridge.exposeInMainWorld('michiLocalAPI', {
 let nativeFileBridgeProof = null
 window.addEventListener('click', event => {
   if (!event.isTrusted || !(event.target instanceof Element)) return
-  const button = event.target.closest('button[data-file-bridge-configure],button[data-file-bridge-approve],button[data-file-bridge-disconnect]')
+  const button = event.target.closest('button[data-file-bridge-configure],button[data-file-bridge-approve],button[data-file-bridge-disconnect],button[data-file-bridge-revise]')
   if (!button || button.disabled) return
-  const kind = button.hasAttribute('data-file-bridge-configure') ? 'configure' : button.hasAttribute('data-file-bridge-approve') ? 'approve' : 'disconnect'
+  const kind = button.hasAttribute('data-file-bridge-configure') ? 'configure' : button.hasAttribute('data-file-bridge-approve') ? 'approve' : button.hasAttribute('data-file-bridge-revise')?'revise':'disconnect'
   const reference = kind === 'configure' ? '' : button.getAttribute(`data-file-bridge-${kind}`) ?? ''
   const proof = { nonce: crypto.randomUUID(), kind, reference }
   nativeFileBridgeProof = { ...proof, at: Date.now() }
@@ -81,6 +81,8 @@ contextBridge.exposeInMainWorld('michiFileBridge', {
   selectClient: request => ipcRenderer.invoke('michi:filebridge-selectClient',request),
   configure: request => fileBridgeNativeCall('configure', 'configure', '', request),
   disconnect: request => fileBridgeNativeCall('disconnect', 'disconnect', request?.clientId, request),
+  revise: request => {const proof=nativeFileBridgeProof;nativeFileBridgeProof=null;return ipcRenderer.invoke('michi:filebridge-revise',{request,proofNonce:proof?.kind==='revise'&&proof.reference===request?.clientId&&Date.now()-proof.at<=5000?proof.nonce:null})},
+  invalidateClient: request => ipcRenderer.invoke('michi:filebridge-invalidateClient',request),
   exportSnapshot: request => ipcRenderer.invoke('michi:filebridge-exportSnapshot', request),
   scanInbox: () => ipcRenderer.invoke('michi:filebridge-scanInbox'),
   authorizeApplication: request => fileBridgeNativeCall('authorizeApplication', 'approve', request?.reference, request),

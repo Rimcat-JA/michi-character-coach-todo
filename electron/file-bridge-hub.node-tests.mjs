@@ -90,3 +90,11 @@ test('global revoke during an in-flight configure cannot publish a live copy eve
   assert.equal((await f.hub.status()).connected,false);assert.deepEqual(f.saved().connections,[])
   for(const id of await fs.readdir(f.options.agentDirectory))await assert.rejects(createMCPFileClient(path.join(f.options.agentDirectory,id)),error=>['CONNECTION_REVOKED','ENOENT'].includes(error.code)) // Never activated copies have no registration to read.
 })
+test('revising A leaves B selected, its signed snapshot and its pending lease untouched',async t=>{
+ const f=await fixture(t),a=await f.connect(f.a),b=await f.connect(f.b),pending=await f.propose(b,f.b,crypto.randomUUID()),lease=await f.hub.authorizeApplication(pending.binding,f.native('approve',pending.binding.reference)),reg=a.registration
+ const next=await f.hub.revise({clientId:reg.client.id,expectedRevision:1,taskIds:reg.task_ids,fields:['notes'],expiresAt:reg.client.grant.expires_at,automation:null,maxScheduleShiftDays:3,maxOperationsPerDay:5,allowSplit:false,ruleIds:[]},null)
+ assert.equal(next.registration.client.revision,2);assert.equal((await f.hub.status()).registration.client.id,b.registration.client.id)
+ assert.equal((await(await createMCPFileClient(b.root)).snapshot()).tasks[0].id,f.b.id)
+ const result=await f.hub.recordApplied({leaseId:lease.leaseId,reference:pending.binding.reference,receipt:f.persist(pending,lease,f.b)});assert.equal(result.client_id,b.registration.client.id)
+ await f.hub.invalidateClient({clientId:reg.client.id});assert.equal((await f.hub.status()).registration.client.id,b.registration.client.id)
+})

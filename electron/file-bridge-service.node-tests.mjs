@@ -6,6 +6,7 @@ import path from 'node:path'
 import crypto from 'node:crypto'
 import { createRequire } from 'node:module'
 const { createFileBridgeService } = createRequire(import.meta.url)('./file-bridge-service.cjs')
+const { createMCPFileClient } = createRequire(import.meta.url)('./mcp-file-client.cjs')
 
 async function fixture(t, { getReceiptOverride, auto = null } = {}) {
   const root = await fs.mkdtemp(path.join(await fs.realpath(os.tmpdir()), 'michi-filebridge-service-'))
@@ -217,4 +218,37 @@ test('K12/N03: split and series grants are written only from the owner configura
   await assert.rejects(f.service.configure({ ...f.config, approved: true }, f.native('configure')), /CONFIG_INVALID/)
   const status = await f.service.configure({ ...f.config, allowSplit: true, ruleIds: [] }, f.native('configure'))
   assert.ok(status.registration.client.grant.keys.includes('tasks:split')); assert.ok(!status.registration.client.grant.keys.includes('routines:prepare')); assert.equal(Object.hasOwn(status.registration, 'rule_ids'), false)
+})
+const revisionOf=registration=>({clientId:registration.client.id,expectedRevision:registration.client.revision,taskIds:registration.task_ids,fields:['notes'],expiresAt:registration.client.grant.expires_at,automation:null,maxScheduleShiftDays:3,maxOperationsPerDay:5,allowSplit:false,ruleIds:[]})
+test('same-client grant reduction invalidates old snapshot, increments both revisions and preserves the durable quota journal',async t=>{
+ const f=await fixture(t),old=f.status,client=await createMCPFileClient(old.root),pending=await f.command(),lease=await f.service.authorizeApplication(pending.binding,f.native('approve',pending.binding.reference))
+ const next=await f.service.revise(revisionOf(old.registration),null)
+ assert.equal(next.registration.client.id,old.registration.client.id);assert.equal(next.registration.client.revision,2);assert.equal(next.registration.client.grant_epoch,2);assert.equal(next.snapshot,null)
+ await assert.rejects(client.snapshot(),error=>error.code==='SNAPSHOT_INVALID')
+ await assert.rejects(f.service.recordApplied({leaseId:lease.leaseId,reference:pending.binding.reference,receipt:f.persist(pending.value,pending.binding,lease)}))
+ const fresh=await f.service.exportSnapshot({tasks:[{id:f.task.id}]});assert.equal(fresh.snapshot.registration_revision,2);assert.deepEqual((await client.snapshot()).tasks.map(task=>Object.keys(task)),[['id','notes','revision']])
+ assert.equal((await fs.readdir(path.join(f.root,'private',old.registration.client.id))).filter(name=>name.endsWith('.claim.json')).length,1)
+})
+test('grant expansion and quota/time increase consume one native proof; stale revision never overwrites the winner',async t=>{
+ const f=await fixture(t),reduced=await f.service.revise(revisionOf(f.status.registration),null),request={...revisionOf(reduced.registration),fields:['notes','title'],maxOperationsPerDay:6}
+ await assert.rejects(f.service.revise(request,null),error=>error.code==='HUMAN_APPROVAL_REQUIRED')
+ const proof=f.native('revise',request.clientId),next=await f.service.revise(request,proof);assert.equal(next.registration.client.revision,3)
+ await assert.rejects(f.service.revise({...request,expectedRevision:3,maxOperationsPerDay:7},proof),error=>error.code==='HUMAN_APPROVAL_REQUIRED')
+ await assert.rejects(f.service.revise(request,f.native('revise',request.clientId)),error=>error.code==='REVISION_CONFLICT')
+ assert.equal((await f.service.status()).registration.client.grant.max_operations_per_day,6)
+})
+test('concurrent revisions with the same expected version have exactly one winner',async t=>{
+ const f=await fixture(t),request=revisionOf(f.status.registration),results=await Promise.allSettled([f.service.revise(request,null),f.service.revise({...request,fields:['scheduled_date']},null)])
+ assert.equal(results.filter(result=>result.status==='fulfilled').length,1);assert.equal(results.find(result=>result.status==='rejected').reason.code,'REVISION_CONFLICT');assert.equal((await f.service.status()).registration.client.revision,2)
+})
+test('grant revision acknowledges a DB commit already made; receipt read failure still revokes the old copy',async t=>{
+ const f=await fixture(t),pending=await f.command(),lease=await f.service.authorizeApplication(pending.binding,f.native('approve',pending.binding.reference))
+ f.persist(pending.value,pending.binding,lease);await f.service.revise(revisionOf(f.status.registration),null)
+ const result=await f.service.commandResult(pending.value.command_id);assert.equal(result.state,'applied');assert.equal(result.receipt.commandId,pending.value.command_id)
+ let failed=false
+ const g=await fixture(t,{getReceiptOverride:(key,receipts)=>{if(failed)throw Error('synthetic receipt failure');return receipts.get(key)}}),q=await g.command()
+ await g.service.authorizeApplication(q.binding,g.native('approve',q.binding.reference));failed=true
+ await assert.rejects(g.service.revise(revisionOf(g.status.registration),null),/synthetic receipt failure/)
+ await assert.rejects(async()=>{const client=await createMCPFileClient(g.status.root);return client.snapshot()},error=>error.code==='CONNECTION_REVOKED')
+ assert.equal(g.configuration(),null)
 })

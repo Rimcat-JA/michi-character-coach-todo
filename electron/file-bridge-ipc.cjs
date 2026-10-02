@@ -15,7 +15,7 @@ function installFileBridgeIPC({ ipcMain, win, app, safeStorage }) {
   ipcMain.on('michi:filebridge-native-proof', (event, proof) => {
     try {
       assertMain(event)
-      if (!proof || Object.keys(proof).length !== 3 || typeof proof.nonce !== 'string' || !/^[a-f0-9-]{36}$/i.test(proof.nonce) || !['configure', 'approve', 'disconnect'].includes(proof.kind) || typeof proof.reference !== 'string' || proof.reference.length > 200) return
+      if (!proof || Object.keys(proof).length !== 3 || typeof proof.nonce !== 'string' || !/^[a-f0-9-]{36}$/i.test(proof.nonce) || !['configure', 'approve', 'disconnect','revise'].includes(proof.kind) || typeof proof.reference !== 'string' || proof.reference.length > 200) return
       for (const [id, item] of nativeProofs) if (Date.now() - item.at > 5000) nativeProofs.delete(id)
       if (nativeProofs.size < 100) nativeProofs.set(proof.nonce, { ...proof, at: Date.now() })
     } catch { /* The isolated preload is the only producer of native click proofs. */ }
@@ -76,15 +76,21 @@ function installFileBridgeIPC({ ipcMain, win, app, safeStorage }) {
     })().catch(error => { servicePromise = null; throw error })
     return servicePromise
   }
-  for (const method of ['status', 'listConnections', 'selectClient', 'configure', 'disconnect', 'exportSnapshot', 'scanInbox', 'authorizeApplication', 'authorizeAutomaticApplication', 'recordApplied', 'cancelApplication', 'recordRejected', 'invalidate']) {
+  for (const method of ['status', 'listConnections', 'selectClient', 'configure','revise', 'disconnect','invalidateClient', 'exportSnapshot', 'scanInbox', 'authorizeApplication', 'authorizeAutomaticApplication', 'recordApplied', 'cancelApplication', 'recordRejected', 'invalidate']) {
     ipcMain.handle(`michi:filebridge-${method}`, async (event, envelope) => {
       assertMain(event)
       if (method === 'invalidate') await appMCP.stop()
       if (method === 'disconnect') appMCP.revoke(envelope?.request?.clientId)
+      if (method === 'revise') appMCP.revoke(envelope?.request?.clientId)
+      if (method === 'invalidateClient') appMCP.revoke(envelope?.clientId)
       const current = await service()
       if (['configure', 'disconnect', 'authorizeApplication'].includes(method)) {
         if (!envelope || Object.keys(envelope).length !== 2 || !Object.hasOwn(envelope, 'request') || typeof envelope.proofNonce !== 'string') throw new Error('本人の接続確認ボタンから操作してください')
         return current[method](envelope.request, envelope.proofNonce)
+      }
+      if(method==='revise'){
+        if(!envelope||Object.keys(envelope).length!==2||!Object.hasOwn(envelope,'request')||envelope.proofNonce!==null&&typeof envelope.proofNonce!=='string')throw Error('CONFIG_INVALID')
+        return current.revise(envelope.request,envelope.proofNonce)
       }
       if (['status', 'listConnections', 'scanInbox', 'invalidate'].includes(method)) { if (envelope !== undefined) throw new Error('操作引数が不正です'); return current[method]() }
       return current[method](envelope)

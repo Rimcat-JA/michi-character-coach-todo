@@ -48,6 +48,7 @@ export type FileBridgeConfigure = {
   automation: { maxScheduleShiftDays: number; maxOperationsPerDay: number } | null
   allowSplit?: boolean; ruleIds?: string[]
 }
+export type FileBridgeRevise={clientId:string;expectedRevision:number;taskIds:string[];fields:FileBridgeField[];expiresAt:string;automation:FileBridgeConfigure['automation'];maxScheduleShiftDays:number;maxOperationsPerDay:number;allowSplit:boolean;ruleIds:string[]}
 export type FileBridgeApplicationBinding = {
   reference: string; fileDigest: string; applicationDigest: string; ownerId: string; datasetId: string; policyEpoch: number; sourcePermissionRevision: number
 }
@@ -68,6 +69,8 @@ export interface FileBridgeGateway {
   listConnections?(): Promise<FileBridgeStatus[]>
   status(): Promise<FileBridgeStatus>
   configure(request: FileBridgeConfigure): Promise<FileBridgeStatus>
+  revise?(request:FileBridgeRevise):Promise<FileBridgeStatus>
+  invalidateClient?(request:{clientId:string}):Promise<void>
   disconnect(request: { clientId: string }): Promise<FileBridgeStatus>
   exportSnapshot(request: { tasks: FileBridgeSnapshotTask[]; rules?: FileBridgeSnapshotRule[] }): Promise<FileBridgeStatus>
   scanInbox(): Promise<{ status: FileBridgeStatus; entries: FileBridgeInboxEntry[] }>

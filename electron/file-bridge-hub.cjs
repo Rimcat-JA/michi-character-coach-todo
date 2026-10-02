@@ -63,8 +63,9 @@ async function createFileBridgeHub(options) {
       saveConfiguration: async value => {
         const previousId = slot.id
         await mutate(current => {
+          const replacing=current.connections.some(item=>item.registration.client.id===previousId)
           current.connections = current.connections.filter(item => item.registration.client.id !== previousId)
-          if (value) { if (current.connections.length >= 50) fail('CONNECTION_LIMIT'); current.connections.push(value); current.selectedClientId = value.registration.client.id }
+          if (value) { if (current.connections.length >= 50) fail('CONNECTION_LIMIT'); current.connections.push(value); if(!replacing||current.selectedClientId===previousId)current.selectedClientId = value.registration.client.id }
           else if (current.selectedClientId === previousId) current.selectedClientId = null
           return current
         })
@@ -120,6 +121,18 @@ async function createFileBridgeHub(options) {
       for (const [reference, value] of references) if (value === slot) references.delete(reference)
     }
   }
+  async function revise(request,proof){
+    if(!request||!uuid(request.clientId))fail('CONFIG_INVALID')
+    const expectedGeneration=generation,slot=await getSlot(request.clientId);let changed=false
+    try{const result=await slot.service.revise(request,proof);changed=true;if(generation!==expectedGeneration||slot.revoked||!result.connected)fail('AUTHORITY_CHANGED');return result}
+    catch(error){if(!['REVISION_CONFLICT','CONFIG_INVALID','HUMAN_APPROVAL_REQUIRED','TASK_SCOPE','AUTOMATION_SCOPE','AUTOMATION_NOT_GRANTED','REGISTRATION_INVALID','REVISION_BUSY'].includes(error.code)){slot.revoked=true;await slot.service.invalidate().catch(()=>{})}throw error}
+    finally{if(changed||slot.revoked){for(const [ref,value]of references)if(value===slot)references.delete(ref);for(const [id,value]of leases)if(value===slot)leases.delete(id)}}
+  }
+  async function invalidateClient(request){
+    if(!request||Object.keys(request).length!==1||!uuid(request.clientId))fail('CONFIG_INVALID')
+    const slot=await getSlot(request.clientId),config=slot.config;slot.revoked=true
+    try{await slot.service.invalidate()}finally{if(config)await revokeStoredCopy(options.agentDirectory,config);slots.delete(request.clientId);for(const [ref,value]of references)if(value===slot)references.delete(ref);for(const [id,value]of leases)if(value===slot)leases.delete(id)}
+  }
   async function invalidate() {
     generation++ // Every slot, including a configure still awaiting IO, fails closed immediately.
     const configs = [...state.connections], errors = []
@@ -151,7 +164,7 @@ async function createFileBridgeHub(options) {
   // On startup, OFF/freeze/stops invalidate saved copies instead of leaving apparently live manifests.
   const initial = await options.getSettings()
   if (initial.externalAI?.enabled !== true || initial.externalAI.version !== 1 || initial.changePolicy?.aiChangesEnabled === false || initial.datasetMode && initial.datasetMode !== 'active') await invalidate()
-  return Object.freeze({ status, configure, selectClient, listConnections, disconnect, invalidate, exportSnapshot, scanInbox,
+  return Object.freeze({ status, configure, revise, selectClient, listConnections, disconnect, invalidate, invalidateClient, exportSnapshot, scanInbox,
     commandResult: async request => { if (!request || Object.keys(request).length!==2 || !uuid(request.clientId) || !uuid(request.commandId)) fail('COMMAND_ID_INVALID'); return (await getSlot(request.clientId)).service.commandResult(request.commandId) },
     clientStatus: async request => { if (!request || Object.keys(request).length!==1 || !uuid(request.clientId)) fail('CONFIG_INVALID'); return (await getSlot(request.clientId)).service.status() },
     authorizeApplication: (request, proof) => authorize('authorizeApplication', request, proof),

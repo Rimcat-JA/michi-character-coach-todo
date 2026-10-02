@@ -2,6 +2,7 @@ const fs = require('node:fs/promises')
 const path = require('node:path')
 const crypto = require('node:crypto')
 const { createLocalFileBridge, canonicalFileJSON, validateFileBridgeRegistration, FILE_BRIDGE_REJECTED_STATES } = require('./local-file-bridge.cjs')
+const { grantExpands, revisedRegistration } = require('./external-grant-revision.cjs')
 
 const uuid = value => typeof value === 'string' && /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i.test(value)
 const digest = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value)
@@ -34,7 +35,7 @@ async function createFileBridgeService({ agentDirectory, journalDirectory, signi
   await fs.mkdir(agentDirectory, { recursive: true }); await fs.mkdir(journalDirectory, { recursive: true })
   async function currentContext(registration) {
     const settings = await getSettings(), current = policy(settings)
-    return { ownerId: settings.profileId, datasetId: settings.datasetId, clientId: registration.client.id, policyEpoch: current.epoch, sourcePermissionRevision: current.sourcePermissionRevision, registrationRevision: registration.client.revision, grantEpoch: registration.client.grant_epoch, enabled: Boolean(connection?.registration.client.id === registration.client.id && settings.externalAI?.version === 1 && settings.externalAI.enabled === true && current.aiChangesEnabled) }
+    return { ownerId: settings.profileId, datasetId: settings.datasetId, clientId: registration.client.id, policyEpoch: current.epoch, sourcePermissionRevision: current.sourcePermissionRevision, registrationRevision: connection?.registration.client.revision??0, grantEpoch: connection?.registration.client.grant_epoch??0, enabled: Boolean(connection?.registration.client.id === registration.client.id && settings.externalAI?.version === 1 && settings.externalAI.enabled === true && current.aiChangesEnabled) }
   }
   async function lookupReceipt(id,clientId) { return await getReceipt(receiptKey(id,clientId)) ?? await getReceipt(`filebridge:applied:${id}`) }
   function receiptFor(lease, stored) {
@@ -65,7 +66,7 @@ async function createFileBridgeService({ agentDirectory, journalDirectory, signi
         lease.ready.resolve(lease.public)
         return lease.committed.promise
       } })
-      if (typeof next.bridge.readSnapshot === 'function') next.snapshot = await next.bridge.readSnapshot().catch(error => { if (error.code === 'ENOENT') return null; throw error })
+      if (typeof next.bridge.readSnapshot === 'function') next.snapshot = await next.bridge.readSnapshot({allowStaleRegistration:true}).catch(error => { if (error.code === 'ENOENT') return null; throw error })
       return next
     } catch (error) { connection = null; throw error }
   }
@@ -231,7 +232,32 @@ async function createFileBridgeService({ agentDirectory, journalDirectory, signi
     try { return await current.bridge.readResult(commandId) }
     catch (error) { if (error.code === 'ENOENT') return null; throw error }
   }
-  return Object.freeze({ status, configure, disconnect, exportSnapshot, scanInbox, authorizeApplication, authorizeAutomaticApplication, recordApplied, cancelApplication, recordRejected, commandResult, invalidate })
+  let revisionQueue=Promise.resolve(),revisionCount=0
+  async function revise(request,nativeProof){
+    if(revisionCount>=10)fail('REVISION_BUSY');revisionCount++
+    const previous=revisionQueue;let release;revisionQueue=new Promise(resolve=>{release=resolve});await previous
+    try{return await reviseOnce(structuredClone(request),nativeProof)}finally{revisionCount--;release()}
+  }
+  async function reviseOnce(request,nativeProof){
+    const active=await ensure();if(!active)fail('NOT_CONNECTED')
+    const registration=revisedRegistration(active.registration,request),before=await getSettings()
+    const proofValid=nativeProof?await verifyNativeProof('revise',registration.client.id,nativeProof):false
+    if(grantExpands(active.registration,registration)&&!proofValid)fail('HUMAN_APPROVAL_REQUIRED')
+    if(registration.client.grant.automation&&!n09Automatic(policy(before),registration.client.grant.fields,registration.client.grant.automation.max_schedule_shift_days))fail('AUTOMATION_NOT_GRANTED')
+    const tasks=await getTasks(registration.task_ids),rules=await getRules(registration.rule_ids??[])
+    if(tasks.length!==registration.task_ids.length||tasks.some(task=>task.deletedAt)||rules.length!==(registration.rule_ids?.length??0))fail('TASK_SCOPE')
+    const latest=await getSettings(),current=policy(latest)
+    if(connection!==active||latest.profileId!==registration.owner_id||latest.datasetId!==registration.dataset_id||latest.externalAI?.enabled!==true||latest.externalAI?.epoch!==before.externalAI?.epoch||current.epoch!==registration.policy_epoch||current.sourcePermissionRevision!==registration.source_permission_revision||!current.aiChangesEnabled)fail('AUTHORITY_CHANGED')
+    // Renderer first latches this client needs_reauth and cancels its bus authority in a DB transaction.
+    // Here the main coordinator stops old leases before publishing a replacement signed registration.
+    connection=null;active.bridge.clearAuthorities();entries.clear()
+    const config={root:active.root,registration}
+    try{
+      for(const [id,lease]of leases){if(!lease.settled){const actual=receiptFor(lease,await lookupReceipt(lease.prepared.command.command_id,lease.registration.client.id));if(actual)lease.committed.resolve(actual.file);else lease.committed.reject(new Error('REGISTRATION_CHANGED'))}leases.delete(id)}
+      await saveConfiguration(config);await activate(config);return await status()
+    }catch(error){await active.bridge.revoke().catch(()=>{});await invalidate().catch(()=>{});throw error}
+  }
+  return Object.freeze({ status, configure, revise, disconnect, exportSnapshot, scanInbox, authorizeApplication, authorizeAutomaticApplication, recordApplied, cancelApplication, recordRejected, commandResult, invalidate })
 }
 
 module.exports = { createFileBridgeService }
