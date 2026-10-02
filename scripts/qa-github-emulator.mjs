@@ -19,7 +19,7 @@ export async function createGitHubEmulator({ empty = false, protectedBranch = fa
   const env = { ...process.env, GIT_AUTHOR_NAME: 'Synthetic Owner', GIT_AUTHOR_EMAIL: 'owner@example.test', GIT_COMMITTER_NAME: 'Synthetic Owner', GIT_COMMITTER_EMAIL: 'owner@example.test' }
   const git = (args, input, extraEnv) => { const output = execFileSync('git', ['--git-dir=' + repository, ...args], { input, encoding: 'utf8', env: { ...env, ...extraEnv }, stdio: ['pipe', 'pipe', 'pipe'], maxBuffer: 2 * 1024 * 1024 }); return args[0] === 'cat-file' && args[1] === 'blob' ? output : output.trimEnd() }
   execFileSync('git', ['init', '--bare', '--initial-branch=main', repository], { stdio: 'ignore' })
-  const state = { protected: protectedBranch, fork: false, emailPermission: true, email: 'owner@example.test', drop: null, conflict: false, requests: [], pulls: [] }
+  const state = { protected: protectedBranch, fork: false, emailPermission: true, email: 'owner@example.test', authorEmail: 'owner@example.test', authorDate: null, private: false, drop: null, conflict: false, requests: [], pulls: [] }
   const head = (branch = 'main') => { if (!validBranch(branch)) refuse(); try { return git(['rev-parse', '--verify', 'refs/heads/' + branch]) } catch { return null } }
   const blob = content => git(['hash-object', '-w', '--stdin'], content)
   const tree = async (entries, base) => {
@@ -31,7 +31,7 @@ export async function createGitHubEmulator({ empty = false, protectedBranch = fa
       return git(['write-tree'], undefined, indexEnv)
     } finally { await fs.unlink(index).catch(() => {}) }
   }
-  const commit = (treeSha, parents, message) => { if (!validSha(treeSha) || !Array.isArray(parents) || parents.some(value => !validSha(value)) || parents.length > 2 || typeof message !== 'string' || message.length > 1000) refuse(); return git(['commit-tree', treeSha, ...parents.flatMap(value => ['-p', value]), '-m', message]) }
+  const commit = (treeSha, parents, message) => { if (!validSha(treeSha) || !Array.isArray(parents) || parents.some(value => !validSha(value)) || parents.length > 2 || typeof message !== 'string' || message.length > 1000) refuse(); return git(['commit-tree', treeSha, ...parents.flatMap(value => ['-p', value]), '-m', message],undefined,{GIT_AUTHOR_EMAIL:state.authorEmail,...(state.authorDate?{GIT_AUTHOR_DATE:state.authorDate}:{})}) }
   const commitInfo = sha => { if (!validSha(sha)) refuse(); let raw; try { raw = git(['show', '--no-patch', '--format=%H%x00%T%x00%P%x00%aI%x00%ae%x00%an', sha]).split('\0') } catch { refuse(404) }; return { sha: raw[0], tree: { sha: raw[1] }, parents: raw[2] ? raw[2].split(' ').map(sha => ({ sha })) : [], author: { date: raw[3], email: raw[4], name: raw[5] } } }
   const update = (branch, sha, old = head(branch)) => { if (!validBranch(branch) || !validSha(sha)) refuse(); try { git(['update-ref', 'refs/heads/' + branch, sha, old ?? '0'.repeat(40)]) } catch { refuse(409) } }
   const contents = (file, ref) => { if (!validPath(file) || !(validSha(ref) || validBranch(ref))) refuse(); let sha; try { sha = git(['rev-parse', ref + ':' + file]); if (git(['cat-file', '-t', sha]) !== 'blob') refuse(404) } catch { refuse(404) }; const text = git(['cat-file', 'blob', sha]); return { type: 'file', path: file, sha, encoding: 'base64', content: Buffer.from(text).toString('base64') } }
@@ -57,7 +57,7 @@ export async function createGitHubEmulator({ empty = false, protectedBranch = fa
         else if (body.action === 'close') { const pull = state.pulls.find(row => row.number === body.number); if (!pull) refuse(); pull.state = 'closed' }
         else refuse()
         value = { ok: true }
-      } else if (url.pathname === prefix && method === 'GET') value = { id: 123, name, owner: { id: 7, login: owner }, default_branch: 'main', visibility: 'public', private: false, fork: state.fork, size: head() ? 1 : 0, archived: false, disabled: false, permissions: { push: true } }
+      } else if (url.pathname === prefix && method === 'GET') value = { id: 123, name, owner: { id: 7, login: owner }, default_branch: 'main', visibility: state.private?'private':'public', private: state.private, fork: state.fork, size: head() ? 1 : 0, archived: false, disabled: false, permissions: { push: true } }
       else if (url.pathname.startsWith(prefix + '/')) {
         const suffix = decodeURIComponent(url.pathname.slice(prefix.length))
         if (suffix.startsWith('/branches/') && method === 'GET') { const branch = suffix.slice(10); if (!head(branch)) refuse(head() ? 404 : 409); value = { name: branch, protected: branch === 'main' && state.protected } }

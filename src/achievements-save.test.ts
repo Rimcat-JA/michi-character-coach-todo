@@ -45,6 +45,26 @@ async function fixture(points: number | null = 40) {
 }
 beforeEach(async () => { clearAchievementAuthority(); await db.delete(); await db.open() })
 describe('実績の本人承認・保存・送信状態', () => {
+  it('訂正は別承認を経て公開値を更新し、保留案とbackup復元が公開済み基準を変更しない', async () => {
+    const value=await fixture(100),id=await approveAchievementFromUI(await value.proposal(),nativeClick(),value.gateway.api),initial=await publishAchievementFromUI(id,nativeClick(),value.gateway.api)
+    await correctCompletion(value.taskId,60,'訂正');await reconcileAchievementExports()
+    const corrected=await prepareAchievementExport(value.completion.id,value.policyId,{...value.selection,correctionReason:'訂正'},value.gateway.api)
+    await approveAchievementFromUI(corrected,nativeClick(),value.gateway.api)
+    const approved=(await achievementDB.achievementExports.get(id))!
+    expect(approved).toMatchObject({state:'correction_approved',publishedSummary:{points:100},publishedReceipt:{commitSha:initial.commitSha}})
+    expect(restoreAchievementExports([approved])[0]).toMatchObject({state:'awaiting_review',approvedAt:null,publishedSummary:{points:100}})
+    // A replacement proposal before any remote attempt must still use the last public sequence 0.
+    await achievementDB.achievementExports.update(id,{state:'correction_pending'})
+    const replacement=await prepareAchievementExport(value.completion.id,value.policyId,{...value.selection,correctionReason:'訂正案を再確認'},value.gateway.api)
+    expect(replacement.row.manifest.publicationSequence).toBe(1);expect(replacement.row.manifest.previousFileBlobShas).toEqual(corrected.row.manifest.previousFileBlobShas)
+    await approveAchievementFromUI(replacement,nativeClick(),value.gateway.api)
+    value.gateway.api.publish=async request=>{const row=(await achievementDB.achievementExports.get(id))!;return {status:'published',receipt:{...request,repositoryId:42,publicId:row.publicId,commitSha:'c'.repeat(40),branch:'main',recordPath:row.recordPath,publishedAt:new Date().toISOString(),url:'https://github.com/test-owner/test-achievements/commit/'+'c'.repeat(40),contribution:'unverified',pullRequestUrl:null}}}
+    const before=await db.ledger.toArray(),published=await publishAchievementFromUI(id,nativeClick(),value.gateway.api)
+    expect(published).toMatchObject({state:'corrected',publishedSummary:{points:60},publishedReceipt:{commitSha:'c'.repeat(40)}});expect(await db.ledger.toArray()).toEqual(before)
+    await correctCompletion(value.taskId,50,'再訂正');await reconcileAchievementExports()
+    const next=await prepareAchievementExport(value.completion.id,value.policyId,{...value.selection,correctionReason:'再訂正'},value.gateway.api)
+    expect(next.row.manifest.publicationSequence).toBe(2);expect(next.row.manifest.previousCommitSha).toBe('c'.repeat(40))
+  })
   it('PRのreceiptは公開ポイントを確定せず、squash mergeの読取確認後にだけ公開receiptを保存する', async () => {
     const value=await fixture(100),id=await approveAchievementFromUI(await value.proposal(),nativeClick(),value.gateway.api)
     value.gateway.api.publish=async request=>{const row=(await achievementDB.achievementExports.get(id))!;return {status:'pr_pending',receipt:{...request,repositoryId:42,publicId:row.publicId,commitSha:'a'.repeat(40),branch:'michi-achievements/'+row.publicId,recordPath:row.recordPath,publishedAt:new Date().toISOString(),url:'https://github.com/test-owner/test-achievements/commit/'+'a'.repeat(40),contribution:'pr_pending',pullRequestUrl:'https://github.com/test-owner/test-achievements/pull/1'}}}

@@ -11,7 +11,7 @@ async function publication(remote) {
   const manifest = { version: 1, exportId: randomUUID(), publicId, ownerId: 'fixture-owner', datasetId: randomUUID(), repository, configurationId: randomUUID(), authorizationRevision: 1, completionDigest: 'a'.repeat(64), evidenceDigest: 'b'.repeat(64), policyDigest: 'c'.repeat(64), policyRevision: 1, policyEpoch: 1, sourcePermissionRevision: 0, preparedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 60000).toISOString(), recordDate: '2026-10-02', files: files.map(row=>({ ...row, path: row.path.replace('2026/10/', '2026/10/') })) }
   manifest.approvalDigest = githubPublicationDigest(manifest)
   const input = { manifest, completionId: randomUUID(), attemptId: randomUUID(), approvalDigest: manifest.approvalDigest }, journal = new Map()
-  const client = createGitHubPublisher({ token: remote.token, repository, fetchImpl: remote.fetchImpl, verifyAuthority: async()=>true, verifyHumanApproval: async()=>true, readAttempt: async(repo,id)=>journal.get(repo+':'+id), writeAttempt: async(value,exclusive)=>{const key=value.repositoryId+':'+value.completionId;if(exclusive&&journal.has(key))throw Error('reserved');journal.set(key,structuredClone(value))} })
+  const client = createGitHubPublisher({ token: remote.token, repository, fetchImpl: remote.fetchImpl, verifyAuthority: async()=>true, verifyHumanApproval: async()=>true, readAttempt: async(repo,id,sequence=0)=>journal.get(repo+':'+id+':'+sequence), writeAttempt: async(value,exclusive)=>{const key=value.repositoryId+':'+value.completionId+':'+(value.manifest.publicationSequence??0);if(exclusive&&journal.has(key))throw Error('reserved');journal.set(key,structuredClone(value))} })
   return { input, client, repository, journal }
 }
 test('real Git objects preserve base_tree and turn 100 points into exactly one reachable commit', async()=>{
@@ -60,4 +60,54 @@ test('lost PR creation response is read reconciled, never repeated; closing it w
   assert.equal((await client.reconcile(lookup)).code,'PR_CLOSED_UNMERGED');assert.equal(remote.head(),repository.headSha)
   assert.equal(remote.state.requests.filter(row=>row.method==='POST'&&row.path.endsWith('/pulls')).length,1)
  }finally{await remote.dispose()}
+})
+
+test('correction sequences each add one commit to the same record; lost response recovers and cancellation retains history',async()=>{
+ const remote=await createGitHubEmulator()
+ try{const {input,client,repository,journal}=await publication(remote);let result=await client.publish(input,{})
+  for(const [sequence,points] of [[1,80],[2,0]]){
+   const manifest={...input.manifest,publicationSequence:sequence,previousCommitSha:result.receipt.commitSha,previousFileBlobShas:result.receipt.files.filter(file=>file.path.startsWith('records/')).map(file=>({path:file.path,sha:file.sha})),files:input.manifest.files.map(file=>{const content=file.content.replaceAll('100',String(points));return {...file,content,sha256:githubContentHash(content)}})}
+   manifest.approvalDigest=githubPublicationDigest(manifest)
+   const correction={...input,manifest,approvalDigest:manifest.approvalDigest,attemptId:randomUUID()}
+   if(sequence===1)remote.state.drop='ref'
+   result=await client.publish(correction,{})
+   if(sequence===1){assert.equal(result.state,'unknown');result={receipt:await client.reconcile({completionId:input.completionId,exportId:manifest.exportId,attemptId:correction.attemptId,publicationSequence:sequence})}}
+   assert.ok(result.receipt);assert.equal(remote.git(['rev-list','--count',repository.headSha+'..'+remote.head()]),String(sequence+1))
+   assert.match(remote.git(['show',remote.head()+':'+manifest.files[0].path]),new RegExp(':'+points+'}'))
+  }
+  assert.equal(journal.size,3);assert.match(remote.git(['show',repository.headSha+'..main','--',input.manifest.files[0].path]),/100/)
+ }finally{await remote.dispose()}
+})
+test('correction cannot overwrite externally changed records or invent its previous private receipt',async()=>{
+ const remote=await createGitHubEmulator()
+ try{const {input,client}=await publication(remote),first=await client.publish(input,{})
+  const manifest={...input.manifest,publicationSequence:1,previousCommitSha:first.receipt.commitSha,previousFileBlobShas:first.receipt.files.filter(file=>file.path.startsWith('records/')).map(file=>({path:file.path,sha:file.sha}))}
+  manifest.approvalDigest=githubPublicationDigest(manifest)
+  await remote.externalCommit({[manifest.files[0].path]:'External record\n'})
+  const writes=remote.state.requests.filter(row=>row.method!=='GET').length
+  await assert.rejects(client.publish({...input,manifest,attemptId:randomUUID(),approvalDigest:manifest.approvalDigest},{}),/PREVIOUS_RECORD_CHANGED/)
+  assert.equal(remote.state.requests.filter(row=>row.method!=='GET').length,writes)
+  manifest.previousCommitSha='f'.repeat(40);manifest.approvalDigest=githubPublicationDigest(manifest)
+  await assert.rejects(client.publish({...input,manifest,attemptId:randomUUID(),approvalDigest:manifest.approvalDigest},{}),/CORRECTION_RECEIPT_MISSING/)
+ }finally{await remote.dispose()}
+})
+
+test('contribution conditions are read only: email, unavailable permission, noreply, fork, date and private settings never mean reflected',async()=>{
+ const {checkGitHubContribution}=createRequire(import.meta.url)('./github-contribution.cjs')
+ for(const kind of ['verified','email-mismatch','403','noreply','fork','old','private','pr']){
+  const remote=await createGitHubEmulator({protectedBranch:kind==='pr'})
+  try{
+   if(kind==='noreply')remote.state.authorEmail='7+owner@users.noreply.github.com'
+   if(kind==='old')remote.state.authorDate='2020-01-01T00:00:00Z'
+   const {input,client,repository,journal}=await publication(remote);await client.publish(input,{})
+   if(kind==='email-mismatch')remote.state.email='different@example.test'
+   if(['403','noreply'].includes(kind))remote.state.emailPermission=false
+   if(kind==='fork')remote.state.fork=true
+   if(kind==='private'){remote.state.private=true;repository.visibility='private'}
+   const before=remote.state.requests.filter(row=>row.method!=='GET').length,attempt=[...journal.values()][0]
+   const actual=await checkGitHubContribution({configuration:{repository,token:remote.token},attempt,fetchImpl:remote.fetchImpl})
+   assert.equal(actual.status,['verified','noreply'].includes(kind)?'conditions_met':['email-mismatch','fork','old'].includes(kind)?'conditions_not_met':kind==='pr'?'pr_pending':'conditions_unknown',kind)
+   assert.notEqual(actual.status,'reflected');assert.equal(remote.state.requests.filter(row=>row.method!=='GET').length,before)
+  }finally{await remote.dispose()}
+ }
 })

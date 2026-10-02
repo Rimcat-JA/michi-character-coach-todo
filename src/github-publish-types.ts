@@ -12,16 +12,20 @@ export type GitHubPublishManifest = {
   completionDigest: string; evidenceDigest: string; policyDigest: string; policyRevision: number
   policyEpoch: number; sourcePermissionRevision: number; preparedAt: string; expiresAt: string; recordDate: string
   files: GitHubPublishFile[]; approvalDigest: string
+  publicationSequence?: number; previousCommitSha?: string; previousFileBlobShas?: {path: string; sha: string}[]
 }
+export type GitHubContributionStatus = 'not_published' | 'pr_pending' | 'unverified' | 'conditions_met' | 'conditions_not_met' | 'conditions_unknown'
+export type GitHubContributionCheck = {status: GitHubContributionStatus; reasons: string[]; checkedAt: string}
 export type GitHubPublishRequest = { exportId: string; attemptId: string; approvalDigest: string }
 export type GitHubPublishReceipt = {
   exportId: string; attemptId: string; approvalDigest: string; repositoryId: number; publicId: string
   commitSha: string; branch: string; recordPath: string; publishedAt: string; url: string
-  contribution: 'pending' | 'unverified' | 'pr_pending'; pullRequestUrl: string | null
+  contribution: 'pending' | 'unverified' | 'pr_pending' | 'conditions_met' | 'conditions_not_met' | 'conditions_unknown'; pullRequestUrl: string | null
 }
 export type GitHubPublishResult = { status: 'published' | 'pr_pending'; receipt: GitHubPublishReceipt } | { status: 'unknown' | 'failed'; code: string }
 export type GitHubConfigurationInspection = { reference: string; digest: string; target: GitHubRepositoryTarget }
 export type GitHubAchievementsGateway = {
+  contribution?(input: {exportId: string}): Promise<GitHubContributionCheck>
   status(): Promise<GitHubGatewayStatus>
   /** Stored configuration only; makes no GitHub request. */
   storedStatus(): Promise<GitHubGatewayStatus>

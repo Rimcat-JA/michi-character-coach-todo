@@ -84,6 +84,7 @@ contextBridge.exposeInMainWorld('michiGitHubAchievements', {
   inspectConfiguration: request => githubPublishNativeCall('inspectConfiguration', 'configure', 'inspect', request),
   configure: request => githubPublishNativeCall('configure', 'configure', request?.reference, request),
   publish: request => githubPublishNativeCall('publish', 'approve', request?.exportId, request),
+  contribution: request => ipcRenderer.invoke('michi:githubpublish-contribution', request),
   reconcile: request => ipcRenderer.invoke('michi:githubpublish-reconcile', request),
   disconnect: () => githubPublishNativeCall('disconnect', 'configure', 'disconnect', undefined),
   recordReceipt: request => ipcRenderer.invoke('michi:githubpublish-recordReceipt', request),

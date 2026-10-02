@@ -27,7 +27,7 @@ function createGitHubPRPublisher({request,repository,writeAttempt,currentTarget,
   return receipt
  }
  async function publish(input,target){
-  const {manifest,completionId,attemptId,approvalDigest}=input,branch=`michi-achievements/${manifest.publicId}`
+  const {manifest,completionId,attemptId,approvalDigest}=input,branch=`michi-achievements/${manifest.publicId}${manifest.publicationSequence?'-r'+manifest.publicationSequence:''}`
   // A colliding branch belongs to someone else; never update or force it.
   try{await request('GET',`/git/ref/heads/${encodeURIComponent(branch)}`);fail('PUBLIC_BRANCH_ALREADY_EXISTS')}catch(error){if(error.status!==404)throw error}
   await unusedRecords(manifest,target)
