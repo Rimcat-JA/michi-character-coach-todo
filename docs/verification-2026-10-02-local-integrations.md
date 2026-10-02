@@ -39,3 +39,5 @@ Windows実画面へ合成SpeechRecognitionを差し込み、not-allowed/audio-ca
 AT-I03/I08は自動試験とWindows DEV・このPC内API/固定実行の範囲で確認。実Zapier/公開到達・OSアカウント分離・別端末transportは未確認/未提供。I02はnative activeTab手順と転送受信/送信者認証が残るため一部実装。K10は実ASR/マイク/Live2D未提供のため一部実装を維持。
 
 追加TTS停止試験はQA/CDP待機がタイムアウトして完了証跡を取れず、成功に数えていません。アプリ応答と応答本文は維持され、QA音声を取消して専用プロセス/receiverを終了しました。実音声停止の追加受入は未確認です。
+
+初回PR CIはUbuntu成功・Windowsの試験fixtureで失敗。一時TEMPの8.3表記をcanonical pathにしてprivate storeの厳格チェックを維持し、base64url秘密内のunderscoreを誤って分割する検査を43文字全体の検査へ修正。製品の認証/path拒否は緩和せず、両OSの最終headを再確認します。

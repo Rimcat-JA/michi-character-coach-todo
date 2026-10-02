@@ -19,7 +19,9 @@ test('reference signature vector, tampering, stale timestamp and exact event rep
   assert.equal(verify({rawBody:body,signature:signed,eventId:id}).status,409)
 })
 async function fixture(t,{transport,policy='explicit_online'}={}){
-  const root=await fs.mkdtemp(path.join(os.tmpdir(),'michi-webhook-test-')),key=crypto.randomBytes(32)
+  // Windows CI may expose TEMP through an 8.3 alias; the private store deliberately
+  // requires the canonical directory. Do not loosen its path/link checks for fixtures.
+  const root=await fs.mkdtemp(path.join(await fs.realpath(os.tmpdir()),'michi-webhook-test-')),key=crypto.randomBytes(32)
   t.after(async()=>{const resolved=await fs.realpath(root);assert.equal(path.dirname(resolved).toLowerCase(),(await fs.realpath(os.tmpdir())).toLowerCase());assert.ok(path.basename(resolved).startsWith('michi-webhook-test-'));await fs.rm(resolved,{recursive:true,force:true})})
   const safeStorage={isEncryptionAvailable:()=>true,encryptString:value=>{const iv=crypto.randomBytes(12),c=crypto.createCipheriv('aes-256-gcm',key,iv);return Buffer.concat([iv,c.update(value),c.final(),c.getAuthTag()])},decryptString:bytes=>{const c=crypto.createDecipheriv('aes-256-gcm',key,bytes.subarray(0,12));c.setAuthTag(bytes.subarray(-16));return Buffer.concat([c.update(bytes.subarray(12,-16)),c.final()]).toString()}}
   let clock=Number(stamp)*1000,mode=policy;const context={settings:{profileId:crypto.randomUUID(),datasetId:crypto.randomUUID(),aiEnabled:true,changePolicy:{epoch:0,sourcePermissionRevision:0,aiChangesEnabled:true}},datasetState:{mode:'active'}},outbox=[]

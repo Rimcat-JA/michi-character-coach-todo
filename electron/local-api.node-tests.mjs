@@ -54,7 +54,11 @@ test('real HTTP: readonly creates no journal; replay has one pending and one dur
   assert.equal((await f.post(write.token,{...c,payload:{title:'changed'}})).status,409)
   const read=await f.request(write.token);assert.equal(read.status,200);assert.equal(Object.hasOwn(read.body.data.items[0],'notes'),false)
   const saved=JSON.parse(f.safeStorage.decryptString(await fs.readFile(path.join(f.root,'config.bin'))))
-  assert.equal(JSON.stringify(saved).includes(write.token),false);assert.equal(JSON.stringify(saved).includes(write.token.split('_').at(-1)),false)
+  // A base64url secret itself may contain underscores. Check all 43 characters,
+  // rather than a random short suffix that can coincide with unrelated metadata.
+  const tokenSecret=write.token.slice(('michi_'+write.record.tokenId+'_').length)
+  assert.equal(tokenSecret.length,43)
+  assert.equal(JSON.stringify(saved).includes(write.token),false);assert.equal(JSON.stringify(saved).includes(tokenSecret),false)
   assert.equal((await restarted.pending()).length,0)
 }))
 
