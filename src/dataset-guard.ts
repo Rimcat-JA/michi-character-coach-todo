@@ -1,7 +1,7 @@
 import Dexie, { type DBCore, type DBCoreMutateRequest, type Middleware } from 'dexie'
 
 /** Business tables a frozen (moving) or read-only (moved away) dataset must not change. */
-export const GUARDED_TABLES = ['tasks', 'assessments', 'completions', 'ledger', 'routines', 'sessions', 'containers', 'checklistItems', 'labelGroups', 'labelDefinitions', 'savedTemplates', 'taskNotes', 'taskComments', 'taskAttachments', 'taskDependencies', 'planningBuckets', 'timeBlocks', 'calendarEvents', 'calendarRules', 'rollovers', 'themeRules', 'smartLists', 'focusSelections', 'habits', 'habitLogs', 'goals', 'goalCheckIns', 'trackerDefinitions', 'trackerEntries', 'dayNotes', 'pomodoroCycles', 'reviewRecords', 'tripBundles'] as const
+export const GUARDED_TABLES = ['tasks', 'assessments', 'completions', 'ledger', 'routines', 'sessions', 'containers', 'checklistItems', 'labelGroups', 'labelDefinitions', 'savedTemplates', 'taskNotes', 'taskComments', 'taskAttachments', 'taskDependencies', 'planningBuckets', 'timeBlocks', 'calendarEvents', 'calendarRules', 'rollovers', 'themeRules', 'smartLists', 'focusSelections', 'habits', 'habitLogs', 'goals', 'goalCheckIns', 'trackerDefinitions', 'trackerEntries', 'dayNotes', 'pomodoroCycles', 'reviewRecords', 'tripBundles', 'achievementPolicies', 'achievementEvidence', 'achievementExports'] as const
 export type DatasetMode = 'active' | 'frozen' | 'read_only'
 /** Device-local mode row. A dedicated store (not settings) so retention jobs that lock settings are never blocked by long task writes. */
 export type DatasetState = { id: 'main'; mode: DatasetMode; updatedAt: string; moveId: string | null }

@@ -16,6 +16,20 @@ function rowFor(manifest: GitHubPublishManifest, points = 40): AchievementExport
   return { id: manifest.exportId, ownerId: manifest.ownerId, datasetId: manifest.datasetId, repositoryId: 42, completionId: 'private-completion-id', taskId: 'private-task-id', publicId, revision: 1, state: 'committing', manifest, summary: { title: achievementTestSelection.title, body: achievementTestSelection.body, points, scoreMode: 'manual', completionAt: achievementTestTime, canceled: false }, selection: achievementTestSelection, publishedSummary: null, evidenceRefs: [{id:'evidence-id',revision:1,publicRevision:1,originalSha256:'f'.repeat(64),publicSha256:'e'.repeat(64)}], approvedAt: achievementTestTime, approvedBy: manifest.ownerId, attemptId: 'attempt-id', attemptStartedAt: achievementTestTime, attemptCount: 1, commitSha: null, branch: null, recordPath: `records/2026/10/${publicId}.json`, publishedAt: null, url: null, pullRequestUrl: null, contribution: 'not_published', failureCode: null, previousCommitSha: null, history: [], createdAt: achievementTestTime, updatedAt: achievementTestTime }
 }
 describe('本人証拠付き実績の評価と公開文章', () => {
+  it('訂正と取消しの全ファイルがnative側で同じbytesに再構築され、公開元の情報を承認hashへ含める', async () => {
+    const original=await preview(await achievementTestFacts(100)),previous={...rowFor(original,100),state:'published' as const,commitSha:'b'.repeat(40)}
+    for(const canceled of [false,true]){
+      const facts=await achievementTestFacts(100);facts.completion.netPoints=canceled?0:80;facts.ledger.push({...facts.ledger[0],id:'adjustment',kind:canceled?'reverse':'adjust',delta:canceled?-100:-20})
+      if(canceled){facts.completion.currentAt=null;facts.task.status='open'}
+      const selection={...achievementTestSelection,correctionReason:canceled?'完了取消':'本人の訂正'}
+      const manifest=await buildAchievementManifest({facts,selection,gateway:achievementTestGateway,exportId:original.exportId,publicId,policyEpoch:0,sourcePermissionRevision:0,previous,published:[previous],preparedAt:achievementTestTime,expiresAt:'2026-10-01T03:15:00.000Z'})
+      const row={...rowFor(manifest,canceled?0:80),selection,previousCommitSha:previous.commitSha,summary:{...rowFor(manifest).summary,points:canceled?0:80,canceled},evidenceRefs:facts.evidence.map(item=>({id:item.id,revision:item.revision,publicRevision:item.publicRevision,originalSha256:item.origin.sha256,publicSha256:item.publicSha256}))}
+      const nativeFacts={...facts,row,published:[previous],attachments:[{id:'private-attachment-id',taskId:facts.task.id,ownerId:facts.settings.profileId,sha256:facts.evidence[0].origin.sha256,actualSha256:facts.evidence[0].origin.sha256,size:facts.evidence[0].origin.size,actualSize:facts.evidence[0].origin.size,mediaType:'text/plain'}],notes:[]}
+      expect(validateGitHubPublicationFacts(nativeFacts,{id:achievementTestGateway.configurationId,revision:1,ownerId:facts.settings.profileId,datasetId:facts.settings.datasetId,repository:achievementTestGateway.repository}).completionId).toBe(facts.completion.id)
+      expect(manifest.publicationSequence).toBe(1);expect(manifest.previousCommitSha).toBe(previous.commitSha);expect(manifest.previousFileBlobShas).toHaveLength(2)
+      const record=JSON.parse(manifest.files[0].content);expect(record.correction.canceled).toBe(canceled);expect(record.points).toBe(canceled?0:80)
+    }
+  })
   it('40pt既定で原本証拠がなければ待機し、未知は0pt扱いしない', async () => {
     const facts = await achievementTestFacts()
     facts.evidence = []

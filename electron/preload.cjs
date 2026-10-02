@@ -78,9 +78,13 @@ function githubPublishNativeCall(method, kind, reference, request) {
 contextBridge.exposeInMainWorld('michiGitHubAchievements', {
   status: () => ipcRenderer.invoke('michi:githubpublish-status'),
   storedStatus: () => ipcRenderer.invoke('michi:githubpublish-storedStatus'),
+  prepareInitialization: () => ipcRenderer.invoke('michi:githubpublish-prepareInitialization'),
+  initializeEmpty: request => githubPublishNativeCall('initializeEmpty', 'configure', request?.reference, request),
+  reconcileInitialization: () => ipcRenderer.invoke('michi:githubpublish-reconcileInitialization'),
   inspectConfiguration: request => githubPublishNativeCall('inspectConfiguration', 'configure', 'inspect', request),
   configure: request => githubPublishNativeCall('configure', 'configure', request?.reference, request),
   publish: request => githubPublishNativeCall('publish', 'approve', request?.exportId, request),
+  contribution: request => ipcRenderer.invoke('michi:githubpublish-contribution', request),
   reconcile: request => ipcRenderer.invoke('michi:githubpublish-reconcile', request),
   disconnect: () => githubPublishNativeCall('disconnect', 'configure', 'disconnect', undefined),
   recordReceipt: request => ipcRenderer.invoke('michi:githubpublish-recordReceipt', request),

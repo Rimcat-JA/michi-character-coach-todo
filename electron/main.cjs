@@ -15,6 +15,7 @@ const { installLocalActionIPC } = require('./local-action-ipc.cjs')
 const { installGitHubPublishIPC } = require('./github-publish-ipc.cjs')
 const { readAppDatabase, readNotificationContext } = require('./app-db-reader.cjs')
 const { createNetworkGateway, policyFromSettings } = require('./network-gateway.cjs')
+const { githubQAFetch } = require('./github-qa.cjs')
 const { createOSNotificationGuard, notificationTextAllowed } = require('./notification-delivery.cjs')
 const { createTrayMode } = require('./tray-mode.cjs')
 const { createAILocks } = require('./ai-locks.cjs')
@@ -350,7 +351,8 @@ if (hasInstanceLock) app.whenReady().then(() => {
   })
   win.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
   win.webContents.on('will-navigate', (event, url) => { if (!url.startsWith('michi://app/')) event.preventDefault() })
-  networkGateway = createNetworkGateway({ getPolicy: async () => policyFromSettings(await readAppDatabase(win, 'settings', 'main'), await legacyOnlineConfigured()) })
+  const qaGitHub = githubQAFetch({ app })
+  networkGateway = createNetworkGateway({ fetchImpl: qaGitHub.fetchImpl, getPolicy: async () => policyFromSettings(await readAppDatabase(win, 'settings', 'main'), await legacyOnlineConfigured()) })
   installFolderWatchIPC({ ipcMain, dialog, win, assertFrame: assertAppFrame, readDatabase: readAppDatabase })
   ipcMain.handle('michi:network-status', async event => {
     assertAppFrame(event)
@@ -360,7 +362,7 @@ if (hasInstanceLock) app.whenReady().then(() => {
   win.loadURL('michi://app/index.html')
   installFileBridgeIPC({ ipcMain, win, app, safeStorage })
   installLocalActionIPC({ ipcMain, win, app, safeStorage })
-  installGitHubPublishIPC({ ipcMain, win, app, safeStorage, fetchImpl: (url, init) => egress().fetch('github', url, init) })
+  installGitHubPublishIPC({ ipcMain, win, app, safeStorage, qaEmulator: qaGitHub.enabled, fetchImpl: (url, init) => egress().fetch('github', url, init) })
   ipcMain.handle('michi:open-top-of-mind', event => {
     assertAppFrame(event)
     if (miniWin && !miniWin.isDestroyed()) { miniWin.show(); miniWin.focus(); return true }

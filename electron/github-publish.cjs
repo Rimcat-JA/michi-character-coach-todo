@@ -12,11 +12,11 @@ const contentHash=value=>crypto.createHash('sha256').update(value,'utf8').digest
 const blobSha=(content,algorithm='sha1')=>{const data=Buffer.from(content,'utf8');return crypto.createHash(algorithm).update(Buffer.from(`blob ${data.length}\0`)).update(data).digest('hex')}
 const label=value=>typeof value==='string'&&/^[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,98}[A-Za-z0-9])?$/.test(value)&&!value.includes('..')
 function validBranch(value){return typeof value==='string'&&value.length<=200&&/^[A-Za-z0-9][A-Za-z0-9_./-]*$/.test(value)&&!value.includes('..')&&!value.includes('//')&&!value.endsWith('/')&&!value.endsWith('.')&&!value.endsWith('.lock')&&!value.split('/').some(part=>part.startsWith('.'))}
-function validateRepository(value){
-  if(!exact(value,['repositoryId','owner','name','defaultBranch','visibility','headSha','protected','empty','ownerVerified','canPush','observedAt'])||!Number.isSafeInteger(value.repositoryId)||value.repositoryId<1||!label(value.owner)||!label(value.name)||!validBranch(value.defaultBranch)||!['public','private'].includes(value.visibility)||!gitSha(value.headSha)||typeof value.protected!=='boolean'||value.empty!==false||value.ownerVerified!==true||value.canPush!==true||!timestamp(value.observedAt))fail('REPOSITORY_INVALID')
+function validateRepository(value,{allowEmpty=false}={}){
+  if(!exact(value,['repositoryId','owner','name','defaultBranch','visibility','headSha','protected','empty','ownerVerified','canPush','observedAt'])||!Number.isSafeInteger(value.repositoryId)||value.repositoryId<1||!label(value.owner)||!label(value.name)||!validBranch(value.defaultBranch)||!['public','private'].includes(value.visibility)||!(allowEmpty&&value.empty===true?value.headSha===null:gitSha(value.headSha)&&value.empty===false)||typeof value.protected!=='boolean'||value.ownerVerified!==true||value.canPush!==true||!timestamp(value.observedAt))fail('REPOSITORY_INVALID')
 }
 function validateManifest(value){
-  if(!exact(value,['version','exportId','repository','configurationId','authorizationRevision','completionDigest','evidenceDigest','policyDigest','policyRevision','ownerId','datasetId','policyEpoch','sourcePermissionRevision','preparedAt','expiresAt','publicId','recordDate','files','approvalDigest'])||value.version!==1||!uuid(value.exportId)||!uuid(value.publicId)||!uuid(value.configurationId)||typeof value.ownerId!=='string'||!value.ownerId||value.ownerId.length>200||!uuid(value.datasetId)||['completionDigest','evidenceDigest','policyDigest','approvalDigest'].some(key=>!sha256(value[key]))||['policyRevision','policyEpoch','sourcePermissionRevision','authorizationRevision'].some(key=>!Number.isSafeInteger(value[key])||value[key]<0)||!timestamp(value.preparedAt)||!timestamp(value.expiresAt)||Date.parse(value.expiresAt)<=Date.parse(value.preparedAt)||Date.parse(value.expiresAt)-Date.parse(value.preparedAt)>86400000||typeof value.recordDate!=='string'||!/^\d{4}-\d{2}-\d{2}$/.test(value.recordDate)||!Number.isFinite(Date.parse(value.recordDate))||new Date(value.recordDate).toISOString().slice(0,10)!==value.recordDate||!Array.isArray(value.files)||value.files.length<2||value.files.length>12)fail('MANIFEST_INVALID')
+  if(!exact(value,['version','exportId','repository','configurationId','authorizationRevision','completionDigest','evidenceDigest','policyDigest','policyRevision','ownerId','datasetId','policyEpoch','sourcePermissionRevision','preparedAt','expiresAt','publicId','recordDate','files','approvalDigest',...(plain(value)&&Object.hasOwn(value,'publicationSequence')?['publicationSequence','previousCommitSha','previousFileBlobShas']:[])])||value.version!==1||!uuid(value.exportId)||!uuid(value.publicId)||!uuid(value.configurationId)||typeof value.ownerId!=='string'||!value.ownerId||value.ownerId.length>200||!uuid(value.datasetId)||['completionDigest','evidenceDigest','policyDigest','approvalDigest'].some(key=>!sha256(value[key]))||['policyRevision','policyEpoch','sourcePermissionRevision','authorizationRevision'].some(key=>!Number.isSafeInteger(value[key])||value[key]<0)||!timestamp(value.preparedAt)||!timestamp(value.expiresAt)||Date.parse(value.expiresAt)<=Date.parse(value.preparedAt)||Date.parse(value.expiresAt)-Date.parse(value.preparedAt)>86400000||typeof value.recordDate!=='string'||!/^\d{4}-\d{2}-\d{2}$/.test(value.recordDate)||!Number.isFinite(Date.parse(value.recordDate))||new Date(value.recordDate).toISOString().slice(0,10)!==value.recordDate||!Array.isArray(value.files)||value.files.length<2||value.files.length>12)fail('MANIFEST_INVALID')
   if(value.approvalDigest!==publicationDigest(value))fail('DIGEST_INVALID')
   validateRepository(value.repository)
   const base=`records/${value.recordDate.slice(0,4)}/${value.recordDate.slice(5,7)}/${value.publicId}`,paths=new Set();let size=0,records=0
@@ -32,6 +32,7 @@ function validateManifest(value){
     if(file.path.endsWith('.svg')&&/<(?:script|foreignObject|image|use)\b|(?:href|on\w+)\s*=|url\s*\(/i.test(file.content))fail('UNSAFE_PUBLIC_ASSET')
   }
   if(records!==2||size>250000)fail('FILE_BUDGET')
+  if(Object.hasOwn(value,'publicationSequence')){const previous=value.previousFileBlobShas,recordPaths=value.files.filter(file=>file.kind==='record').map(file=>file.path);if(!Number.isSafeInteger(value.publicationSequence)||value.publicationSequence<1||value.publicationSequence>1000||!gitSha(value.previousCommitSha)||!Array.isArray(previous)||previous.length!==2||new Set(previous.map(row=>row?.path)).size!==2||previous.some(row=>!exact(row,['path','sha'])||!recordPaths.includes(row.path)||!gitSha(row.sha)))fail('CORRECTION_INVALID')}
 }
 function publicationDigest(value){const unsigned={...value};delete unsigned.approvalDigest;return digest(unsigned)}
 
@@ -41,8 +42,9 @@ function createGitHubHTTP({token,owner,name,fetchImpl=globalThis.fetch}){
   const prefix=`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}`
   return async(method,suffix='',body)=>{
     const comparison=typeof suffix==='string'&&/^\/compare\/(?:[a-f0-9]{40}|[a-f0-9]{64})\.\.\.(?:[a-f0-9]{40}|[a-f0-9]{64})\?per_page=1$/.test(suffix)
-    if(!['GET','POST','PATCH'].includes(method)||typeof suffix!=='string'||suffix.includes('://')||suffix.includes('..')&&!comparison||suffix.includes('#')||suffix.includes('\\')||!/^\/(?:user|repos\/)/.test(suffix==='/user'?suffix:prefix+suffix))fail('ENDPOINT_INVALID')
-    const url=`https://api.github.com${suffix==='/user'?'/user':prefix+suffix}`
+    const userEndpoint=suffix==='/user'||suffix==='/user/emails'
+    if(!['GET','POST','PATCH','PUT'].includes(method)||method==='PUT'&&suffix!=='/contents/README.md'||userEndpoint&&method!=='GET'||typeof suffix!=='string'||suffix.includes('://')||suffix.includes('..')&&!comparison||suffix.includes('#')||suffix.includes('\\')||!/^\/(?:user|repos\/)/.test(userEndpoint?suffix:prefix+suffix))fail('ENDPOINT_INVALID')
+    const url=`https://api.github.com${userEndpoint?suffix:prefix+suffix}`
     const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),15000)
     try{
       let response
@@ -62,7 +64,12 @@ async function inspectGitHubRepository({token,owner,name,branch,visibility},fetc
   if(!validBranch(branch)||!['public','private'].includes(visibility))fail('CONNECTION_INVALID')
   const request=createGitHubHTTP({token,owner,name,fetchImpl}),user=await request('GET','/user'),repo=await request('GET')
   if(!plain(user)||!Number.isSafeInteger(user.id)||!label(user.login)||!plain(repo)||!Number.isSafeInteger(repo.id)||repo.owner?.id!==user.id||repo.owner?.login?.toLowerCase()!==owner.toLowerCase()||user.login.toLowerCase()!==owner.toLowerCase()||repo.name?.toLowerCase()!==name.toLowerCase()||repo.default_branch!==branch||repo.visibility!==visibility||repo.private!==(visibility==='private')||repo.archived||repo.disabled||repo.permissions?.push!==true)fail('REPOSITORY_NOT_OWNED_OR_WRITABLE')
-  const detail=await request('GET',`/branches/${encodeURIComponent(branch)}`),ref=await request('GET',`/git/ref/heads/${encodeURIComponent(branch)}`)
+  let detail,ref
+  try{detail=await request('GET',`/branches/${encodeURIComponent(branch)}`);ref=await request('GET',`/git/ref/heads/${encodeURIComponent(branch)}`)}catch(error){
+    if(repo.size!==0||![404,409].includes(error.status))throw error
+    const target={repositoryId:repo.id,owner:repo.owner.login,name:repo.name,defaultBranch:branch,visibility,headSha:null,protected:false,empty:true,ownerVerified:true,canPush:true,observedAt:new Date(now()).toISOString()}
+    validateRepository(target,{allowEmpty:true});return target
+  }
   if(detail.name!==branch||typeof detail.protected!=='boolean'||ref.ref!==`refs/heads/${branch}`||ref.object?.type!=='commit'||!gitSha(ref.object.sha))fail('BRANCH_INVALID')
   return {repositoryId:repo.id,owner:repo.owner.login,name:repo.name,defaultBranch:branch,visibility,headSha:ref.object.sha,protected:detail.protected,empty:false,ownerVerified:true,canPush:true,observedAt:new Date(now()).toISOString()}
 }
@@ -74,8 +81,9 @@ function createGitHubPublisher({token,repository,readAttempt,writeAttempt,verify
   const sameTarget=target=>target.repositoryId===repository.repositoryId&&target.owner===repository.owner&&target.name===repository.name&&target.defaultBranch===repository.defaultBranch&&target.visibility===repository.visibility
   async function currentTarget(){const target=await inspectGitHubRepository({token,owner:repository.owner,name:repository.name,branch:repository.defaultBranch,visibility:repository.visibility},fetchImpl,now);if(!sameTarget(target))fail('REPOSITORY_CHANGED');return target}
   async function authority(manifest){if(Date.parse(manifest.expiresAt)<=now()||await verifyAuthority(manifest)!==true)fail('AUTHORITY_CHANGED')}
-  async function unusedRecords(manifest,target){for(const file of manifest.files.filter(file=>file.kind==='record')){try{await request('GET',`/contents/${file.path.split('/').map(encodeURIComponent).join('/')}?ref=${encodeURIComponent(target.headSha)}`);fail('PUBLIC_RECORD_ALREADY_EXISTS')}catch(error){if(error.status!==404)throw error}}}
+  async function unusedRecords(manifest,target){for(const file of manifest.files.filter(file=>file.kind==='record')){if(manifest.publicationSequence){const actual=await request('GET',`/contents/${file.path.split('/').map(encodeURIComponent).join('/')}?ref=${target.headSha}`),expected=manifest.previousFileBlobShas.find(row=>row.path===file.path);if(actual.type!=='file'||actual.path!==file.path||actual.sha!==expected.sha)fail('PREVIOUS_RECORD_CHANGED')}else try{await request('GET',`/contents/${file.path.split('/').map(encodeURIComponent).join('/')}?ref=${encodeURIComponent(target.headSha)}`);fail('PUBLIC_RECORD_ALREADY_EXISTS')}catch(error){if(error.status!==404)throw error}}}
   async function reconcileAttempt(attempt){
+    if(attempt?.pullRequestBranch)return prPublisher().reconcile(attempt)
     if(!attempt||!gitSha(attempt.commitSha))return null
     const manifest=attempt.manifest,target=await currentTarget(),commit=await request('GET',`/git/commits/${attempt.commitSha}`)
     if(commit.sha!==attempt.commitSha||commit.tree?.sha!==attempt.treeSha||!Array.isArray(commit.parents)||commit.parents.length!==1||commit.parents[0].sha!==attempt.parentSha)fail('COMMIT_MISMATCH')
@@ -84,19 +92,19 @@ function createGitHubPublisher({token,repository,readAttempt,writeAttempt,verify
     for(const file of manifest.files){const expected=blobSha(file.content,attempt.commitSha.length===64?'sha256':'sha1'),record=await request('GET',`/contents/${file.path.split('/').map(encodeURIComponent).join('/')}?ref=${encodeURIComponent(attempt.commitSha)}`);if(record.type!=='file'||record.path!==file.path||record.sha!==expected)fail('RECORD_MISMATCH');if(file.kind==='record'||file.kind==='evidence'){const current=await request('GET',`/contents/${file.path.split('/').map(encodeURIComponent).join('/')}?ref=${encodeURIComponent(target.headSha)}`);if(current.type!=='file'||current.path!==file.path||current.sha!==expected)fail('CURRENT_RECORD_MISMATCH')}files.push({path:file.path,sha:record.sha,sha256:file.sha256})}
     return {version:1,exportId:manifest.exportId,attemptId:attempt.attemptId,approvalDigest:attempt.approvalDigest,repositoryId:repository.repositoryId,owner:repository.owner,name:repository.name,branch:repository.defaultBranch,visibility:repository.visibility,publicId:manifest.publicId,commitSha:attempt.commitSha,headSha:target.headSha,files,verifiedAt:new Date(now()).toISOString(),contributionGraph:'not_verified'}
   }
-  async function reconcile({completionId,exportId,attemptId}){
+  async function reconcile({completionId,exportId,attemptId,publicationSequence=0}){
     if(!uuid(completionId)||!uuid(exportId)||!uuid(attemptId))fail('INVALID_INPUT')
-    const attempt=await readAttempt(repository.repositoryId,completionId)
+    const attempt=await readAttempt(repository.repositoryId,completionId,publicationSequence)
     if(!attempt||attempt.manifest.exportId!==exportId||attempt.attemptId!==attemptId)fail('ATTEMPT_MISSING')
     if(attempt.state==='published')return structuredClone(attempt.receipt)
     const receipt=await reconcileAttempt(attempt)
-    if(receipt){await writeAttempt({...attempt,state:'published',receipt},false);return receipt}
+    if(receipt){if(!attempt.pullRequestBranch)await writeAttempt({...attempt,state:'published',receipt},false);return receipt}
     return null
   }
   async function publish({manifest,completionId,attemptId,approvalDigest},proof){
     validateManifest(manifest)
     if(!uuid(completionId)||!uuid(attemptId)||!sameTarget(manifest.repository)||approvalDigest!==publicationDigest(manifest))fail('PUBLICATION_INVALID')
-    const key=`${repository.repositoryId}:${completionId}`
+    const key=`${repository.repositoryId}:${completionId}:${manifest.publicationSequence??0}`
     if(flights.has(key))fail('PUBLICATION_IN_FLIGHT')
     const work=publishOnce({manifest:structuredClone(manifest),completionId,attemptId,approvalDigest},proof)
     flights.set(key,work)
@@ -106,15 +114,16 @@ function createGitHubPublisher({token,repository,readAttempt,writeAttempt,verify
     const {manifest,completionId,attemptId,approvalDigest}=input
     if(await verifyHumanApproval({approvalDigest,exportId:manifest.exportId,attemptId,repositoryId:repository.repositoryId,ownerId:manifest.ownerId,datasetId:manifest.datasetId},proof)!==true)fail('HUMAN_APPROVAL_REQUIRED')
     await authority(manifest)
-    const prior=await readAttempt(repository.repositoryId,completionId)
+    const sequence=manifest.publicationSequence??0,prior=await readAttempt(repository.repositoryId,completionId,sequence)
     if(prior){if(prior.approvalDigest!==approvalDigest||prior.manifest.exportId!==manifest.exportId)fail('COMPLETION_ALREADY_RESERVED');if(prior.state==='published')return {state:'published',receipt:structuredClone(prior.receipt)};fail('ATTEMPT_ALREADY_USED')}
-    let target=await currentTarget()
-    if(target.protected)return {state:'pr_pending',receipt:null,reason:'PROTECTED_BRANCH_REQUIRES_SEPARATE_PR'}
-    await unusedRecords(manifest,target)
+    if(sequence){const previous=await readAttempt(repository.repositoryId,completionId,sequence-1);if(previous?.state!=='published'||previous.receipt?.commitSha!==manifest.previousCommitSha||previous.manifest.exportId!==manifest.exportId||previous.manifest.publicId!==manifest.publicId||previous.manifest.ownerId!==manifest.ownerId||previous.manifest.datasetId!==manifest.datasetId||previous.manifest.recordDate!==manifest.recordDate||manifest.previousFileBlobShas.some(file=>!previous.receipt.files.some(row=>row.path===file.path&&row.sha===file.sha)))fail('CORRECTION_RECEIPT_MISSING')}
+    let target;try{target=await currentTarget()}catch(error){error.beforeReservation=true;throw error}
+    if(target.protected)return prPublisher().publish(input,target)
+    try{await unusedRecords(manifest,target)}catch(error){error.beforeReservation=true;throw error}
     let attempt={version:1,repositoryId:repository.repositoryId,completionId,attemptId,approvalDigest,manifest,state:'preparing',parentSha:null,treeSha:null,commitSha:null,receipt:null,startedAt:new Date(now()).toISOString(),phase:'reserved'}
     await writeAttempt(attempt,true)
     const save=async patch=>{attempt={...attempt,...patch};await writeAttempt(attempt,false)}
-    async function mutation(method,suffix,body){await authority(manifest);if((await currentTarget()).protected)fail('PROTECTED_BRANCH_CHANGED');await save({phase:suffix});await authority(manifest);return request(method,suffix,body)}
+    async function mutation(method,suffix,body){await authority(manifest);const fresh=await currentTarget();if(fresh.protected)fail('PROTECTED_BRANCH_CHANGED');if(method==='PATCH')await unusedRecords(manifest,fresh);await save({phase:suffix});await authority(manifest);return request(method,suffix,body)}
     try{
       const blobs=[]
       for(const file of manifest.files){const value=await mutation('POST','/git/blobs',{content:file.content,encoding:'utf-8'}),expected=blobSha(file.content,target.headSha.length===64?'sha256':'sha1');if(value.sha!==expected)fail('BLOB_MISMATCH');blobs.push({path:file.path,mode:'100644',type:'blob',sha:expected})}
@@ -139,6 +148,7 @@ function createGitHubPublisher({token,repository,readAttempt,writeAttempt,verify
       fail('CONFLICT_LIMIT')
     }catch(error){await save({state:'unknown'}).catch(()=>{});return {state:'unknown',receipt:null,reason:typeof error.code==='string'&&/^[A-Z0-9_]{1,60}$/.test(error.code)?error.code:'PUBLICATION_UNKNOWN'}}
   }
+  function prPublisher(){return require('./github-pr-publish.cjs').createGitHubPRPublisher({request,repository,writeAttempt,currentTarget,authority,unusedRecords,now})}
   return Object.freeze({publish,reconcile})
 }
 module.exports={createGitHubPublisher,inspectGitHubRepository,createGitHubHTTP,validateGitHubPublicationManifest:validateManifest,validateGitHubRepository:validateRepository,githubPublicationDigest:publicationDigest,githubValueDigest:digest,canonicalGitHubJSON:canonical,githubContentHash:contentHash,githubBlobSha:blobSha}
