@@ -202,8 +202,6 @@ async function proposeTaskSplitWithOpenRouter({ model, message, task }) {
   if (typeof answer !== 'string' || !answer.trim() || answer.length > 20000) throw new Error('分割案を読めませんでした。元のタスクと相談文は残っています')
   return answer.trim()
 }
-  return answer.trim()
-}
 
 async function proposeRoutineWithOpenRouter(request) {
   const messages = routineAssistMessages(request)

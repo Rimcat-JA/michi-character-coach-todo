@@ -43,6 +43,9 @@ describe('N08 「さっきの変更を戻して」（コーチ経由の直前Cha
     // Both rows link to their own original audit, so the same change is not offered twice.
     const links = (await db.audits.toArray()).map(audit => audit.operation === 'changeset.update' ? JSON.parse(audit.detail) : null).filter(detail => detail?.undoOf).map(detail => detail.undoOf).sort()
     expect(links).toEqual(latest.map(fact => fact.auditId).sort())
+    // Each undo row carries its own S21 entrance/basis/commandId (undo:<own original>), not the first row's id.
+    const undoRows = (await db.audits.toArray()).map(audit => audit.operation === 'changeset.update' ? JSON.parse(audit.detail) : null).filter(detail => detail?.undoOf)
+    for (const row of undoRows) expect(row).toMatchObject({ entrance: 'ui_human', basis: 'app_instruction', commandId: `undo:${row.undoOf}` })
     expect(await prepareUndoFromAudits(latest.map(fact => fact.auditId), owner)).toMatchObject({ status: 'already_undone' })
     expect(latestCoachChange(await db.audits.toArray()).map(fact => fact.changeSetId)).toEqual(latest.map(fact => fact.changeSetId))
   })
