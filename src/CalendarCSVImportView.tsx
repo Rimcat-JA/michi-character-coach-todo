@@ -8,6 +8,8 @@ import { calendarCSVRetentionUntil, readCalendarCSVFile } from './calendar-csv-v
 import './CalendarCSVImportView.css'
 import CalendarCSVMappingStep from './CalendarCSVMappingStep'
 import type { CSVMappingProfile } from './calendar-csv-mapping'
+import { extractCalendarDocument, tableCSVBytes, tableEvidence, type ScheduleDocumentExtraction, type ScheduleDocumentTable } from './calendar-document-import'
+import CalendarDocumentPreview from './CalendarDocumentPreview'
 
 type Prepared = Awaited<ReturnType<typeof prepareCalendarCSVImport>>
 type Selection = { kind: 'calendar' | 'roster'; contextName: string; bindingId: string; personRef: string | null; calendarName: string; activityName: string | null; timezone: string; feedId: string; title: string; fromDate: string; toDate: string; retentionUntil: string }
@@ -60,6 +62,7 @@ export default function CalendarCSVImportView({ state, settings, onApplied }: Pr
   const [fromDate, setFromDate] = useState(''), [toDate, setToDate] = useState(''), [retention, setRetention] = useState('')
   const [fileName, setFileName] = useState(''), [bytes, setBytes] = useState<Uint8Array | null>(null)
   const [mappingMode, setMappingMode] = useState(false), [mappingProfile, setMappingProfile] = useState<CSVMappingProfile | null>(null), [profileChangeConfirmed, setProfileChangeConfirmed] = useState(false), [newerFileConfirmed, setNewerFileConfirmed] = useState(false)
+  const [documentInput, setDocumentInput] = useState<{ bytes: Uint8Array; extraction: ScheduleDocumentExtraction; table: ScheduleDocumentTable } | null>(null), [yTolerance, setYTolerance] = useState(2), [xGap, setXGap] = useState(12)
   const [savedPrepared, setPrepared] = useState<Prepared | null>(null), [selection, setSelection] = useState<Selection | null>(null), [proofSignature, setProofSignature] = useState('')
   const [checked, setChecked] = useState(false), [busy, setBusy] = useState(false), [notice, setNotice] = useState('')
   const [retireId, setRetireId] = useState(''), [retirement, setRetirement] = useState<CalendarConfigurationProposal | null>(null), [retireChecked, setRetireChecked] = useState(false), [eraseOriginals, setEraseOriginals] = useState(false)
@@ -94,7 +97,7 @@ export default function CalendarCSVImportView({ state, settings, onApplied }: Pr
       const remaining = until - Date.now()
       if (remaining > 0) { timer = setTimeout(schedule, Math.min(remaining, 2147483647)); return }
       revoke(); setPrepared(null); setChecked(false)
-      if (Date.parse(selection.retentionUntil) <= Date.now()) { setBytes(null); setFileName(''); setNotice('原文保持期限に達したため選択ファイルを解放しました。期限を確認してファイルを選び直してください。') }
+      if (Date.parse(selection.retentionUntil) <= Date.now()) { setBytes(null); setFileName(''); setDocumentInput(null); setNotice('原文保持期限に達したため選択ファイルを解放しました。期限を確認してファイルを選び直してください。') }
       else setNotice('確認案の期限が切れました。入力とファイルを確認して候補を作り直してください。')
     }
     schedule()
@@ -103,8 +106,16 @@ export default function CalendarCSVImportView({ state, settings, onApplied }: Pr
   function changed(action?: () => void) { revoke(); action?.(); setPrepared(null); setSelection(null); setProofSignature(''); setChecked(false); setNotice('') }
   function resetFeed() { setFeedMode(''); setSourceId(''); setFeedId(''); setTitle(''); setMappingProfile(null); setProfileChangeConfirmed(false); setNewerFileConfirmed(false) }
   async function readFile(file: File) {
-    changed(() => { setFileName(file.name); setBytes(null) }); const token = ++sequence.current; setBusy(true)
-    try { const next = await readCalendarCSVFile(file, mappingMode ? 'undecided' : 'utf-8'); if (token !== sequence.current) throw new Error('読取中に対象や設定が変わりました。ファイルを選び直してください。'); setBytes(next); setNotice('ファイルを端末内で読みました。対象と期間を選んで確認案を作ってください。') }
+    changed(() => { setFileName(file.name); setBytes(null); setDocumentInput(null) }); const token = ++sequence.current; setBusy(true)
+    try {
+      if (/\.(pdf|xlsx)$/i.test(file.name)) {
+        const result = await extractCalendarDocument(file, yTolerance, xGap)
+        if (token !== sequence.current) throw new Error('読取中に対象が変わりました。選び直してください')
+        if (!result.extraction.tables.length) throw new Error('確認できる表がありません')
+        const table = result.extraction.tables[0]; setDocumentInput({ ...result, table }); setBytes(tableCSVBytes(table)); setMappingMode(true); setMappingProfile(null)
+      } else { const next = await readCalendarCSVFile(file, mappingMode ? 'undecided' : 'utf-8'); if (token !== sequence.current) throw new Error('読取中に対象や設定が変わりました。ファイルを選び直してください。'); setBytes(next) }
+      setNotice('ファイルを端末内で読みました。対象と期間を選んで確認案を作ってください。')
+    }
     catch (error) { setNotice(errorText(error)) } finally { setBusy(false) }
   }
   async function prepare() {
@@ -119,7 +130,7 @@ export default function CalendarCSVImportView({ state, settings, onApplied }: Pr
       const target: CSVImportTarget = { kind, contextId, bindingId, calendarId, activityId: kind === 'roster' ? activityId : null, feedId: chosenFeed, title, retentionUntil }
       const snapshot: Selection = { kind, contextName: context.name, bindingId, personRef: kind === 'roster' ? binding.personRef : null, calendarName: calendar.name, activityName: activity?.title ?? null, timezone, feedId: chosenFeed, title, fromDate, toDate, retentionUntil }
       if (mappingMode && !mappingProfile) throw new Error('列対応を設定して「この列対応設定を確認案に使う」を押してください')
-      const next = await prepareCalendarCSVImport(target, bytes, { fromDate, toDate, ...(mappingMode && mappingProfile ? { mappingProfile, profileChangeConfirmed, newerFileConfirmed } : {}) })
+      const next = await prepareCalendarCSVImport(target, bytes, { fromDate, toDate, ...(mappingMode && mappingProfile ? { mappingProfile, profileChangeConfirmed, newerFileConfirmed } : {}), ...(documentInput ? { documentEvidence: tableEvidence(documentInput.extraction, documentInput.table) } : {}) })
       if (token !== sequence.current) { cancelCalendarCSVImport(next); throw new Error('確認中に対象や設定が変わりました。現在の選択で確認案を作り直してください。') }
       preparedRef.current = next; setPrepared(next); setSelection(snapshot); setProofSignature(signature); setChecked(false); setNotice('資料の確認案を作りました。まだ保存していません。')
     } catch (error) { setNotice(errorText(error)) } finally { setBusy(false) }
@@ -127,7 +138,7 @@ export default function CalendarCSVImportView({ state, settings, onApplied }: Pr
   async function apply(event: Event) {
     if (!prepared?.configuration || !checked || busy) return
     setBusy(true); setNotice('')
-    try { await applyCalendarCSVImportFromUI(prepared, prepared.digest, event); changed(() => { setBytes(null); setFileName('') }); setNotice('確認したCSV資料を保存しました。タスク・予定への反映は共通カレンダーで別に確認してください。'); await onApplied?.() }
+    try { await applyCalendarCSVImportFromUI(prepared, prepared.digest, event); changed(() => { setBytes(null); setFileName(''); setDocumentInput(null) }); setNotice('確認したCSV資料を保存しました。タスク・予定への反映は共通カレンダーで別に確認してください。'); await onApplied?.() }
     catch (error) { changed(); setNotice(`${errorText(error)} 選択と入力は残っています。確認案を作り直してください。`) } finally { setBusy(false) }
   }
   async function prepareRetirement() {
@@ -150,8 +161,8 @@ export default function CalendarCSVImportView({ state, settings, onApplied }: Pr
   }
   const status = notice || (savedPrepared && !prepared ? '対象・版・本人権限が変わったため、以前の確認案を取り消しました。選択を確認して差分を作り直してください。' : '')
   return <section className="card setting-section calendar-csv-import" aria-label="営業日・勤務表CSVの取込">
-    <h2>営業日・勤務表CSVのローカル取込</h2>
-    <p>本人が選んだUTF-8のCSV（1MiB以内）を端末内で読み取ります。外部AIへ送信しません。CSV全体は保存せず、本人に適用する選択行だけを原文保持期限まで保存します。</p>
+    <h2>営業日・勤務表のローカル取込</h2>
+    <p>本人が選んだCSV/TSV（1MiB以内）、PDF/XLSX（25MiB以内）を端末内で読み取ります。文字コードと任意列は本人が設定し、PDFはテキスト層の表、XLSXは文字・値のセルだけを使います。外部AIへ送信しません。元ファイル全体は保存せず、本人に適用する選択行だけを原文保持期限まで保存します。</p>
     <details><summary>対応する固定ヘッダーと値</summary><p>営業日：statusは open / closed / withdrawn</p><pre>record_id,record_revision,date,status</pre><p>勤務表：publishedは true / false、statusは scheduled / cancelled。本人に一致する公開済みの行だけを取り込みます。</p><pre>shift_id,record_revision,person_ref,published,status,start_date,start_time,end_date,end_time</pre><p>日付はYYYY-MM-DD、時刻はHH:mmです。夜勤は終了日を明示してください。列名・列数・引用符・文字コード・版・日時が曖昧なファイルは、切り捨てて取り込みません。</p></details>
     <div className="csv-form">
       <label className="field">CSV形式<select aria-label="CSV形式" value={kind} disabled={busy} onChange={event => changed(() => { setKind(event.target.value as typeof kind); setActivityId(''); resetFeed() })}><option value="">選んでください</option><option value="calendar">営業日カレンダー</option><option value="roster">勤務表</option></select></label>
@@ -171,8 +182,11 @@ export default function CalendarCSVImportView({ state, settings, onApplied }: Pr
       <label className="field">取込終了<input aria-label="CSV取込終了" type="date" value={toDate} disabled={busy} onChange={event => changed(() => setToDate(event.target.value))} /></label>
       <label className="field">選択タイムゾーンでの原文保持期限<input aria-label="CSV原文保持期限" type="datetime-local" value={retention} disabled={busy} onChange={event => changed(() => setRetention(event.target.value))} /></label>
       <label className="csv-check csv-full"><input aria-label="任意列と文字コードを設定する" type="checkbox" checked={mappingMode} disabled={busy || Boolean(source?.csv?.mapping)} onChange={event => changed(() => { setMappingMode(event.target.checked); setMappingProfile(null); setProfileChangeConfirmed(false); setNewerFileConfirmed(false); setBytes(null); setFileName('') })} />任意列・Shift_JIS・TSVの対応を設定する</label>
-      <label className="field csv-full">CSVファイル<input aria-label="CSVファイル" type="file" accept=".csv,.tsv,text/csv,text/tab-separated-values" disabled={busy} onChange={event => { const file = event.target.files?.[0]; event.target.value = ''; if (file) void readFile(file) }} /><small>{fileName ? `${fileName} / ${bytes ? `${bytes.byteLength}バイト読取済み` : '読取未完了'}` : '未選択'}</small></label>
+      <label className="field">PDFの行許容幅<input aria-label="PDFの行許容幅" type="number" min={0.1} max={5} step={0.1} value={yTolerance} disabled={busy} onChange={event => changed(() => { setYTolerance(Number(event.target.value)); setBytes(null); setDocumentInput(null) })} /></label>
+      <label className="field">PDFの列許容幅<input aria-label="PDFの列許容幅" type="number" min={2} max={100} value={xGap} disabled={busy} onChange={event => changed(() => { setXGap(Number(event.target.value)); setBytes(null); setDocumentInput(null) })} /></label>
+      <label className="field csv-full">CSV・PDF・XLSXファイル<input aria-label="CSVファイル" type="file" accept=".csv,.tsv,.pdf,.xlsx,text/csv,text/tab-separated-values" disabled={busy} onChange={event => { const file = event.target.files?.[0]; event.target.value = ''; if (file) void readFile(file) }} /><small>{fileName ? `${fileName} / ${bytes ? `${bytes.byteLength}バイト読取済み` : '読取未完了'}` : '未選択'}</small></label>
     </div>
+    {documentInput && <CalendarDocumentPreview {...documentInput} onTable={table => changed(() => { setDocumentInput({ ...documentInput, table }); setBytes(tableCSVBytes(table)); setProfileChangeConfirmed(false); setNewerFileConfirmed(false) })} />}
     {mappingMode && kind && <fieldset disabled={busy}><CalendarCSVMappingStep key={`${kind}:${sourceId}`} kind={kind} bytes={bytes} initial={source?.csv?.mapping?.profile} onChange={profile => changed(() => { setMappingProfile(profile); setProfileChangeConfirmed(false); setNewerFileConfirmed(false) })} />
       {source && <label className="csv-check"><input type="checkbox" aria-label="列対応の変更を確認した" checked={profileChangeConfirmed} onChange={event => changed(() => setProfileChangeConfirmed(event.target.checked))} />既存資料の列対応変更と再検証を確認しました（ID・版の方式変更は取込元の終了が必要）。</label>}
       {mappingProfile?.revisionStrategy === 'import_order' && <label className="csv-check"><input type="checkbox" aria-label="今回の資料が新しいことを確認した" checked={newerFileConfirmed} onChange={event => changed(() => setNewerFileConfirmed(event.target.checked))} />今回の資料が前回より新しいことを確認しました。</label>}

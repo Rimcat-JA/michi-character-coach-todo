@@ -1,5 +1,6 @@
 import 'fake-indexeddb/auto'
 import { readFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest'
 import { contentDigest } from './canonical'
 import { calendarFixture } from './calendar-test-fixtures'
@@ -10,6 +11,8 @@ import { applyCalendarCSVImportFromUI, clearCalendarCSVImportAuthority } from '.
 import { parseMappedCalendarCSV, readCSVRawRecords, validateCSVMappingProfile, type CSVMappingProfile } from './calendar-csv-mapping'
 import { buildCalendarChangePlan, type CalendarRulesState } from './calendar-resolver'
 import { redactExpiredCSVRecords } from './calendar-csv-redaction'
+import { tableCSVBytes, tableEvidence, type ScheduleDocumentExtraction } from './calendar-document-import'
+const extractScheduleDocument: (input: { name: string; bytes: Uint8Array; yTolerance: number; xGap: number }) => Promise<ScheduleDocumentExtraction> = createRequire(import.meta.url)('../electron/document-extract.cjs').extractScheduleDocument
 
 const enc = (text: string) => new TextEncoder().encode(text)
 const headers = ['勤務ID', '版', '氏名', '公開', '状態', '勤務日', '開始', '終了', '注記']
@@ -85,5 +88,17 @@ describe('列対応の保存承認・版と復元', () => {
     await expect(save(enc(text()), { ...mappedRosterProfile(), revision: 2, recordIdStrategy: 'derived' }, { profileChangeConfirmed: true })).rejects.toThrow('方式変更')
     const snapshot = await captureSnapshot(); await restoreBackup(snapshot); const state = (await db.calendarRules.get('main'))!
     expect(state.sources[0].csv!.mapping!.profile).toEqual(mappedRosterProfile()); await verifyCSVOriginalDigests([state])
+  })
+  it.each(['pdf', 'xlsx'])('文書%sは同じ本人勤務を作り、ページ/セルを根拠hashへ束縛する', async extension => {
+    const filename = extension === 'pdf' ? 'roster-pdf-table.pdf' : 'roster-xlsx-table.xlsx', extraction = await extractScheduleDocument({ name: filename, bytes: new Uint8Array(readFileSync(new URL('../docs/examples/' + filename, import.meta.url))), yTolerance: 2, xGap: 12 }), table = extraction.tables[0]
+    const profile = { ...mappedRosterProfile(), columns: Object.fromEntries(table.rows[0].cells.map((field, index) => [field, { index, headerText: field }])), dateFormat: 'YYYY-MM-DD' as const, statusMap: { scheduled: 'scheduled', cancelled: 'cancelled' }, publishedMap: { true: true, false: false }, endDayRule: 'explicit_end_date' as const }
+    const prepared = await prepareCalendarCSVImport(target, tableCSVBytes(table), { fromDate: options.fromDate, toDate: options.toDate, mappingProfile: profile, documentEvidence: tableEvidence(extraction, table) })
+    expect(prepared.preview.selectedCount).toBe(1); expect(prepared.preview.parsed.rows[0]).toMatchObject({ startAt: '2026-10-03T13:00:00.000Z', endAt: '2026-10-03T21:00:00.000Z' }); expect(prepared.preview.parsed.rows[0].mapped!.document!.cells[0]).toHaveProperty(extension === 'pdf' ? 'page' : 'address')
+    await applyCalendarCSVImportFromUI(prepared, prepared.digest, click()); const state = (await db.calendarRules.get('main'))!; await verifyCSVOriginalDigests([state])
+    expect(JSON.stringify(state.sources[0].csv)).not.toContain('staff-002'); const changed = structuredClone(state); changed.sources[0].csv!.snapshots[0].rows[0].mapped!.document!.table = '改変'; await expect(verifyCSVOriginalDigests([changed])).rejects.toThrow('出典位置')
+  })
+  it('凍結中は資料の解析準備を始めない', async () => {
+    await db.datasetState.put({ id: 'main', mode: 'frozen', moveId: 'qa', updatedAt: new Date().toISOString() })
+    await expect(save(enc(text()), mappedRosterProfile())).rejects.toThrow('再解析を停止')
   })
 })

@@ -1,0 +1,1 @@
+export function pdfGrid(items: { text: string; index: number; x: number; y: number; width: number; height: number; rotated: boolean }[], parameters: { yTolerance?: number; xGap?: number }): { cells: string[]; locators: ({ row: number; column: number; itemIndices: number[]; bbox: number[] } | null)[] }[]

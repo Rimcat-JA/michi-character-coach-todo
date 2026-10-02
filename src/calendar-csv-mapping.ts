@@ -1,6 +1,7 @@
 import { canonicalJSON, contentDigest } from './canonical'
 import { addDays, validateDate } from './domain'
 import { calendarCSVHeaders, csvBytesDigest, parseCalendarCSVImport, type CSVParseOptions, type ParsedCalendarCSVImport } from './calendar-csv-import'
+import type { ScheduleDocumentEvidence, ScheduleCellLocator } from './calendar-document-import'
 
 export type CSVMappingProfile = {
   version: 1; name: string; revision: number; kind: 'calendar' | 'roster'; encoding: 'utf-8' | 'shift_jis'; delimiter: ',' | '\t' | ';'; headerRow: number; dataStartRow: number
@@ -11,7 +12,14 @@ export type CSVMappingProfile = {
   recordIdStrategy: 'column' | 'derived'; revisionStrategy: 'column' | 'import_order'
 }
 export type CSVMappingBinding = { profile: CSVMappingProfile; digest: string; sequence: number }
-export type MappedCSVRowEvidence = { rawBase64: string; normalizedQuote: string; profileDigest: string }
+export type MappedCSVRowEvidence = { rawBase64: string; normalizedQuote: string; profileDigest: string; document?: Omit<ScheduleDocumentEvidence, 'rows'> & { cells: ScheduleCellLocator[] }; documentDigest?: string }
+export function validateScheduleDocumentEvidence(value: unknown) {
+  if (!plain(value) || !['pdf', 'xlsx'].includes(String(value.format)) || typeof value.fileSha256 !== 'string' || !/^[a-f0-9]{64}$/.test(value.fileSha256) || !int(value.size, 1, 25 * 1024 * 1024) || typeof value.table !== 'string' || !value.table || value.table.length > 200 || !plain(value.parameters) || Object.keys(value.parameters).length !== 2 || !(Number(value.parameters.yTolerance) >= 0.1 && Number(value.parameters.yTolerance) <= 5) || !(Number(value.parameters.xGap) >= 2 && Number(value.parameters.xGap) <= 100) || !Array.isArray(value.cells) || !value.cells.length || value.cells.length > 100 || Object.keys(value).some(key => !['format', 'fileSha256', 'size', 'table', 'parameters', 'cells'].includes(key))) bad('文書の出典位置が不正です')
+  for (const cell of value.cells) {
+    if (!plain(cell) || !int(cell.row, 1, 1000) || !int(cell.column, 1, 100) || Object.keys(cell).some(key => !(value.format === 'pdf' ? ['row', 'column', 'page', 'itemIndices', 'bbox'] : ['row', 'column', 'sheet', 'address']).includes(key))) bad('セル位置が不正です')
+    if (value.format === 'pdf' ? !int(cell.page, 1, 200) || !Array.isArray(cell.itemIndices) || cell.itemIndices.length !== 1 || !int(cell.itemIndices[0], 0, 100000) || !Array.isArray(cell.bbox) || cell.bbox.length !== 4 || cell.bbox.some(n => typeof n !== 'number' || !Number.isFinite(n) || Math.abs(n) > 100000) : typeof cell.sheet !== 'string' || !cell.sheet || cell.sheet.length > 200 || typeof cell.address !== 'string' || !/^[A-Z]{1,3}[1-9]\d{0,3}$/.test(cell.address)) bad('ページ・セル番地が不正です')
+  }
+}
 export type CSVRawRecord = { cells: string[]; quote: string; bytes: Uint8Array; recordNumber: number; lineStart: number; lineEnd: number; byteStart: number; byteEnd: number }
 function bad(message: string): never { throw new Error(`列対応: ${message}`) }
 const plain = (value: unknown): value is Record<string, unknown> => Boolean(value && typeof value === 'object' && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype)

@@ -106,6 +106,7 @@ contextBridge.exposeInMainWorld('michiAI', {
   verifyObligations: request => ipcRenderer.invoke('michi:ai-verify-obligations', request),
   embedTexts: request => ipcRenderer.invoke('michi:ai-embed', request),
   extractDocument: request => ipcRenderer.invoke('michi:document-extract', request),
+  extractScheduleDocument: request => ipcRenderer.invoke('michi:schedule-document-extract', request),
   folderWatch: request => ipcRenderer.invoke('michi:folder-watch', request),
   notificationText: request => ipcRenderer.invoke('michi:ai-notification-text', request),
   resolveTarget: request => ipcRenderer.invoke('michi:ai-resolve-target', request),

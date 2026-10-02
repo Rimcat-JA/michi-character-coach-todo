@@ -3,7 +3,7 @@ import { validateDate, validateScore, type CalendarEvent, type ScoreInput, type 
 import { calendarDateAt, type CalendarRulesState, type ScheduleFact, type ScheduleSource, type ResolvedCalendarSpec } from './calendar-resolver'
 import { canonicalRRule } from './rrule'
 import { validLocalDateTime } from './zoned-time'
-import { base64Bytes, validateCSVMappingProfile, type CSVMappingBinding } from './calendar-csv-mapping'
+import { base64Bytes, validateCSVMappingProfile, validateScheduleDocumentEvidence, type CSVMappingBinding } from './calendar-csv-mapping'
 
 type Row = Record<string, unknown>
 const optional = (value: unknown, keys: string[]) => value && typeof value === 'object' ? keys.filter(key => Object.hasOwn(value, key)) : []
@@ -140,7 +140,8 @@ export function validateCalendarRulesState(value: unknown, ownerId?: string, dat
       for (const row of raw.rows) {
         object(row, ['recordId', 'recordRevision', 'value', 'digest', 'factId', 'rowIndex', 'lineStart', 'lineEnd', 'byteStart', 'byteEnd', 'quote', 'quoteSha256', ...optional(row, ['mapped'])])
         if ('mapped' in row) {
-          object(row.mapped, ['rawBase64', 'normalizedQuote', 'profileDigest']); hash(row.mapped.profileDigest)
+          object(row.mapped, ['rawBase64', 'normalizedQuote', 'profileDigest', ...optional(row.mapped, ['document', 'documentDigest'])]); hash(row.mapped.profileDigest)
+          if ('document' in row.mapped || 'documentDigest' in row.mapped) { validateScheduleDocumentEvidence(row.mapped.document); hash(row.mapped.documentDigest) }
           if (!raw.mapping || row.mapped.profileDigest !== (raw.mapping as CSVMappingBinding).digest || typeof row.mapped.rawBase64 !== 'string' || typeof row.mapped.normalizedQuote !== 'string' || row.mapped.normalizedQuote.length > 65536) throw new Error('選択行の列対応が不正です')
           if (row.quote === null ? row.mapped.rawBase64 !== '' || row.mapped.normalizedQuote !== '' : !row.mapped.rawBase64 || !row.mapped.normalizedQuote) throw new Error('原文bytesの保持状態が不正です')
         } else if (raw.mapping) throw new Error('列対応資料の元bytesがありません')
