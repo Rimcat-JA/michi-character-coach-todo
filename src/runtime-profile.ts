@@ -37,7 +37,7 @@ export function effectiveNetworkPolicy(settings: Pick<Settings, 'datasetId' | 'a
   catch { return { policy: 'offline_only', source: 'invalid' } }
 }
 export const runtimeChoicePending = (settings: Pick<Settings, 'runtimeProfile'>) => settings.runtimeProfile === undefined
-export const networkPolicyLabel = (policy: NetworkPolicy) => policy === 'offline_only' ? 'オフライン専用（このアプリから外部へ通信しない）' : '必要な時だけ通信を許可（本人が操作した外部AI・GitHubのみ）'
+export const networkPolicyLabel = (policy: NetworkPolicy) => policy === 'offline_only' ? 'オフライン専用（このアプリから外部へ通信しない）' : '必要な時だけ通信を許可（本人が許可した外部AI・連携のみ）'
 
 async function writeProfile(policy: NetworkPolicy, operation: string, onlyIfMissing: boolean): Promise<boolean> {
   if (!POLICIES.includes(policy)) throw new Error('通信の許可が不正です')

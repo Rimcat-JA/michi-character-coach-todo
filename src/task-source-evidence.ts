@@ -176,7 +176,8 @@ export function legacyReviewTasks(tasks: Task[], sourceId: string): LegacyReview
 export async function taskEvidenceDisplay(task: Task): Promise<TaskEvidenceDisplay> {
   const settings = await db.settings.get('main'), rows = await db.taskSourceEvidence.where('taskId').equals(task.id).toArray(), now = Date.now()
   const audits = await db.audits.where('taskId').equals(task.id).toArray(), approval = approvedDetections(audits).get(task.id)
-  const ids = [...new Set([...rows.map(row => row.sourceId), ...(approval ? [approval.sourceId] : [])])], sources = new Map((await db.contextSources.bulkGet(ids)).filter((source): source is ContextSource => Boolean(source)).map(source => [source.id, source]))
+  const captures = audits.flatMap(audit => { if (audit.operation !== 'capture.task_created') return []; try { const detail = JSON.parse(audit.detail); return typeof detail.sourceId === 'string' ? [detail.sourceId] : [] } catch { return [] } })
+  const ids = [...new Set([...rows.map(row => row.sourceId), ...(approval ? [approval.sourceId] : []), ...captures])], sources = new Map((await db.contextSources.bulkGet(ids)).filter((source): source is ContextSource => Boolean(source)).map(source => [source.id, source]))
   const usable = (id: string) => Boolean(settings && sourceEvidenceUsable(sources.get(id), settings.profileId, now))
   const quotes = rows.filter(row => settings && row.ownerId === settings.profileId && usable(row.sourceId)).sort((left, right) => left.id.localeCompare(right.id)).map(row => ({ ...row, sourceTitle: sources.get(row.sourceId)!.title }))
   const erasedSourceIds = ids.filter(id => !usable(id) && !quotes.some(row => row.sourceId === id))

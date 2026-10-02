@@ -2,6 +2,7 @@ const fs = require('node:fs/promises')
 const path = require('node:path')
 const crypto = require('node:crypto')
 const { createLocalActionService, signLocalActionRequest, verifyLocalActionResult } = require('./local-actions.cjs')
+const { createLocalActionTriggers, validateAutomation } = require('./local-action-triggers.cjs')
 const token = value => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/.test(value)
 const exact = (value, keys) => value && typeof value === 'object' && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype && Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key))
 function fail(code) { const error = new Error(code); error.code = code; throw error }
@@ -35,13 +36,13 @@ async function inspectExecutable(executable) {
   const handle = await fs.open(resolved, 'r')
   try { const before = await handle.stat(), bytes = await handle.readFile(), after = await handle.stat(); if (before.ino !== stat.ino || before.dev !== stat.dev || before.size !== stat.size || after.size !== before.size || after.mtimeMs !== before.mtimeMs || after.ctimeMs !== before.ctimeMs) fail('EXECUTABLE_CHANGED'); return crypto.createHash('sha256').update(bytes).digest('hex') } finally { await handle.close() }
 }
-function primitiveDefinition(def) { const { title: _title, ...registration } = def; return registration }
+function primitiveDefinition(def) { const { title: _title, automation, ...registration } = def; return {...registration,...(automation?.lowRisk?{lowRisk:true,delegation:{ownerId:def.ownerId,policyEpoch:automation.policyEpoch,sourcePermissionRevision:automation.sourcePermissionRevision,events:automation.events,expiresAt:automation.expiresAt}}:{})} }
 /** No caller gets a signing key or controls owner, nonce, identity, command or approval. */
-async function createLocalActionCoordinator({ signingKey, journalDirectory, deviceId, getSettings, getReceipt, loadConfiguration, saveConfiguration, loadResults, saveResults, verifyNativeProof, spawn, now = Date.now }) {
+async function createLocalActionCoordinator({ signingKey, journalDirectory, deviceId, getSettings, getReceipt, loadConfiguration, saveConfiguration, loadResults, saveResults, verifyNativeProof, getFact=async()=>null, loadTriggers=async()=>[], saveTriggers=async()=>{}, spawn, now = Date.now }) {
   if (!Buffer.isBuffer(signingKey) || signingKey.length !== 32 || !token(deviceId)) fail('CONFIG_INVALID')
   let configuration = null, service = null, loaded = false, history = [], queue = Promise.resolve()
   const inspections = new Map(), requests = new Map(), proofs = new WeakSet()
-  async function context() { const settings = await getSettings(), p = policy(settings); return { ownerId: settings.profileId, datasetId: settings.datasetId, deviceId, policyEpoch: p.epoch, sourcePermissionRevision: p.sourcePermissionRevision, enabled: Boolean(configuration && settings.aiEnabled && p.aiChangesEnabled && !actionsDenied(p) && configuration.ownerId === settings.profileId && configuration.datasetId === settings.datasetId && configuration.policyEpoch === p.epoch && configuration.sourcePermissionRevision === p.sourcePermissionRevision) } }
+  async function context() { const settings = await getSettings(), p = policy(settings); return { ownerId: settings.profileId, datasetId: settings.datasetId, deviceId, policyEpoch: p.epoch, sourcePermissionRevision: p.sourcePermissionRevision, enabled: Boolean(configuration && (!settings.datasetMode||settings.datasetMode==='active') && settings.aiEnabled && p.aiChangesEnabled && !actionsDenied(p) && configuration.ownerId === settings.profileId && configuration.datasetId === settings.datasetId && configuration.policyEpoch === p.epoch && configuration.sourcePermissionRevision === p.sourcePermissionRevision) } }
   async function create(config) { return createLocalActionService({ signingKey, journalDirectory, registrations: config.definitions.map(primitiveDefinition), getCurrentContext: context, verifyHumanApproval: (_review, proof) => proofs.has(proof), ...(spawn ? { spawn } : {}), now }) }
   async function ensure() {
     if (loaded) return
@@ -50,18 +51,18 @@ async function createLocalActionCoordinator({ signingKey, journalDirectory, devi
     history = results
     if (saved) {
       if (!exact(saved, ['version', 'ownerId', 'datasetId', 'deviceId', 'policyEpoch', 'sourcePermissionRevision', 'definitions']) || saved.version !== 1 || saved.deviceId !== deviceId || !Array.isArray(saved.definitions) || saved.definitions.length > 20) fail('CONFIG_INVALID')
-      for (const def of saved.definitions) { if (!exact(def, ['title', 'executable', 'cwd', 'argv', 'schema', 'id', 'revision', 'ownerId', 'datasetId', 'deviceId', 'executableRoot', 'sha256']) || def.ownerId !== saved.ownerId || def.datasetId !== saved.datasetId || def.deviceId !== deviceId) fail('CONFIG_INVALID'); validateInput({ title: def.title, executable: def.executable, cwd: def.cwd, argv: def.argv, schema: def.schema }) }
+      for (const def of saved.definitions) { if (!exact(def, ['title', 'executable', 'cwd', 'argv', 'schema', 'id', 'revision', 'ownerId', 'datasetId', 'deviceId', 'executableRoot', 'sha256',...(def.automation?['automation']:[])]) || def.ownerId !== saved.ownerId || def.datasetId !== saved.datasetId || def.deviceId !== deviceId) fail('CONFIG_INVALID'); validateInput({ title: def.title, executable: def.executable, cwd: def.cwd, argv: def.argv, schema: def.schema });if(def.automation)validateAutomation(def.automation,{now:now(),allowExpired:true}) }
       configuration = structuredClone(saved)
       try { service = await create(configuration) } catch (error) { configuration = null; service = null; await saveConfiguration(null); throw error }
     }
     loaded = true
   }
-  async function invalidate() { await ensure(); service?.clearAuthorities(); service = null; configuration = null; inspections.clear(); requests.clear(); await saveConfiguration(null) }
+  async function invalidate() { await ensure(); service?.clearAuthorities(); service = null; configuration = null; inspections.clear(); requests.clear(); triggers.clear();await saveConfiguration(null) }
   async function status() {
     await ensure()
     const c = await context()
     if (configuration && !c.enabled) await invalidate()
-    return { version: 1, available: true, enabled: (await context()).enabled, ownerId: c.ownerId, datasetId: c.datasetId, deviceId, definitions: configuration?.definitions.map(def => structuredClone(def)) ?? [], results: history.filter(result => result.ownerId === c.ownerId && result.datasetId === c.datasetId).map(result => structuredClone(result)), notice: '登録した実行ファイルと引数を毎回確認します。タスクの完了・ポイント加算には使いません。自動発火は未設定です。' }
+    return { version: 1, available: true, enabled: (await context()).enabled, ownerId: c.ownerId, datasetId: c.datasetId, deviceId, definitions: configuration?.definitions.map(def => structuredClone(def)) ?? [], results: history.filter(result => result.ownerId === c.ownerId && result.datasetId === c.datasetId).map(result => structuredClone(result)), pending:[...requests.entries()].filter(([_id,r])=>r.envelope.event!=='owner-click'&&!r.result&&r.review.expiresAt>now()).map(([reference,r])=>({version:1,reference,event:r.envelope.event,review:structuredClone(r.review)})),runs:await triggers.runs(), notice: '固定操作は本人が確認します。自動実行は別途確認したイベント・固定引数・期限・回数だけ。タスクの完了・ポイント加算には使いません。過去のイベントは再実行しません。' }
   }
   async function inspectDefinition(input, nativeProof) {
     if (!await verifyNativeProof('configure', 'inspect', nativeProof)) fail('HUMAN_APPROVAL_REQUIRED')
@@ -128,9 +129,7 @@ async function createLocalActionCoordinator({ signingKey, journalDirectory, devi
       const grant = await service.approve(entry.envelope, proof), result = await service.execute(entry.envelope, grant)
       if (!verifyLocalActionResult(result, signingKey)) fail('RESULT_INVALID')
       entry.result = result
-      history = [...history.filter(item => item.requestId !== result.requestId), result].slice(-100)
-      // The signed primitive journal is authoritative even if this cache fails.
-      try { await saveResults(history) } catch { /* The signed primitive journal remains authoritative; return the actual OS outcome. */ }
+      await remember(result)
       return structuredClone(result)
     })()
     try { return await entry.flight } finally { entry.flight = null }
@@ -143,6 +142,9 @@ async function createLocalActionCoordinator({ signingKey, journalDirectory, devi
     let value; try { value = JSON.parse(stored.resultId) } catch { fail('RECEIPT_INVALID') }
     if (canonical(value) !== canonical(result) || stored.at !== new Date(result.completedAt).toISOString()) fail('RECEIPT_INVALID')
   }
-  return Object.freeze({ status, inspectDefinition, configure, remove, prepare, execute, recordReceipt, invalidate })
+  async function remember(result){if(!verifyLocalActionResult(result,signingKey))fail('RESULT_INVALID');history=[...history.filter(r=>r.requestId!==result.requestId),result].slice(-100);try{await saveResults(history)}catch{/* The signed primitive journal remains authoritative. */}}
+  async function replaceConfiguration(next){const nextService=await create(next),c=await context();if(!c.enabled||next.ownerId!==c.ownerId||next.datasetId!==c.datasetId||next.policyEpoch!==c.policyEpoch||next.sourcePermissionRevision!==c.sourcePermissionRevision)fail('AUTHORITY_CHANGED');await saveConfiguration(next);service?.clearAuthorities();configuration=next;service=nextService;requests.clear()}
+  const triggers=createLocalActionTriggers({now,ensure,context,getConfiguration:()=>configuration,replaceConfiguration,getService:()=>service,getFact,loadTriggers,saveTriggers,verifyNativeProof,mutate,signRequest:value=>signLocalActionRequest(value,signingKey),remember,deviceId,verifyResult:result=>verifyLocalActionResult(result,signingKey),prepareNative:async(envelope,review)=>{for(const [id,r]of requests)if(r.review.expiresAt<=now()&&!r.flight)requests.delete(id);const reference='trigger:'+envelope.requestId;if(!requests.has(reference)){if(requests.size>=100)fail('PENDING_LIMIT');requests.set(reference,{envelope,review,service,result:null,flight:null})}return {version:1,reference,event:envelope.event,review}}})
+  return Object.freeze({ status, inspectDefinition, configure, remove, prepare, execute, recordReceipt, invalidate,inspectAutomation:triggers.inspectAutomation,configureAutomation:triggers.configureAutomation,revokeAutomation:triggers.revokeAutomation,trigger:triggers.trigger })
 }
 module.exports = { createLocalActionCoordinator, validateLocalActionDefinitionInput: validateInput }

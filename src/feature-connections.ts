@@ -18,5 +18,5 @@ export function loadConnectionStatus(gateways: { fileBridge?: FileBridgeGateway;
 /** N10: the gateway route per connection. Counters are this launch's main-process counts, never URLs or secrets. */
 export function egressLine(policy: NetworkPolicy, network: NetworkStatus | null, purpose: NetworkPurpose) {
   const counter = network?.counters[purpose], counts = counter ? `（今回の起動後 送信${counter.attempts}回・設定で遮断${counter.blockedOffline}回）` : ''
-  return `${policy === 'offline_only' ? 'オフライン専用のため送信前に遮断' : '本人の操作時だけ許可'}${counts}`
+  return `${policy === 'offline_only' ? 'オフライン専用のため送信前に遮断' : purpose==='webhook'?'本人が登録した送信条件だけ許可':'本人の操作時だけ許可'}${counts}`
 }

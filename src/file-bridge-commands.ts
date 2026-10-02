@@ -1,12 +1,12 @@
+import './external-task-create'
 import Dexie from 'dexie'
 import { db } from './db'
 import { canonicalJSON, contentDigest } from './canonical'
-import { newTaskInput } from './commands'
 import { uid, type Settings } from './domain'
 import { ChangeSetError, autoChangeCountsToday, changePolicyFor, decideChangePolicy, type ChangePolicy, type PreparedChangeSet, type TaskChangeField } from './change-set'
 import { operationMode, ruleFor } from './automation-policy'
-import { applyAssistedTasks, prepareAssistedTasks, type PreparedAssistedTasks } from './task-assist'
-import { agentChangesStopped, commandOutcomeFacts, recordCommandOutcomeAudit, applyCommand, issueExternalApplyCapability, approveCommandFromUI, cancelCommand, commandDecision, commandFields, commandOutcome, confirmCommandValuesFromUI, externalAgentActor, isPendingCommand, noteReceivedCommands, prepareCommand, refineCommandOutcome, registerCommandType, settleCommand, terminalCommandState, validateTaskPayload, type CommandEnvelope, type CommandField, type CommandGrant, type CommandOutcome, type CommandPreparation, type PreparedCommand } from './command-bus'
+import { type PreparedAssistedTasks } from './task-assist'
+import { agentChangesStopped, commandOutcomeFacts, recordCommandOutcomeAudit, applyCommand, issueExternalApplyCapability, approveCommandFromUI, cancelCommand, commandDecision, commandFields, commandOutcome, confirmCommandValuesFromUI, externalAgentActor, isPendingCommand, noteReceivedCommands, prepareCommand, refineCommandOutcome, settleCommand, terminalCommandState, type CommandEnvelope, type CommandField, type CommandGrant, type CommandOutcome, type CommandPreparation, type PreparedCommand } from './command-bus'
 import { confirmSplitCommandFromUI, type SplitChildDraft } from './task-split-change'
 import { confirmRoutineCommandFromUI, triggerForCommand } from './routine-external-change'
 import { loadCalendarRulesState } from './calendar-rules-save'
@@ -56,30 +56,6 @@ export function fileBridgeEnvelope(command:FileBridgeCommand):CommandEnvelope {
 const entranceOf=(command:FileBridgeCommand):'file'|'mcp'=>command.via==='mcp_stdio'?'mcp':'file'
 function outcomeError(outcome:CommandOutcome):never { throw Object.assign(new ChangeSetError(outcome.code??'COMMAND_FAILED',outcome.message),{commonCode:outcome.code??undefined}) }
 
-/** N02 creation through the bus; external creations always wait for the owner. */
-const trustedCreateApprovals=new WeakSet<object>()
-registerCommandType({
-  type:'task.create',
-  validate(envelope){validateTaskPayload(envelope.payload,['title','notes','scheduled_date']);if(envelope.target_id!==null||envelope.expected_revision!==null||!Object.hasOwn(envelope.payload,'title'))throw new ChangeSetError('INVALID_TARGET','新規作成に対象を指定できません')},
-  async prepare(envelope,actor){
-    const current=await settings(),policy=changePolicyFor(current)
-    if(current.profileId!==actor.ownerId||current.datasetId!==actor.datasetId)throw new ChangeSetError('UNAUTHORIZED','この領域の変更は許可されていません')
-    if(actor.principal.kind!=='human'&&(!current.aiEnabled||!policy.aiChangesEnabled||operationMode(policy,'task.text')==='deny'))throw new ChangeSetError('CHANGES_STOPPED','AIによる変更は停止しています')
-    if(actor.grant&&Object.keys(envelope.payload).some(field=>!actor.grant!.fields.includes(field as CommandField)))throw new ChangeSetError('UNAUTHORIZED','この接続で許可していない項目です')
-    const payload=envelope.payload as {title:string;notes?:string;scheduled_date?:string|null}
-    const input={...newTaskInput(),title:payload.title,notes:payload.notes??'',scheduledDate:payload.scheduled_date??null}
-    const entrance=actor.entrance==='mcp'?'mcp' as const:'file' as const,assisted=await prepareAssistedTasks([{input,notices:[],source:`外部エージェント ${actor.principal.id} / コマンド ${envelope.command_id}`}],'ai',{kind:'external-agent',id:actor.principal.id,entrance,commandId:envelope.command_id})
-    return {body:{assisted},expiresAt:assisted.expiresAt,reason:'外部エージェントからの新規作成（点数・締め切りは未設定）'}
-  },
-  decide(prepared,current){const policy=changePolicyFor(current);return prepared.actor.principal.kind!=='human'&&(!current.aiEnabled||!policy.aiChangesEnabled||operationMode(policy,'task.text')==='deny')?{status:'denied',reason:'AIによる変更は停止しています',protectedFields:[]}:{status:'awaiting_approval',reason:'新しい作業は本人が内容を確認して登録します',protectedFields:[]}},
-  async approve(_prepared,event){trustedClick(event);const token=Object.freeze({id:uid()});trustedCreateApprovals.add(token);return token},
-  async apply(prepared,approval){
-    if(!approval||typeof approval!=='object'||!trustedCreateApprovals.has(approval))throw new ChangeSetError('HUMAN_APPROVAL_REQUIRED','新しい作業は本人が確認してください')
-    trustedCreateApprovals.delete(approval)
-    const assisted=(prepared.body as {assisted:PreparedAssistedTasks}).assisted,taskIds=await applyAssistedTasks(assisted,assisted.digest)
-    return {changeSetId:assisted.id,digest:assisted.digest,taskIds,appliedAt:new Date().toISOString()}
-  },
-})
 function commandDigestPayload(entry:PendingEntry,reg:FileBridgeRegistration) {
   return {command:entry.prepared.command,owner_id:reg.owner_id,dataset_id:reg.dataset_id,client_id:reg.client.id,policy_epoch:reg.policy_epoch,source_permission_revision:reg.source_permission_revision,registration_revision:reg.client.revision,grant_epoch:reg.client.grant_epoch}
 }

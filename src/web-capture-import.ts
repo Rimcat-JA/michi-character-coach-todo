@@ -8,6 +8,15 @@ import { onFeatureHidden } from './features'
 
 export const MAX_EMAIL_BYTES = 100 * 1024
 export const MAX_CAPTURE_TEXT = 50000
+export const MAX_CAPTURE_FILE_BYTES = 120 * 1024
+export async function parseWebCaptureFile(file: Pick<File,'name'|'size'|'arrayBuffer'>): Promise<WebCaptureCapsule> {
+  if (!file || !/\.json$/i.test(file.name) || !Number.isSafeInteger(file.size) || file.size < 1 || file.size > MAX_CAPTURE_FILE_BYTES) fail('選択引用はJSON形式・120KB以下のファイルを選んでください。')
+  const bytes=await file.arrayBuffer()
+  if(bytes.byteLength!==file.size||bytes.byteLength>MAX_CAPTURE_FILE_BYTES)fail('引用ファイルのサイズが一致しません。')
+  let raw:string
+  try{raw=new TextDecoder('utf-8',{fatal:true}).decode(bytes)}catch{fail('選択引用ファイルはUTF-8のJSONで指定してください。')}
+  return parseWebCaptureCapsule(raw)
+}
 export type WebCaptureCapsule = {
   version: 1; kind: 'web-selection'; title: string; url: string; capturedAt: string; timezone: string
   selection: { quote: string; start: number; end: number; coordinate: 'document-utf16' | 'selected-fragment-utf16' }

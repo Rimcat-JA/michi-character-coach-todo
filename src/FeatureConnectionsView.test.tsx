@@ -113,8 +113,8 @@ describe('H01 S17 views (server-rendered)', () => {
   it('lists display, data, authority and background per feature; unprovided providers have no control', () => {
     const gateways = fakes(), controller = voice({ speech: 'speaking' })
     const html = renderToStaticMarkup(<FeatureConnectionsView settings={settings} taskCount={3} gateways={gateways as ConnectionGateways} voice={controller} aiStatus={{ configured: true } as never} />)
-    for (const label of ['OpenRouter AI', 'ファイル接続/MCP', 'PC操作', 'GitHub実績', '通知・Bug Me', '音声と音楽']) expect(html).toContain(`<h3>${label}</h3>`)
-    for (const column of ['<dt>表示</dt>', '<dt>保存データ</dt>', '<dt>権限・接続</dt>', '<dt>バックグラウンド</dt>']) expect(html.split(column).length - 1).toBe(6)
+    for (const label of ['OpenRouter AI', 'ファイル接続/MCP', 'PC操作', 'API（このPC内）','署名Webhook','GitHub実績', '通知・Bug Me', '音声と音楽']) expect(html).toContain(`<h3>${label}</h3>`)
+    for (const column of ['<dt>表示</dt>', '<dt>保存データ</dt>', '<dt>権限・接続</dt>', '<dt>バックグラウンド</dt>']) expect(html.split(column).length - 1).toBe(8)
     expect(html).toContain('非表示（データ・接続は維持）'); expect(html).toContain('APIキー保存済み'); expect(html).toContain('動作中')
     // The AI row's stop is the AI-processing stop and says so; the other five rows keep '個別停止'.
     expect(html.split('>個別停止</button>').length - 1).toBe(5); expect(html).toContain('>AI処理を停止（他の接続も取り消し）</button>')
@@ -124,7 +124,7 @@ describe('H01 S17 views (server-rendered)', () => {
       expect(row).toContain('この版では未提供（接続・自動処理なし）'); expect(row).not.toContain('<button'); expect(row).not.toContain('<input')
     }
     const missing = renderToStaticMarkup(<FeatureConnectionsView settings={{ ...settings, aiEnabled: false }} taskCount={0} gateways={{}} voice={controller} aiStatus={null} />)
-    expect(missing.split('この環境では未提供').length - 1).toBe(3)
+    expect(missing.split('この環境では未提供').length - 1).toBe(5)
     // AI is already off and the three connections are absent: only notifications and voice keep a stop button.
     expect(missing.split('>個別停止</button>').length - 1).toBe(2)
     for (const gateway of Object.values(gateways)) expect(gateway.invalidate).not.toHaveBeenCalled()

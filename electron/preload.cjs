@@ -1,4 +1,56 @@
 const { contextBridge, ipcRenderer } = require('electron')
+let nativeWebhookProof = null
+window.addEventListener('click', event => {
+  if (!event.isTrusted || !(event.target instanceof Element)) return
+  const button = event.target.closest('button[data-webhook-configure]')
+  if (!button || button.disabled) return
+  const proof = { nonce: crypto.randomUUID(), reference: button.getAttribute('data-webhook-configure') ?? '' }
+  nativeWebhookProof = { ...proof, at: Date.now() }
+  ipcRenderer.send('michi:webhook-native-proof', proof)
+}, true)
+contextBridge.exposeInMainWorld('michiWebhooks', {
+  invalidate: () => ipcRenderer.invoke('michi:webhooks', { action: 'invalidate' }),
+  request: value => {
+    if (!value || typeof value !== 'object' || Object.hasOwn(value, 'proofNonce')) return Promise.reject(new Error('Webhook操作の形式が不正です'))
+    if (!['add', 'test'].includes(value.action)) return ipcRenderer.invoke('michi:webhooks', value)
+    const proof = nativeWebhookProof; nativeWebhookProof = null
+    const reference = value.action === 'add' ? 'add' : 'test:' + value.input?.id
+    if (!proof || proof.reference !== reference || Date.now() - proof.at > 5000) return Promise.reject(new Error('本人の確認ボタンから操作してください'))
+    return ipcRenderer.invoke('michi:webhooks', { ...value, proofNonce: proof.nonce })
+  }
+})
+window.addEventListener('click', event => {
+  if (!event.isTrusted || !(event.target instanceof Element)) return
+  const button=event.target.closest('button[data-voice-input]')
+  if (!button || button.disabled) return
+  ipcRenderer.send(button.getAttribute('data-voice-input')==='start'?'michi:voice-native-start':'michi:voice-native-stop')
+}, true)
+
+let nativeLocalAPIProof = null
+window.addEventListener('click', event => {
+  if (!event.isTrusted || !(event.target instanceof Element)) return
+  const button = event.target.closest('button[data-local-api-configure],button[data-local-api-approve]')
+  if (!button || button.disabled) return
+  const kind = button.hasAttribute('data-local-api-configure') ? 'configure' : 'approve'
+  const reference = button.getAttribute(`data-local-api-${kind}`) ?? ''
+  const proof = { nonce: crypto.randomUUID(), kind, reference }
+  nativeLocalAPIProof = { ...proof, at: Date.now() }
+  ipcRenderer.send('michi:localapi-native-proof', proof)
+}, true)
+contextBridge.exposeInMainWorld('michiLocalAPI', {
+  invalidate: () => ipcRenderer.invoke('michi:localapi', { action: 'invalidate' }),
+  request: value => {
+    if (!value || typeof value !== 'object' || Object.hasOwn(value, 'proofNonce')) return Promise.reject(new Error('API操作の形式が不正です'))
+    if (!['configure', 'issue', 'authorize'].includes(value.action) || value.action === 'configure' && value.input?.enabled === false) {
+      return ipcRenderer.invoke('michi:localapi', value.action === 'configure' ? { ...value, proofNonce: null } : value)
+    }
+    const proof = nativeLocalAPIProof; nativeLocalAPIProof = null
+    const kind = value.action === 'authorize' ? 'approve' : 'configure'
+    const reference = value.action === 'authorize' ? value.input?.commandId : value.action === 'issue' ? 'token' : 'server'
+    if (!proof || proof.kind !== kind || proof.reference !== reference || Date.now() - proof.at > 5000) return Promise.reject(new Error('本人の確認ボタンから操作してください'))
+    return ipcRenderer.invoke('michi:localapi', { ...value, proofNonce: proof.nonce })
+  }
+})
 
 let nativeFileBridgeProof = null
 window.addEventListener('click', event => {
@@ -49,6 +101,10 @@ function localActionNativeCall(method, kind, reference, request) {
   return ipcRenderer.invoke(`michi:localaction-${method}`, { request, proofNonce: proof.nonce })
 }
 contextBridge.exposeInMainWorld('michiLocalActions', {
+  inspectAutomation: request => localActionNativeCall('inspectAutomation','configure',`automation-inspect:${request?.actionId}`,request),
+  configureAutomation: request => localActionNativeCall('configureAutomation','configure',request?.reference,request),
+  revokeAutomation: request => ipcRenderer.invoke('michi:localaction-revokeAutomation',request),
+  trigger: request => ipcRenderer.invoke('michi:localaction-trigger',request),
   status: () => ipcRenderer.invoke('michi:localaction-status'),
   inspectDefinition: request => localActionNativeCall('inspectDefinition', 'configure', 'inspect', request),
   configure: request => localActionNativeCall('configure', 'configure', request?.reference, request),

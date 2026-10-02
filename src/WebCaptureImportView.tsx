@@ -3,14 +3,15 @@ import type { Settings } from './domain'
 import { changePolicyFor } from './change-set'
 import RetentionChoice from './RetentionChoice'
 import { defaultSourceRetention, retentionDefaults, retentionDraft, retentionValue } from './retention-defaults'
-import { MAX_EMAIL_BYTES, makeWebCaptureCapsule, parseLocalEmailFile, prepareEmailCaptureImport, prepareWebCaptureImport, saveCaptureImportFromUI } from './web-capture-import'
+import { MAX_EMAIL_BYTES, makeWebCaptureCapsule, parseLocalEmailFile, parseWebCaptureFile, prepareEmailCaptureImport, prepareWebCaptureImport, saveCaptureImportFromUI } from './web-capture-import'
+import { prepareCaptureTask, type CaptureTaskDraft } from './capture-task'
 import type { CaptureImportPreview, CaptureImportReceipt, ParsedLocalEmail } from './web-capture-import'
 
-type Props = { settings: Settings; onImported?: (receipt: CaptureImportReceipt) => void }
+type Props = { settings: Settings; onImported?: (receipt: CaptureImportReceipt) => void; onManualTask?: (draft:CaptureTaskDraft)=>void }
 export function WebCaptureImportView(props: Props) {
   return <CapturePanel key={`${props.settings.profileId}:${props.settings.datasetId}`} {...props}/>
 }
-function CapturePanel({ settings, onImported }: Props) {
+function CapturePanel({ settings, onImported, onManualTask }: Props) {
   const [mode, setMode] = useState<'web' | 'capsule' | 'email'>('web')
   const [form, setForm] = useState({ title: '', url: '', quote: '', timezone: Intl.DateTimeFormat().resolvedOptions().timeZone, capsule: '' })
   const [email, setEmail] = useState<ParsedLocalEmail | null>(null)
@@ -36,6 +37,7 @@ function CapturePanel({ settings, onImported }: Props) {
     <div className="change-set-actions" role="group" aria-label="取込方法">
       {([['web', 'URLと引用を貼り付け'], ['capsule', '選択引用JSON'], ['email', '.emlファイル']] as const).map(([value, label]) => <button key={value} type="button" className={mode === value ? 'primary-button' : 'secondary-button'} disabled={busy} aria-pressed={mode === value} onClick={() => { setMode(value); changed() }}>{label}</button>)}
     </div>
+    {mode==='capsule'?<label className="field">選択引用ファイルを開く（JSON・120KBまで）<input type="file" accept=".json,application/json" disabled={busy} onChange={event=>{const file=event.target.files?.[0];event.target.value='';changed();if(file)void run(async()=>{const capsule=await parseWebCaptureFile(file);setForm(previous=>({...previous,capsule:JSON.stringify(capsule)}));setNotice('選択引用を読みました。保存する引用を確認してください。')})}}/></label>:null}
     {mode === 'web' ? <div className="form-grid">
       <label>資料名<input value={form.title} maxLength={200} disabled={busy} onChange={event => field('title', event.target.value)}/></label>
       <label>本人が選んだ出典URL<input type="url" value={form.url} maxLength={2000} disabled={busy} onChange={event => field('url', event.target.value)} placeholder="https://example.org/article"/></label>
@@ -63,6 +65,7 @@ function CapturePanel({ settings, onImported }: Props) {
       {stale && !receipt ? <p role="alert">権限が変わったため、引用をもう一度確認してください。</p> : null}
     </article> : null}
     {receipt ? <p role="status">{receipt.duplicate ? '保存済み資料を利用します。既存の本人設定を維持しました。' : '資料として保存しました。'} {receipt.permissions.aiEgress ? 'この既存資料には本人が設定したAI送信許可があります。' : 'AI送信は無効です。'} 資料ID：{receipt.sourceId}</p> : null}
+    {receipt&&onManualTask?<button type="button" disabled={busy} onClick={()=>void run(async()=>onManualTask(await prepareCaptureTask(receipt)))}>この引用を見ながらタスクを手動作成</button>:null}
     <p role="status">{notice || (busy ? '取込内容を確認しています…' : '')}</p>
   </section>
 }
