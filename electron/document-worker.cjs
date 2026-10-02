@@ -40,7 +40,7 @@ function zipEntries(bytes) {
   return unzipSync(bytes, { filter: entry => /\.xml$|\.rels$/.test(entry.name) && !/vba|embeddings\//i.test(entry.name) })
 }
 async function extract({ name, bytes }) {
-  const extension = name.toLowerCase().split('.').pop(), locations = [], lines = [], unread = [], notices = ['原ファイルは保存せず、全文hashと抽出本文だけを保存します。外部リンク・マクロ・埋込オブジェクトを実行しません。']
+  const extension = name.toLowerCase().split('.').pop(), locations = [], lines = [], unread = [], notices = ['原ファイルは保存せず、全文hashと抽出本文だけを保存します。外部リンク・マクロ・埋込オブジェクトを実行しません。', 'テキスト層だけを抽出します。画像・図・埋込オブジェクト・レイアウト・OCRの内容は未確認です。']
   const add = (location, value) => {
     const text = String(value).replace(/\r\n?|\n/g, ' ').normalize('NFC').trim()
     if (text) { lines.push(text); locations.push(location) }
@@ -70,7 +70,10 @@ async function extract({ name, bytes }) {
     xml(files['[Content_Types].xml'])
     if (extension === 'docx') {
       const document = xml(files['word/document.xml'])
-      elements(document, 'w:p').forEach((row, i) => add(`段落${i + 1}`, texts(row.children, 'w:t')))
+      elements(document, 'w:p').forEach((row, i) => {
+        add(`段落${i + 1}`, texts(row.children, 'w:t'))
+        if (elements(row.children, 'w:drawing').length || elements(row.children, 'w:pict').length) unread.push({ location: `段落${i + 1}`, reason: '画像・図は未読です' })
+      })
       if (Object.keys(files).some(key => /word\/(header|footer|footnotes|endnotes)/.test(key))) unread.push({ location: 'ヘッダー・フッター・脚注', reason: '本文以外は今回の読取対象外です' })
     } else {
       const folder = extension === 'pptx' ? 'ppt' : 'xl'
@@ -90,8 +93,10 @@ async function extract({ name, bytes }) {
           const before = lines.length
           elements(doc, 'a:p').forEach((row, p) => add(`スライド${i + 1}・段落${p + 1}`, texts(row.children, 'a:t')))
           if (before === lines.length) unread.push({ location: `スライド${i + 1}`, reason: '文字がありません。画像・図は未読です' })
+          else if (elements(doc, 'p:pic').length || elements(doc, 'p:graphicFrame').length) unread.push({ location: `スライド${i + 1}`, reason: '画像・図・表のレイアウトは未確認です' })
         } else {
           const sheet = String(item.attrs['@_name'] ?? `シート${i + 1}`)
+          if (elements(doc, 'drawing').length || elements(doc, 'legacyDrawing').length) unread.push({ location: sheet, reason: '画像・図は未読です' })
           for (const cell of elements(doc, 'c')) {
             const address = cell.attrs['@_r'], type = cell.attrs['@_t'], raw = texts(cell.children, 'v'), formula = texts(cell.children, 'f')
             if (typeof address !== 'string' || !/^[A-Z]{1,3}[1-9]\d{0,6}$/.test(address)) fail('セル番地が不正です')
