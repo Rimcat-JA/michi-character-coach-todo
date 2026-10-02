@@ -47,5 +47,7 @@ it('renderer rechecks scope and registration; hidden fields cannot become query 
   await expect(dispatchExternalReadTool('coach_search_tasks',{limit:51},context)).rejects.toThrow('TOOL_SCHEMA')
   await expect(dispatchExternalReadTool('coach_get_task',{task_id:ids[0]},{...context,datasetId:crypto.randomUUID()})).rejects.toThrow('NOT_FOUND')
   await expect(dispatchExternalReadTool('coach_get_task',{task_id:ids[0]},{...context,externalEpoch:context.externalEpoch+1})).rejects.toThrow('STALE_GRANT')
+  await db.datasetState.put({id:'main',mode:'frozen',moveId:crypto.randomUUID(),updatedAt:new Date().toISOString()})
+  await expect(dispatchExternalReadTool('coach_get_task',{task_id:ids[0]},context)).rejects.toThrow('DATASET_FROZEN')
  }finally{await h.close()}
 })

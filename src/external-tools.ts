@@ -21,14 +21,14 @@ export async function dispatchExternalReadTool(name:string,args:Record<string,un
  const tool=catalog.tools.find(tool=>tool.name===name)
  if(!tool)fail('TOOL_NOT_FOUND')
  assertSchema(tool.inputSchema,args)
- return db.transaction('r',db.settings,db.tasks,async()=>{
+ return db.transaction('r',db.settings,db.tasks,db.datasetState,async()=>{
   const settings=await db.settings.get('main')
   if(!settings||settings.profileId!==context.ownerId||settings.datasetId!==context.datasetId)fail('NOT_FOUND')
   const external=externalAIFor(settings),client=external.clients.find(row=>row.registration.client.id===context.registration.client.id),policy=changePolicyFor(settings)
   if(!external.enabled)fail('PLUGIN_DISABLED')
   if(!client||client.status!=='active'||Date.parse(client.registration.client.grant.expires_at)<=Date.now())fail('GRANT_REVOKED')
   if(external.epoch!==context.externalEpoch||policy.epoch!==context.policyEpoch||policy.sourcePermissionRevision!==context.sourcePermissionRevision||canonicalJSON(client.registration)!==canonicalJSON(context.registration))fail('STALE_GRANT')
-  if((settings.datasetMode??'active')!=='active')fail('DATASET_FROZEN')
+  if((settings.datasetMode??'active')!=='active'||((await db.datasetState.get('main'))?.mode??'active')!=='active')fail('DATASET_FROZEN')
   const registration=client.registration
   if(!registration.client.grant.keys.includes('tasks:read'))fail('INSUFFICIENT_SCOPE')
   if(name==='coach_get_capabilities')return {enabled:true,operations:[...implementedExternalTools],limitations:['ローカルアプリの許可タスクのみ。資料・会話・記憶は非共有。','この読み取り段階では変更・引継ぎツールを提供しません。','実host未確認。アプリ終了・取消で接続は無効になります。']}

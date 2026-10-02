@@ -6,8 +6,9 @@ function installAppMCPIPC({ipcMain,win,app,getHub,assertMain,readDB}){
  const credentials=new Map(),pending=new Map();let starting=null,server=null,generation=0
  async function getContext(clientId){
   const settings=await readDB('settings','main'),status=await(await getHub()).clientStatus({clientId}),registration=status.registration
+  const dataset=await readDB('datasetState','main')
   const client=settings?.externalAI?.clients?.find(row=>row.registration.client.id===clientId)
-  return {registration,ownerId:settings?.profileId,datasetId:settings?.datasetId,externalEnabled:settings?.externalAI?.version===1&&settings.externalAI.enabled===true,externalEpoch:settings?.externalAI?.epoch,active:status.connected&&client?.status==='active'&&JSON.stringify(client.registration)===JSON.stringify(registration),frozen:(settings?.datasetMode??'active')!=='active',policyEpoch:settings?.changePolicy?.epoch??0,sourcePermissionRevision:settings?.changePolicy?.sourcePermissionRevision??0}
+  return {registration,ownerId:settings?.profileId,datasetId:settings?.datasetId,externalEnabled:settings?.externalAI?.version===1&&settings.externalAI.enabled===true,externalEpoch:settings?.externalAI?.epoch,active:status.connected&&client?.status==='active'&&JSON.stringify(client.registration)===JSON.stringify(registration),frozen:(settings?.datasetMode??'active')!=='active'||(dataset?.mode??'active')!=='active',policyEpoch:settings?.changePolicy?.epoch??0,sourcePermissionRevision:settings?.changePolicy?.sourcePermissionRevision??0}
  }
  function dispatch(name,args,context){
   if(win.isDestroyed()||pending.size>=64)return Promise.reject(Object.assign(Error('APP_NOT_RUNNING'),{code:'APP_NOT_RUNNING'}))
