@@ -12,8 +12,8 @@ const contentHash=value=>crypto.createHash('sha256').update(value,'utf8').digest
 const blobSha=(content,algorithm='sha1')=>{const data=Buffer.from(content,'utf8');return crypto.createHash(algorithm).update(Buffer.from(`blob ${data.length}\0`)).update(data).digest('hex')}
 const label=value=>typeof value==='string'&&/^[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,98}[A-Za-z0-9])?$/.test(value)&&!value.includes('..')
 function validBranch(value){return typeof value==='string'&&value.length<=200&&/^[A-Za-z0-9][A-Za-z0-9_./-]*$/.test(value)&&!value.includes('..')&&!value.includes('//')&&!value.endsWith('/')&&!value.endsWith('.')&&!value.endsWith('.lock')&&!value.split('/').some(part=>part.startsWith('.'))}
-function validateRepository(value){
-  if(!exact(value,['repositoryId','owner','name','defaultBranch','visibility','headSha','protected','empty','ownerVerified','canPush','observedAt'])||!Number.isSafeInteger(value.repositoryId)||value.repositoryId<1||!label(value.owner)||!label(value.name)||!validBranch(value.defaultBranch)||!['public','private'].includes(value.visibility)||!gitSha(value.headSha)||typeof value.protected!=='boolean'||value.empty!==false||value.ownerVerified!==true||value.canPush!==true||!timestamp(value.observedAt))fail('REPOSITORY_INVALID')
+function validateRepository(value,{allowEmpty=false}={}){
+  if(!exact(value,['repositoryId','owner','name','defaultBranch','visibility','headSha','protected','empty','ownerVerified','canPush','observedAt'])||!Number.isSafeInteger(value.repositoryId)||value.repositoryId<1||!label(value.owner)||!label(value.name)||!validBranch(value.defaultBranch)||!['public','private'].includes(value.visibility)||!(allowEmpty&&value.empty===true?value.headSha===null:gitSha(value.headSha)&&value.empty===false)||typeof value.protected!=='boolean'||value.ownerVerified!==true||value.canPush!==true||!timestamp(value.observedAt))fail('REPOSITORY_INVALID')
 }
 function validateManifest(value){
   if(!exact(value,['version','exportId','repository','configurationId','authorizationRevision','completionDigest','evidenceDigest','policyDigest','policyRevision','ownerId','datasetId','policyEpoch','sourcePermissionRevision','preparedAt','expiresAt','publicId','recordDate','files','approvalDigest'])||value.version!==1||!uuid(value.exportId)||!uuid(value.publicId)||!uuid(value.configurationId)||typeof value.ownerId!=='string'||!value.ownerId||value.ownerId.length>200||!uuid(value.datasetId)||['completionDigest','evidenceDigest','policyDigest','approvalDigest'].some(key=>!sha256(value[key]))||['policyRevision','policyEpoch','sourcePermissionRevision','authorizationRevision'].some(key=>!Number.isSafeInteger(value[key])||value[key]<0)||!timestamp(value.preparedAt)||!timestamp(value.expiresAt)||Date.parse(value.expiresAt)<=Date.parse(value.preparedAt)||Date.parse(value.expiresAt)-Date.parse(value.preparedAt)>86400000||typeof value.recordDate!=='string'||!/^\d{4}-\d{2}-\d{2}$/.test(value.recordDate)||!Number.isFinite(Date.parse(value.recordDate))||new Date(value.recordDate).toISOString().slice(0,10)!==value.recordDate||!Array.isArray(value.files)||value.files.length<2||value.files.length>12)fail('MANIFEST_INVALID')
@@ -41,8 +41,9 @@ function createGitHubHTTP({token,owner,name,fetchImpl=globalThis.fetch}){
   const prefix=`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}`
   return async(method,suffix='',body)=>{
     const comparison=typeof suffix==='string'&&/^\/compare\/(?:[a-f0-9]{40}|[a-f0-9]{64})\.\.\.(?:[a-f0-9]{40}|[a-f0-9]{64})\?per_page=1$/.test(suffix)
-    if(!['GET','POST','PATCH'].includes(method)||typeof suffix!=='string'||suffix.includes('://')||suffix.includes('..')&&!comparison||suffix.includes('#')||suffix.includes('\\')||!/^\/(?:user|repos\/)/.test(suffix==='/user'?suffix:prefix+suffix))fail('ENDPOINT_INVALID')
-    const url=`https://api.github.com${suffix==='/user'?'/user':prefix+suffix}`
+    const userEndpoint=suffix==='/user'||suffix==='/user/emails'
+    if(!['GET','POST','PATCH','PUT'].includes(method)||method==='PUT'&&suffix!=='/contents/README.md'||userEndpoint&&method!=='GET'||typeof suffix!=='string'||suffix.includes('://')||suffix.includes('..')&&!comparison||suffix.includes('#')||suffix.includes('\\')||!/^\/(?:user|repos\/)/.test(userEndpoint?suffix:prefix+suffix))fail('ENDPOINT_INVALID')
+    const url=`https://api.github.com${userEndpoint?suffix:prefix+suffix}`
     const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),15000)
     try{
       let response
@@ -62,7 +63,12 @@ async function inspectGitHubRepository({token,owner,name,branch,visibility},fetc
   if(!validBranch(branch)||!['public','private'].includes(visibility))fail('CONNECTION_INVALID')
   const request=createGitHubHTTP({token,owner,name,fetchImpl}),user=await request('GET','/user'),repo=await request('GET')
   if(!plain(user)||!Number.isSafeInteger(user.id)||!label(user.login)||!plain(repo)||!Number.isSafeInteger(repo.id)||repo.owner?.id!==user.id||repo.owner?.login?.toLowerCase()!==owner.toLowerCase()||user.login.toLowerCase()!==owner.toLowerCase()||repo.name?.toLowerCase()!==name.toLowerCase()||repo.default_branch!==branch||repo.visibility!==visibility||repo.private!==(visibility==='private')||repo.archived||repo.disabled||repo.permissions?.push!==true)fail('REPOSITORY_NOT_OWNED_OR_WRITABLE')
-  const detail=await request('GET',`/branches/${encodeURIComponent(branch)}`),ref=await request('GET',`/git/ref/heads/${encodeURIComponent(branch)}`)
+  let detail,ref
+  try{detail=await request('GET',`/branches/${encodeURIComponent(branch)}`);ref=await request('GET',`/git/ref/heads/${encodeURIComponent(branch)}`)}catch(error){
+    if(repo.size!==0||![404,409].includes(error.status))throw error
+    const target={repositoryId:repo.id,owner:repo.owner.login,name:repo.name,defaultBranch:branch,visibility,headSha:null,protected:false,empty:true,ownerVerified:true,canPush:true,observedAt:new Date(now()).toISOString()}
+    validateRepository(target,{allowEmpty:true});return target
+  }
   if(detail.name!==branch||typeof detail.protected!=='boolean'||ref.ref!==`refs/heads/${branch}`||ref.object?.type!=='commit'||!gitSha(ref.object.sha))fail('BRANCH_INVALID')
   return {repositoryId:repo.id,owner:repo.owner.login,name:repo.name,defaultBranch:branch,visibility,headSha:ref.object.sha,protected:detail.protected,empty:false,ownerVerified:true,canPush:true,observedAt:new Date(now()).toISOString()}
 }

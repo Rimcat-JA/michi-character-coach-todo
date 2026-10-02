@@ -23,6 +23,8 @@ async function createGitHubPrivateStore({directory,safeStorage}){
   // A null configuration never creates connection.bin (main reads its presence as a past registration); an existing one still advances its revision.
   saveConfiguration:async value=>{if(value.configuration===null){await write('revoked.bin',true);if(!await present('connection.bin'))return}await write('connection.bin',value);if(value.configuration!==null)await write('revoked.bin',false)},
   revoke:()=>write('revoked.bin',true),
+  readInitialization:async(repositoryId,configurationId)=>{if(!Number.isSafeInteger(repositoryId)||repositoryId<1||typeof configurationId!=='string'||!/^[a-f0-9-]{36}$/.test(configurationId))fail('INITIALIZATION_KEY_INVALID');const value=await read(`init-${repositoryId}-${configurationId}.bin`,null);if(value&&(value.version!==1||value.repositoryId!==repositoryId||value.configurationId!==configurationId||typeof value.content!=='string'||value.content.length>10000||!['reserved','unknown','initialized'].includes(value.state)))fail('INITIALIZATION_JOURNAL_INVALID');return value},
+  writeInitialization:async(value,exclusive)=>{if(!Number.isSafeInteger(value.repositoryId)||value.repositoryId<1||typeof value.configurationId!=='string'||!/^[a-f0-9-]{36}$/.test(value.configurationId))fail('INITIALIZATION_KEY_INVALID');await write(`init-${value.repositoryId}-${value.configurationId}.bin`,value,exclusive)},
   readAttempt:async(repositoryId,completionId)=>{const value=await read(key(repositoryId,completionId),null);return value===null?null:attempt(value,repositoryId,completionId)},
   writeAttempt:async(value,exclusive)=>{attempt(value,value.repositoryId,value.completionId);await write(key(value.repositoryId,value.completionId),value,exclusive)}
  })
