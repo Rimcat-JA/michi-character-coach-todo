@@ -5,7 +5,7 @@ const xml = value => String(value).replaceAll('&', '&amp;').replaceAll('<', '&lt
 const start = '<d:multistatus xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav" xmlns:cs="http://calendarserver.org/ns/">'
 const response = (href, props) => `<d:response><d:href>${xml(href)}</d:href><d:propstat><d:prop>${props}</d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>`
 export const syntheticCalDAVEvent = (version = 1, uid = 'fixture-event') => `BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Synthetic CalDAV//EN\r\nBEGIN:VEVENT\r\nUID:${uid}\r\nSEQUENCE:${version}\r\nDTSTAMP:20261001T000000Z\r\nDTSTART:20261003T010000Z\r\nDTEND:20261003T020000Z\r\nSUMMARY:Synthetic CalDAV ${version}\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n`
-export async function createCalDAVFixtureServer() {
+export async function createCalDAVFixtureServer({ port = 0 } = {}) {
   const objects = new Map(), journal = [], requests = []
   let sequence = 0, mode = 'normal', race = null
   function put(href, data) { const record = { data, etag: `"${hash(data)}"` }; objects.set(href, record);journal.push({ sequence: ++sequence, href, deleted: false });return record }
@@ -53,7 +53,7 @@ export async function createCalDAVFixtureServer() {
     }
     send(405)
   })
-  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+  await new Promise(resolve => server.listen(port, '127.0.0.1', resolve))
   const origin = `http://127.0.0.1:${server.address().port}`
   return { origin, url: origin + '/dav/', requests, objects, put, remove, setMode: value => { mode = value }, raceNextWrite: value => { race = value }, close: () => new Promise(resolve => { server.closeAllConnections();server.close(resolve) }) }
 }

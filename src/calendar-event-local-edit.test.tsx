@@ -50,3 +50,18 @@ it('復元が版と外部未反映を保ち、出典・読取・書込を別表�
   const html = renderToStaticMarkup(<CalendarEventEditor event={event} state={state} run={async () => true} />)
   expect(html).toContain('本人変更・外部未反映'); expect(html).toContain('読取：'); expect(html).toContain('書込：'); expect(html).toContain('disabled'); readOnlyCalendarForbiddenClaims.forEach(text => expect(html).not.toContain(text)); expect(localCalendarEditNotice).toBe('この端末の予定だけ変更しました（元のICSは変更されていません）')
 })
+
+it('この回の資料採用は別feedの取得失敗に妨げられず、対象feedの失敗は拒否する', async () => {
+  const target = (await db.calendarRules.get('main'))!.instances[0]
+  const other = await prepareCalendarICSImport({ contextId: 'company', bindingId: 'self', calendarId: 'business', feedId: 'other-feed', title: '別の取得元', retentionUntil: '2030-01-01T00:00:00.000Z' }, ics.replace('local-only', 'other-event'), { fromDate: from, toDate: to })
+  await applyCalendarProposalFromUI(other.proposal!, click());await applyCalendarProposalFromUI(await prepareCalendarGeneration(from,to),click())
+  const before = (await db.calendarEvents.toArray()).find(row=>row.id!==target.entityId)!
+  const state = (await db.calendarRules.get('main'))!;state.sources.find(row=>row.id===other.preview.sourceId)!.status='stale';state.revision++;await db.calendarRules.put(state)
+  const event = (await db.calendarEvents.get(target.entityId))!;await updateCalendarEventLocally(event.id,event.revision!,{title:'本人変更',startAt:event.startAt,endAt:event.endAt},click())
+  const proposal = await prepareCalendarSourceAcceptance(target.generationKey,from,to)
+  expect(proposal.plan.conflicts).toEqual([])
+  await applyCalendarProposalFromUI(proposal,click());expect(await db.calendarEvents.get(before.id)).toEqual(before)
+  const stale = (await db.calendarRules.get('main'))!;stale.sources.find(row=>row.id!==other.preview.sourceId)!.status='stale';stale.revision++;await db.calendarRules.put(stale)
+  const blocked = await prepareCalendarSourceAcceptance(target.generationKey,from,to);expect(blocked.plan.conflicts.length).toBeGreaterThan(0)
+  await expect(applyCalendarProposalFromUI(blocked,click())).rejects.toThrow('個別')
+})

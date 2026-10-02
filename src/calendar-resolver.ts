@@ -459,7 +459,11 @@ export function buildCalendarChangePlan(state: CalendarRulesState, current: Curr
     const date = spec.scheduledDate ?? calendarDateAt(spec.startAt!, spec.timezone)
     return inRange(date, from, to) && (scope.kind === 'all_uncompleted' || scope.kind === 'this_and_future' && date >= scope.fromDate || scope.kind === 'this_instance' && spec.generationKey === scope.generationKey)
   }
-  const resolved = resolveCalendarOccurrences(state, from, to, current.filter(item => included(item.spec)).map(item => item.generationKey), { progress: calendarProgress(current), ...(options.today ? { today: options.today } : {}) }), conflicts = [...resolved.conflicts]
+  const resolved = resolveCalendarOccurrences(state, from, to, current.filter(item => included(item.spec)).map(item => item.generationKey), { progress: calendarProgress(current), ...(options.today ? { today: options.today } : {}) })
+  const selected = scope.kind === 'this_instance' ? current.find(item => item.generationKey === scope.generationKey)?.spec ?? resolved.occurrences.find(item => item.generationKey === scope.generationKey) : null
+  // A per-occurrence approval cannot change other series. Keep every conflict if
+  // this series is blocked or unknown; unrelated feeds do not block this choice.
+  const conflicts = scope.kind === 'this_instance' && selected && !resolved.blockedSeries.includes(series(selected)) ? resolved.conflicts.filter(item => item.key === selected.generationKey) : [...resolved.conflicts]
   for (const spec of resolved.occurrences) {
     const before = current.find(item => item.generationKey === spec.generationKey)
     if (!included(spec) && (!before || !included(before.spec))) continue
