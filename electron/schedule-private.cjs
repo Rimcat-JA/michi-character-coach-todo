@@ -1,0 +1,13 @@
+const fs=require('node:fs/promises'),path=require('node:path'),crypto=require('node:crypto')
+async function createSchedulePrivateStore({directory,safeStorage}) {
+  if(!safeStorage.isEncryptionAvailable())throw new Error('SCHEDULE_SAFE_STORAGE_UNAVAILABLE')
+  await fs.mkdir(directory,{recursive:true});const root=await fs.realpath(directory),original=await fs.lstat(directory)
+  if(original.isSymbolicLink()||!original.isDirectory()||path.resolve(root).toLowerCase()!==path.resolve(directory).toLowerCase())throw new Error('SCHEDULE_PRIVATE_PATH_UNSAFE')
+  const target=path.join(root,'connections.bin');let queue=Promise.resolve()
+  async function boundary(){const current=await fs.lstat(directory);if(current.isSymbolicLink()||current.dev!==original.dev||current.ino!==original.ino||await fs.realpath(directory)!==root)throw new Error('SCHEDULE_PRIVATE_PATH_CHANGED')}
+  async function inspect(){await boundary();try { const info=await fs.lstat(target);if(!info.isFile()||info.isSymbolicLink()||info.nlink!==1||info.size>1048576)throw new Error('SCHEDULE_PRIVATE_FILE_UNSAFE');return info }catch(error){if(error.code==='ENOENT')return null;throw error}}
+  async function load(){await queue;const before=await inspect();if(!before)return {version:1,subscriptions:[],caldav:[]};const handle=await fs.open(target,'r');try {const info=await handle.stat();if(info.dev!==before.dev||info.ino!==before.ino||info.nlink!==1||info.size>1048576)throw new Error('SCHEDULE_PRIVATE_FILE_CHANGED');const bytes=await handle.readFile();await boundary();const after=await inspect();if(!after||info.ino!==after.ino||info.dev!==after.dev||info.size!==after.size||info.mtimeMs!==after.mtimeMs)throw new Error('SCHEDULE_PRIVATE_FILE_CHANGED');const value=JSON.parse(safeStorage.decryptString(bytes));if(value?.version!==1||!Array.isArray(value.subscriptions)||!Array.isArray(value.caldav)||value.subscriptions.length>100||value.caldav.length>20)throw new Error('SCHEDULE_PRIVATE_INVALID');return value}finally{await handle.close()}}
+  function save(value){const operation=queue.then(async()=>{await inspect();const bytes=safeStorage.encryptString(JSON.stringify(value));if(bytes.length>1048576)throw new Error('SCHEDULE_PRIVATE_BUDGET');const temporary=`${target}.${crypto.randomUUID()}.tmp`,handle=await fs.open(temporary,'wx',0o600);try{await handle.writeFile(bytes);await handle.sync()}finally{await handle.close()}try{await inspect();await fs.rename(temporary,target)}catch(error){await fs.unlink(temporary).catch(()=>{});throw error}});queue=operation.catch(()=>{});return operation}
+  return {load,save}
+}
+module.exports={createSchedulePrivateStore}

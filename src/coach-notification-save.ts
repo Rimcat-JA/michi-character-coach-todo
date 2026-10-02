@@ -6,6 +6,7 @@ import { uid, type ReminderRule, type Settings } from './domain'
 import { querySmartList } from './smart-lists'
 import { acceptInAppDelivery, beginCoachNotificationDelivery, cancelPendingCoachNotifications, changeCoachNotificationPolicy, coachTriggersOf, emptyCoachNotificationState, markCoachNotificationRead, notificationLocalClock, reserveCoachNotification, revalidateCoachNotification, settleCoachNotificationDelivery, validateCoachNotificationState, validateCoachTriggers, type CoachNotificationIntent, type CoachNotificationPolicy, type CoachNotificationState, type CoachTriggerSettings, type NotificationGuard, type NotificationRequest } from './coach-notifications'
 import { deadlineFacts, factsDigest, isCalendarIntent, isDeadlineIntent, isReplanIntent, triggerGuardState } from './coach-facts'
+import { scheduleRefreshNoticeFacts } from './schedule-refresh-notifications'
 
 export function coachNotificationStateFor(settings: Settings): CoachNotificationState {
   if (settings.notificationState) { validateCoachNotificationState(settings.notificationState, settings.profileId, settings.datasetId); return structuredClone(settings.notificationState) }
@@ -64,6 +65,11 @@ async function currentGuard(settings: Settings, intent: CoachNotificationIntent,
     target = { ...intent.target, revision: list?.revision ?? -1, active: Boolean(list && list.ownerId === settings.profileId && querySmartList(list, await db.tasks.toArray(), settings.profileId).some(task => task.status === 'open')) }
   }
   let facts: string | null = null
+  if (intent.purpose === 'plan_changed' && intent.target.kind === 'system' && intent.target.id === 'schedule-refresh') {
+    const current = scheduleRefreshNoticeFacts(await db.scheduleRefreshInbox.toArray(), settings, at)
+    const active = Boolean(current && intent.ruleId === 'schedule-refresh' && intent.ruleRevision === current.revision && intent.text.factual === current.factual)
+    target = { ...intent.target, active }; ruleState = { id: intent.ruleId, revision: current?.revision ?? '', active, sentCount: 0 }
+  }
   if (isDeadlineIntent(intent) || isCalendarIntent(intent) || isReplanIntent(intent)) {
     const state = coachNotificationStateFor(settings), task = intent.target.kind === 'task' ? await db.tasks.get(intent.target.id) : undefined
     const derived = triggerGuardState(intent, task, isReplanIntent(intent) ? await db.tasks.toArray() : [], coachTriggersOf(state), state.policy.timezone, at, settings.reminderState?.rules)!
@@ -105,7 +111,7 @@ export async function queueCoachNotification(request: NotificationRequest, guard
   })
 }
 export async function prepareCoachNotificationDelivery(intentId: string, destinationId: string, at = new Date().toISOString()) {
-  return db.transaction('rw', db.settings, db.tasks, db.smartLists, db.contextSources, async () => {
+  return db.transaction('rw', db.settings, db.tasks, db.smartLists, db.contextSources, db.scheduleRefreshInbox, async () => {
     const settings = await db.settings.get('main'); if (!settings) return null
     const state = coachNotificationStateFor(settings), intent = state.intents.find(item => item.id === intentId); if (!intent) return null
     const result = beginCoachNotificationDelivery(state, intentId, destinationId, uid(), await currentGuard(settings, intent, at), at)

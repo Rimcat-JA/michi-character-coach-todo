@@ -74,6 +74,10 @@ function validateOSNotification(context, payload, now = new Date().toISOString()
       const count = slippedCount(context.tasks, local.day)
       if (!triggers.replanPrompt?.enabled || intent.target.id !== `replan:${local.day}` || intent.ruleWindow !== local.day || !count || intent.ruleRevision !== `replan:${count}`) return null
       factual = replanFactual(count)
+    } else if (intent.purpose==='plan_changed'&&intent.target.kind==='system'&&intent.target.id==='schedule-refresh'&&intent.ruleId==='schedule-refresh') {
+      const rows=(context.scheduleRefreshInbox??[]).filter(row=>row.ownerId===settings.profileId&&row.datasetId===settings.datasetId&&row.policyEpoch===(settings.changePolicy?.epoch??0)&&row.state==='pending'&&row.fetchedAt<=now&&Date.parse(row.fetchedAt)>Date.parse(now)-86400000)
+      if(!rows.length||rows.length>100||intent.ruleRevision!==`refresh:${rows.length}:${rows.map(row=>row.fetchedAt).sort().at(-1)}`)return null
+      factual=`予定資料${rows.length}件に変更があります。差分の確認待ちです`
     } else return null
     for (const ref of intent.sourceRefs ?? []) {
       const source = context.sources?.find(item => item.id === ref.id)

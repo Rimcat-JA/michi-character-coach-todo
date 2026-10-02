@@ -48,6 +48,9 @@ import { VoiceMediaView } from './VoiceMediaView'
 import { prepareCoachNotificationDelivery, queueSnoozeNotification, recordCoachNotificationDelivery } from './coach-notification-save'
 import { CalendarRulesView } from './CalendarRulesView'
 import { IntegrationsView } from './IntegrationsView'
+import { ScheduleSourcesPanel } from './ScheduleSourcesPanel'
+import { deliverScheduleRefreshNotice } from './schedule-refresh-notifications'
+import { receiveScheduleRefresh, recordScheduleAcquisitionStatus, refreshStatuses } from './schedule-refresh'
 import RoutineAssistView from './RoutineAssistView'
 import LegacyRoutineConversionView from './LegacyRoutineConversionView'
 import CalendarImportView from './CalendarImportView'
@@ -264,6 +267,16 @@ function App() {
       }
     })().catch(showError)
   }, [settings?.profileId, settings?.datasetId, settings?.notifications, settings?.notificationState?.policy.epoch, snoozeAlerts])
+  useEffect(() => {
+    const bridge = window.michiScheduleRefresh
+    if (!bridge || !settings?.profileId || !settings.datasetId) return
+    let incoming = Promise.resolve<unknown>(null)
+    const disposeChanged = bridge.onChanged(value => { incoming = incoming.then(() => receiveScheduleRefresh(value)).catch(showError) })
+    const disposeNotify = bridge.onNotify(() => { void incoming.then(() => deliverScheduleRefreshNotice()).catch(showError) })
+    const disposeStatus = bridge.onStatus(value => { void recordScheduleAcquisitionStatus([value]).catch(showError) })
+    void bridge.request({ action: 'start' }).then(() => refreshStatuses()).then(recordScheduleAcquisitionStatus).catch(showError)
+    return () => { disposeChanged(); disposeStatus(); disposeNotify() }
+  }, [settings?.profileId, settings?.datasetId])
   const triggerKey = JSON.stringify(settings?.notificationState?.triggers ?? null)
   useEffect(() => {
     // N07/K05 fact triggers on the same 60s tick; reservation runs the common policy before any wording or delivery.
@@ -328,7 +341,7 @@ function App() {
         {view === 'coach' && <CoachView tasks={open} allTasks={tasks} goals={goals.filter(goal => goal.ownerId === settings.profileId && !goal.deletedAt)} checkIns={goalCheckIns} settings={settings} onEdit={setEditor} onNew={() => setEditor('new')} onError={showError} />}
         {view === 'focus' && <><SuperFocusView tasks={open} sessions={sessions} onEdit={setEditor} onBack={() => go('today')} run={run} /><PomodoroPanel tasks={open} run={run} /><FocusChoiceTools tasks={tasks} dependencies={dependencies} themes={themeRules.filter(rule => rule.ownerId === settings.profileId)} focusProjects={focusSelection?.projects ?? []} lists={smartLists} ownerId={settings.profileId} date={currentDate} now={nowIso} onEdit={setEditor} run={run} /></>}
         {view === 'history' && <><HistoryView completions={completions} ledger={ledger} sessions={sessions} tasks={tasks} onEdit={id => { const t = tasks.find(x => x.id === id); if (t) setEditor(t) }} run={run} /><CompletionReconfirmationView key={`${settings.datasetId}:${reconfirmationId ?? 'choose'}`} settings={settings} tasks={tasks} completions={completions} ledger={ledger} initialCompletionId={reconfirmationId} onApplied={receipt => { setReconfirmationId(null); setToast(`${receipt.points} ptで実績を再確定しました`) }} /><TimeTargetsView settings={settings} containers={containers} tasks={tasks} sessions={sessions} run={run} /><AnalyticsView completions={completions} sessions={sessions} />{featureEnabled(settings.hiddenFeatures, 'achievements') ? <AchievementsView /> : <FeatureOffCard id="achievements" connection="github" onShow={() => run(() => setFeatureVisible('achievements', true), '機能をONにしました')} />}<SessionCorrectionView sessions={sessions} tasks={tasks} run={run} /></>}
-        {view === 'routines' && <><RoutinesView routines={routines} run={run} stopped={Boolean(changePolicyFor(settings).stops?.routines)} /><LegacyRoutineConversionView routines={routines} state={calendarRulesState} />{calendarRulesState && <>{settings && <RoutineAssistView key={`assist:${calendarRulesState.ownerId}:${calendarRulesState.datasetId}`} state={calendarRulesState} settings={settings} />}<CalendarRulesView key={`${calendarRulesState.ownerId}:${calendarRulesState.datasetId}`} state={calendarRulesState} onPrepareConfiguration={prepareCalendarConfiguration} onPrepareImport={prepareCalendarScheduleImport} onPrepareGeneration={prepareCalendarGeneration} onApply={applyCalendarProposalFromUI} /><CalendarImportView key={`ics:${calendarRulesState.ownerId}:${calendarRulesState.datasetId}`} state={calendarRulesState} /><CalendarCSVImportView key={`csv:${calendarRulesState.ownerId}:${calendarRulesState.datasetId}`} state={calendarRulesState} settings={settings} /></>}</>}
+        {view === 'routines' && <><RoutinesView routines={routines} run={run} stopped={Boolean(changePolicyFor(settings).stops?.routines)} /><LegacyRoutineConversionView routines={routines} state={calendarRulesState} />{calendarRulesState && <>{settings && <RoutineAssistView key={`assist:${calendarRulesState.ownerId}:${calendarRulesState.datasetId}`} state={calendarRulesState} settings={settings} />}<CalendarRulesView key={`${calendarRulesState.ownerId}:${calendarRulesState.datasetId}`} state={calendarRulesState} onPrepareConfiguration={prepareCalendarConfiguration} onPrepareImport={prepareCalendarScheduleImport} onPrepareGeneration={prepareCalendarGeneration} onApply={applyCalendarProposalFromUI} /><CalendarImportView key={`ics:${calendarRulesState.ownerId}:${calendarRulesState.datasetId}`} state={calendarRulesState} /><CalendarCSVImportView key={`csv:${calendarRulesState.ownerId}:${calendarRulesState.datasetId}`} state={calendarRulesState} settings={settings} /><ScheduleSourcesPanel key={`refresh:${calendarRulesState.ownerId}:${calendarRulesState.datasetId}`} state={calendarRulesState} settings={settings} /></>}</>}
         {view === 'habits' && <HabitsView run={run} />}
         {view === 'goals' && <GoalsView run={run} />}
         {view === 'journal' && <><ReviewCoachView settings={settings} tasks={tasks} onEdit={setEditor} run={run} /><JournalView run={run} /><ConnectionStatusView settings={settings} calendarState={calendarRulesState} />{featureEnabled(settings.hiddenFeatures, 'externalImport') ? <ExternalMessageImportView settings={settings} /> : <FeatureOffCard id="externalImport" onShow={() => run(() => setFeatureVisible('externalImport', true), '機能をONにしました')} />}{featureEnabled(settings.hiddenFeatures, 'captureImport') ? <WebCaptureImportView settings={settings} /> : <FeatureOffCard id="captureImport" onShow={() => run(() => setFeatureVisible('captureImport', true), '機能をONにしました')} />}<SourceLibraryView settings={settings} run={run} /><DetectionInboxView settings={settings} tasks={tasks} onEdit={setEditor} /></>}

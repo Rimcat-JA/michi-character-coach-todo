@@ -125,3 +125,9 @@ contextBridge.exposeInMainWorld('michiDesktop', {
   setTrayMode: enabled => ipcRenderer.invoke('michi:set-tray-mode', enabled),
   onTrayStopNotifications: callback => { const listener = () => callback(); ipcRenderer.on('michi:tray-stop-notifications', listener); return () => ipcRenderer.removeListener('michi:tray-stop-notifications', listener) }
 })
+contextBridge.exposeInMainWorld('michiScheduleRefresh', {
+  request: value => ipcRenderer.invoke('michi:schedule-refresh', value),
+  onChanged: callback => { const listener = (_event, value) => callback(value); ipcRenderer.on('michi:schedule-refresh-changed', listener); return () => ipcRenderer.removeListener('michi:schedule-refresh-changed', listener) },
+  onStatus: callback => { const listener = (_event, value) => callback(value); ipcRenderer.on('michi:schedule-refresh-status', listener); return () => ipcRenderer.removeListener('michi:schedule-refresh-status', listener) },
+  onNotify: callback => { const listener = (_event, value) => callback(value); ipcRenderer.on('michi:schedule-refresh-notify', listener); return () => ipcRenderer.removeListener('michi:schedule-refresh-notify', listener) }
+})

@@ -27,8 +27,11 @@ export type CalendarConfigurationGuard = {
   businessHash: string; candidateHash: string; detail: Record<string, unknown>
 }
 const configurationGuards = new Map<string, CalendarConfigurationGuard>()
-export function clearCalendarRulesAuthority() { authority.clear(); configurationGuards.clear() }
-export function discardCalendarConfigurationProposal(proposal: CalendarConfigurationProposal) { if (authority.get(proposal.id) === proposal) { authority.delete(proposal.id); configurationGuards.delete(proposal.id) } }
+type AcquisitionGuard = { assertCurrent: (settings: Settings) => Promise<void>; markApplied: () => Promise<void> }
+const acquisitionGuards = new Map<string, AcquisitionGuard>()
+export function bindCalendarAcquisitionGuard(proposal: CalendarConfigurationProposal, guard: AcquisitionGuard) { if (authority.get(proposal.id) !== proposal || acquisitionGuards.has(proposal.id)) throw new Error('登録済みの確認案へ取得資料を一度だけ結び付けてください'); acquisitionGuards.set(proposal.id, guard) }
+export function clearCalendarRulesAuthority() { authority.clear(); configurationGuards.clear(); acquisitionGuards.clear() }
+export function discardCalendarConfigurationProposal(proposal: CalendarConfigurationProposal) { if (authority.get(proposal.id) === proposal) { authority.delete(proposal.id); configurationGuards.delete(proposal.id); acquisitionGuards.delete(proposal.id) } }
 /** Guards are process-owned callbacks and cannot be recovered from a JSON proposal. */
 export function bindCalendarConfigurationGuard(proposal: CalendarConfigurationProposal, guard: CalendarConfigurationGuard) {
   if (authority.get(proposal.id) !== proposal || configurationGuards.has(proposal.id) || typeof guard.assertCurrent !== 'function') throw new Error('登録済みの周期確認案へ一度だけ根拠確認を結び付けてください')
@@ -132,11 +135,13 @@ export async function applyCalendarProposalFromUI(input: Proposal, event: Event)
   const { digest, ...unsigned } = proposal
   if (await Dexie.waitFor(contentDigest(unsigned)) !== digest) throw new Error('確認後に案が変わりました')
   const calendarTable = table()
+  const acquisitionGuard = acquisitionGuards.get(proposal.id)
   const moves: CalendarMove[] = []
-  const applied = await db.transaction('rw', [calendarTable, db.settings, db.tasks, db.calendarEvents, db.assessments, db.completions, db.sessions, db.tripBundles, db.audits, db.commands, db.containers, db.labelGroups, db.labelDefinitions, db.contextSources, db.contextSnapshots, db.sourceArtifacts], async () => {
+  const applied = await db.transaction('rw', [calendarTable, db.settings, db.tasks, db.calendarEvents, db.assessments, db.completions, db.sessions, db.tripBundles, db.audits, db.commands, db.containers, db.labelGroups, db.labelDefinitions, db.contextSources, db.contextSnapshots, db.sourceArtifacts, ...(acquisitionGuard ? [db.scheduleRefreshInbox] : [])], async () => {
     const current = await settings(), state = await calendarTable.get('main') ?? emptyCalendarRulesState(current.profileId, current.datasetId)
     validateCalendarRulesState(state, current.profileId, current.datasetId)
     const guard = configurationGuards.get(proposal.id)
+    if (acquisitionGuard) { if (acquisitionGuards.get(proposal.id) !== acquisitionGuard) throw new Error('取得資料の確認案が失効しました'); await acquisitionGuard.assertCurrent(current) }
     const registeredProposal = authority.get(proposal.id)
     const assertLive = () => { if (!registeredProposal || authority.get(proposal.id) !== registeredProposal) throw new Error('登録済みの確認案ではありません。差分を作り直してください'); if (guard && configurationGuards.get(proposal.id) !== guard) throw new Error('確認案の根拠が失効しました'); guard?.assertLive?.() }
     assertLive()
@@ -229,6 +234,7 @@ export async function applyCalendarProposalFromUI(input: Proposal, event: Event)
       await db.audits.add({ id: uid(), taskId: null, operation: csvApproval ? 'calendar.csv.approved' : 'routine.assistance.approved', at, detail: JSON.stringify({ ...guard.detail, configurationId: proposal.id, digest: proposal.digest, ...(csvApproval ? { sourceId: resultId } : { ruleId: resultId }), approvedBy: current.profileId }) })
       assertLive()
     }
+    if (acquisitionGuard) await acquisitionGuard.markApplied()
     await db.commands.add({ key, hash, resultId, at }); assertLive(); return resultId
   })
   // N07 official-change fact: queued after commit through the common policy; it never affects the approved change.
