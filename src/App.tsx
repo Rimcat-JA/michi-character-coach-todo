@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { installExternalToolsRuntime } from './external-tools-runtime'
 import { useLiveQuery } from 'dexie-react-hooks'
 import { ArchiveRestore, CalendarDays, Check, CheckCircle2, ChevronDown, Clock3, CloudOff, Download, Focus, FolderTree, History, Inbox, LayoutDashboard, ListTodo, LockKeyhole, Menu, MessageCircle, Moon, MoreHorizontal, Plus, Repeat2, Search, Settings2, ShieldCheck, Sparkles, Tags, Trash2, Upload, X } from 'lucide-react'
 import { db, ensureSettings } from './db'
@@ -199,6 +200,7 @@ function App() {
 
   useEffect(() => { if (location.hash === '#mini') return; ensureSettings().then(async () => { await migrateRuntimeProfile((await networkStatus())?.legacyOnlineConfigured ?? false); await catchUpRoutines() }).then(() => captureDayProgressBaseline(currentDate)).catch(e => setToast(e instanceof Error ? e.message : String(e))) }, [currentDate])
   useEffect(() => applyAppearance(settings?.appearance), [settings?.appearance])
+  useEffect(() => location.hash==='#mini'?undefined:installExternalToolsRuntime(), [])
   useEffect(() => {
     const purge = () => { void ensureSettings().then(() => Promise.all([purgeExpiredCalendarOriginals(), purgeExpiredCSVOriginals(), reconcileAchievementExports(), purgeExpiredCoachContext()])).catch(error => setToast(error instanceof Error ? error.message : String(error))) }
     // Legacy detection notes are migrated once per start; the purge then keeps the 23.2 retention defaults.

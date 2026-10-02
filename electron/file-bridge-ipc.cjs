@@ -4,6 +4,7 @@ const crypto = require('node:crypto')
 const { createFileBridgeHub, revokeStoredCopy } = require('./file-bridge-hub.cjs')
 const { createPrivateJSONStore } = require('./private-json-store.cjs')
 const { runMCPFileSelftest } = require('./mcp-selftest.cjs')
+const { installAppMCPIPC } = require('./mcp-app-ipc.cjs')
 const { readAppDatabase } = require('./app-db-reader.cjs')
 
 function installFileBridgeIPC({ ipcMain, win, app, safeStorage }) {
@@ -78,6 +79,8 @@ function installFileBridgeIPC({ ipcMain, win, app, safeStorage }) {
   for (const method of ['status', 'listConnections', 'selectClient', 'configure', 'disconnect', 'exportSnapshot', 'scanInbox', 'authorizeApplication', 'authorizeAutomaticApplication', 'recordApplied', 'cancelApplication', 'recordRejected', 'invalidate']) {
     ipcMain.handle(`michi:filebridge-${method}`, async (event, envelope) => {
       assertMain(event)
+      if (method === 'invalidate') await appMCP.stop()
+      if (method === 'disconnect') appMCP.revoke(envelope?.request?.clientId)
       const current = await service()
       if (['configure', 'disconnect', 'authorizeApplication'].includes(method)) {
         if (!envelope || Object.keys(envelope).length !== 2 || !Object.hasOwn(envelope, 'request') || typeof envelope.proofNonce !== 'string') throw new Error('本人の接続確認ボタンから操作してください')
@@ -87,6 +90,7 @@ function installFileBridgeIPC({ ipcMain, win, app, safeStorage }) {
       return current[method](envelope)
     })
   }
+  const appMCP = installAppMCPIPC({ipcMain,win,app,getHub:service,assertMain,readDB})
   win.on('closed', () => { nativeProofs.clear(); diagnosticAbort.abort() })
 }
 module.exports = { installFileBridgeIPC }

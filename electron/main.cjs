@@ -361,7 +361,7 @@ if (hasInstanceLock) app.whenReady().then(() => {
   session.defaultSession.setSpellCheckerEnabled(false)
 
   const win = new BrowserWindow({
-    show: !(!app.isPackaged && process.env.MICHI_QA_HIDDEN === '1' && /[\\/]qa-reminders-profile[\\/]local-integrations$/i.test(app.getPath('userData'))),
+    show: !(!app.isPackaged && process.env.MICHI_QA_HIDDEN === '1' && /[\\/]qa-reminders-profile[\\/](?:local-integrations|external-ai)$/i.test(app.getPath('userData'))),
     width: 1280, height: 830, minWidth: 380, minHeight: 550,
     backgroundColor: '#f7f7fb', title: 'michi — キャラクターコーチToDo',
     autoHideMenuBar: true,

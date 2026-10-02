@@ -1,4 +1,9 @@
 const { contextBridge, ipcRenderer } = require('electron')
+contextBridge.exposeInMainWorld('michiAppMCP', {
+  configuration: request => ipcRenderer.invoke('michi:app-mcp-configuration',request),
+  onRequest: callback => {const listener=(_event,value)=>callback(value);ipcRenderer.on('michi:app-mcp-request',listener);return ()=>ipcRenderer.removeListener('michi:app-mcp-request',listener)},
+  respond: value => ipcRenderer.send('michi:app-mcp-response',value)
+})
 let nativeWebhookProof = null
 window.addEventListener('click', event => {
   if (!event.isTrusted || !(event.target instanceof Element)) return
