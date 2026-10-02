@@ -18,12 +18,20 @@ Kの実装・受入は作業中。以下は完成扱いではなく、確認済�
 - API client/UI/restore/file bridge regression: 37件成功。Nodeの合成Eventを使用。
   ネイティブWindowsでのクリック・タスク作成・取消はまだ未確認。
 
+## 追加の個別試験（Windows受入は未確認）
+
+- System Triggers: coordinator 14件、commit hook/client 16件成功。実DBの事実IDのみ、固定引数、期限、回数制限、取消、再起動、親transaction rollbackを確認。
+- マイク許可: 短い本人PTT proofによるaudio限定許可。Node matrixと音声/モデル障害fallback試験成功。実マイクと実タスク編集画面は未確認。
+- 選択引用MV3拡張、JSON取込、引用付き手動タスク化: 6件成功。引用は元資料の削除/保持期限で消え、backup復元で復活しない。
+- Chrome headlessに拡張を読み込んだ試験成功。選択範囲のみ・別ページ/本文/履歴の混入なし。QAコピーだけloopback host権限と呼出し口を追加したため、配布版のactiveTab実クリック・保存ダイアログは未確認。
+- TypeScriptとoxlint成功。
+
 ## 残作業
 
 - 署名Webhookとtransactional outbox、共通通信ゲートウェイを通す配送・再送・受信検証。
-- System Triggersの期限付きイベント委任・IDのみの事実確認・再起動時の遡及実行防止。
-- マイク許可ポリシー、音声/モデル障害後のタスク編集確認。
-- 選択引用だけを保存するMV3拡張とJSON取込・手動タスク化。
+- System Triggersの実Windows画面での実行・取消・確認期限・停止確認。
+- 実Windowsで音声/モデル障害後にタスク編集を完結する確認。
+- 拡張の実activeTab操作と保存、アプリの取込・手動タスク化のWindows確認。
 - K全体のレビュー、Windows DEV試験、全チェック、PR、両OS CI、マージ。
 
 実Zapier、実マイク/日本語ASR資産、ライセンス済みLive2D、日常ブラウザへの導入、

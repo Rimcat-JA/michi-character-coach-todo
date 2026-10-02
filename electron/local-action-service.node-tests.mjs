@@ -14,13 +14,14 @@ async function fixture(callback,{actual=false}={}) {
   const root=await fs.mkdtemp(path.join(await fs.realpath(os.tmpdir()),'michi-local-action-service-')),journalDirectory=path.join(root,'journal')
   await fs.mkdir(journalDirectory)
   const signingKey=crypto.randomBytes(32),deviceId=crypto.randomUUID(),settings={profileId:crypto.randomUUID(),datasetId:crypto.randomUUID(),aiEnabled:true,changePolicy:{epoch:3,sourcePermissionRevision:2,aiChangesEnabled:true,taskUpdate:'require_approval'}}
-  let configuration=null,history=[],spawns=0,stamp=Date.now()
+  let configuration=null,history=[],triggers=[],spawns=0,stamp=Date.now()
+  const facts=new Map()
   const receipts=new Map(),proofs=new Map()
   const proof=(kind,reference)=>{const nonce=crypto.randomUUID();proofs.set(nonce,{kind,reference});return nonce}
-  const options={signingKey,journalDirectory,deviceId,getSettings:async()=>settings,getReceipt:async key=>receipts.get(key)??null,loadConfiguration:async()=>configuration,saveConfiguration:async value=>{configuration=structuredClone(value)},loadResults:async()=>structuredClone(history),saveResults:async value=>{history=structuredClone(value)},verifyNativeProof:async(kind,reference,nonce)=>{const value=proofs.get(nonce);proofs.delete(nonce);return value?.kind===kind&&value?.reference===reference},now:()=>stamp,...(!actual?{spawn:(file,args,flags)=>{spawns++;assert.equal(file,process.execPath);assert.deepEqual(args,['--version']);assert.equal(flags.shell,false);assert.equal(flags.windowsHide,true);assert.equal(flags.env.PATH,undefined);assert.equal(flags.env.NODE_OPTIONS,undefined);const child=new EventEmitter();child.stdout=new PassThrough();child.stderr=new PassThrough();child.kill=()=>true;queueMicrotask(()=>{child.stdout.write('vSynthetic\n');child.emit('close',0,null)});return child}}:{})}
+  const options={signingKey,journalDirectory,deviceId,getFact:async(event,id)=>facts.get(event+':'+id)??null,loadTriggers:async()=>structuredClone(triggers),saveTriggers:async value=>{triggers=structuredClone(value)},getSettings:async()=>settings,getReceipt:async key=>receipts.get(key)??null,loadConfiguration:async()=>configuration,saveConfiguration:async value=>{configuration=structuredClone(value)},loadResults:async()=>structuredClone(history),saveResults:async value=>{history=structuredClone(value)},verifyNativeProof:async(kind,reference,nonce)=>{const value=proofs.get(nonce);proofs.delete(nonce);return value?.kind===kind&&value?.reference===reference},now:()=>stamp,...(!actual?{spawn:(file,args,flags)=>{spawns++;assert.equal(file,process.execPath);assert.deepEqual(args,['--version']);assert.equal(flags.shell,false);assert.equal(flags.windowsHide,true);assert.equal(flags.env.PATH,undefined);assert.equal(flags.env.NODE_OPTIONS,undefined);const child=new EventEmitter();child.stdout=new PassThrough();child.stderr=new PassThrough();child.kill=()=>true;queueMicrotask(()=>{child.stdout.write('vSynthetic\n');child.emit('close',0,null)});return child}}:{})}
   const service=await createLocalActionCoordinator(options),input={title:'読み取り専用のバージョン確認',executable:process.execPath,cwd:root,argv:['--version'],schema:{}}
   async function register(){const inspection=await service.inspectDefinition(input,proof('configure','inspect'));await service.configure({reference:inspection.reference,digest:inspection.digest},proof('configure',inspection.reference));return inspection}
-  try{await callback({root,journalDirectory,service,options,settings,input,register,proof,receipts,spawns:()=>spawns,advance:ms=>{stamp+=ms},configuration:()=>configuration,history:()=>history})}
+  try{await callback({root,journalDirectory,service,options,settings,input,register,proof,receipts,facts,now:()=>stamp,spawns:()=>spawns,advance:ms=>{stamp+=ms},configuration:()=>configuration,history:()=>history})}
   finally{assert.equal(path.dirname(path.resolve(root)),path.resolve(await fs.realpath(os.tmpdir())));assert.ok(path.basename(root).startsWith('michi-local-action-service-'));assert.equal(await fs.realpath(root),path.resolve(root));await fs.rm(root,{recursive:true,force:true})}
 }
 test('host inspection computes identity and only fresh native exact-digest registration permits an action',async()=>fixture(async f=>{
@@ -121,3 +122,53 @@ test('N09 local_action.run=deny (or legacy taskUpdate=deny) disables registratio
     assert.equal((await f.service.execute({reference:prepared.reference,digest:prepared.review.digest},f.proof('approve',prepared.reference))).status,'succeeded')
   })
 })
+
+async function automation(f,def,{lowRisk=true,maxRunsPerHour=1}={}){
+ const input={actionId:def.id,events:['task.completed'],params:{},lowRisk,expiresAt:f.now()+86400000,maxRunsPerHour}
+ const inspected=await f.service.inspectAutomation(input,f.proof('configure','automation-inspect:'+def.id))
+ await f.service.configureAutomation({reference:inspected.reference,digest:inspected.digest},f.proof('configure',inspected.reference))
+ return inspected
+}
+function fact(f,{time=f.now(),ownerId=f.settings.profileId,event='task.completed',id=crypto.randomUUID()}={}){
+ f.facts.set(event+':'+id,{ownerId,datasetId:f.settings.datasetId,fact:{id,ownerId,currentAt:new Date(time).toISOString(),endedAt:new Date(time).toISOString()},task:{id:crypto.randomUUID(),status:'completed',deletedAt:null}})
+ return {event,factId:id}
+}
+test('native-approved event delegation executes one fixed argv, replay returns same signed result, rate and revocation hold',()=>fixture(async f=>{
+ const def=(await f.register()).definition
+ await automation(f,def);f.advance(1)
+ const input=fact(f),first=await f.service.trigger(input)
+ assert.equal(first.results[0].status,'succeeded');assert.equal(f.spawns(),1)
+ assert.deepEqual((await f.service.trigger(input)).results,first.results);assert.equal(f.spawns(),1)
+ const limited=await f.service.trigger(fact(f));assert.deepEqual(limited.skipped,['rate_limit']);assert.equal(f.spawns(),1)
+ assert.equal((await f.service.status()).runs.length,1)
+ await f.service.revokeAutomation({actionId:def.id});assert.equal((await f.service.trigger(fact(f))).results.length,0);assert.equal(f.spawns(),1)
+}))
+test('trigger rejects supplied arguments and forged, foreign, stale, pre-grant, unlisted, expired or restarted facts',()=>fixture(async f=>{
+ const def=(await f.register()).definition;f.advance(10);await automation(f,def)
+ await assert.rejects(f.service.trigger({...fact(f),params:{extra:'--eval'}}),{code:'INVALID_TRIGGER'})
+ for(const input of [{event:'task.completed',factId:'absent'},fact(f,{ownerId:crypto.randomUUID()}),fact(f,{time:f.now()-60001}),fact(f,{time:f.now()-1}),fact(f,{event:'work_session.logged'})])assert.equal((await f.service.trigger(input)).results.length,0)
+ assert.equal(f.spawns(),0)
+ const before=fact(f);f.advance(1);const restarted=await createLocalActionCoordinator(f.options)
+ assert.equal((await restarted.trigger(before)).results.length,0);assert.equal(f.spawns(),0)
+ f.advance(86400001);assert.equal((await f.service.trigger(fact(f))).results.length,0);assert.equal(f.spawns(),0)
+}))
+test('non-low-risk event waits for native approval; expiry and restart never launch an old pending request',()=>fixture(async f=>{
+ const def=(await f.register()).definition;await automation(f,def,{lowRisk:false,maxRunsPerHour:2});f.advance(1)
+ const pending=(await f.service.trigger(fact(f))).pending[0]
+ assert.ok(pending);assert.equal(f.spawns(),0)
+ await assert.rejects(f.service.execute({reference:pending.reference,digest:pending.review.digest},'forged'),{code:'HUMAN_APPROVAL_REQUIRED'})
+ const result=await f.service.execute({reference:pending.reference,digest:pending.review.digest},f.proof('approve',pending.reference));assert.equal(result.status,'succeeded');assert.equal(f.spawns(),1)
+ const expired=(await f.service.trigger(fact(f))).pending[0];f.advance(60001)
+ await assert.rejects(f.service.execute({reference:expired.reference,digest:expired.review.digest},f.proof('approve',expired.reference)))
+ assert.equal(f.spawns(),1);assert.equal((await f.service.status()).pending.length,0)
+}))
+test('automation inspection and registration require two current native proofs; stop, freeze and epoch invalidation prevent spawn',()=>fixture(async f=>{
+ const def=(await f.register()).definition,input={actionId:def.id,events:['task.completed'],params:{},lowRisk:true,expiresAt:f.now()+86400000,maxRunsPerHour:1}
+ await assert.rejects(f.service.inspectAutomation(input,'forged'),{code:'HUMAN_APPROVAL_REQUIRED'})
+ const inspected=await f.service.inspectAutomation(input,f.proof('configure','automation-inspect:'+def.id))
+ await assert.rejects(f.service.configureAutomation({reference:inspected.reference,digest:'0'.repeat(64)},f.proof('configure',inspected.reference)),{code:'AUTHORITY_CHANGED'})
+ await f.service.configureAutomation({reference:inspected.reference,digest:inspected.digest},f.proof('configure',inspected.reference))
+ f.settings.datasetMode='frozen';assert.deepEqual((await f.service.trigger(fact(f))).skipped,['authority']);assert.equal(f.spawns(),0);delete f.settings.datasetMode
+ f.settings.aiEnabled=false;assert.equal((await f.service.trigger(fact(f))).results.length,0);assert.equal(f.spawns(),0);f.settings.aiEnabled=true
+ f.settings.changePolicy.epoch++;assert.equal((await f.service.trigger(fact(f))).results.length,0);assert.equal(f.spawns(),0)
+}))

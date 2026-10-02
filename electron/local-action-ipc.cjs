@@ -2,6 +2,7 @@ const fs = require('node:fs/promises')
 const path = require('node:path')
 const crypto = require('node:crypto')
 const { createLocalActionCoordinator } = require('./local-action-service.cjs')
+const { createPrivateJSONStore } = require('./private-json-store.cjs')
 
 function installLocalActionIPC({ ipcMain, win, app, safeStorage }) {
   const nativeProofs = new Map()
@@ -24,6 +25,7 @@ function installLocalActionIPC({ ipcMain, win, app, safeStorage }) {
       if (!safeStorage.isEncryptionAvailable()) throw new Error('この端末ではPC操作の署名鍵を安全に保存できません')
       const privateBase = path.join(app.getPath('userData'), 'local-actions-private'), journalDirectory = path.join(privateBase, 'journal')
       await fs.mkdir(journalDirectory, { recursive: true })
+      const triggerStore=await createPrivateJSONStore({directory:path.join(privateBase,'trigger-state'),safeStorage,maxBytes:20*1024*1024})
       async function load(name, fallback) { try { return JSON.parse(safeStorage.decryptString(await fs.readFile(path.join(privateBase, name)))) } catch (error) { if (error.code === 'ENOENT') return fallback; throw new Error('PC操作の保存設定を読み込めません') } }
       async function save(name, value) {
         const target = path.join(privateBase, name)
@@ -38,17 +40,19 @@ function installLocalActionIPC({ ipcMain, win, app, safeStorage }) {
       if (deviceId === null) { deviceId = crypto.randomUUID(); await save('device-id.bin', deviceId) }
       if (typeof deviceId !== 'string' || !/^[a-f0-9-]{36}$/i.test(deviceId)) throw new Error('端末の識別子が不正です')
       return createLocalActionCoordinator({ signingKey: Buffer.from(key, 'hex'), deviceId, journalDirectory,
-        getSettings: async () => { const value = await readDB('settings', 'main'); if (!value) throw new Error('本人の設定を読み込んでからPC操作を設定してください'); return value },
+        getSettings: async () => { const value = await readDB('settings', 'main'); if (!value) throw new Error('本人の設定を読み込んでからPC操作を設定してください');const state=await readDB('datasetState','main');return {...value,datasetMode:state?.mode??value.datasetMode??'active'} },
+        getFact:async(event,id)=>{const fact=await readDB(event==='task.completed'?'completions':'sessions',id),settings=await readDB('settings','main');return fact&&settings?{fact,task:await readDB('tasks',fact.taskId),ownerId:settings.profileId,datasetId:settings.datasetId}:null},
+        loadTriggers:()=>triggerStore.load('records.bin',[]),saveTriggers:value=>triggerStore.save('records.bin',value),
         getReceipt: key => readDB('commands', key), loadConfiguration: () => load('definitions.bin', null), saveConfiguration: value => save('definitions.bin', value), loadResults: () => load('results.bin', []), saveResults: value => save('results.bin', value),
         verifyNativeProof: (kind, reference, nonce) => { const proof = nativeProofs.get(nonce); nativeProofs.delete(nonce); return Boolean(proof && proof.kind === kind && proof.reference === reference && Date.now() - proof.at <= 5000) }
       })
     })().catch(error => { coordinatorPromise = null; throw error })
     return coordinatorPromise
   }
-  for (const method of ['status', 'inspectDefinition', 'configure', 'remove', 'prepare', 'execute', 'recordReceipt', 'invalidate']) ipcMain.handle(`michi:localaction-${method}`, async (event, envelope) => {
+  for (const method of ['status', 'inspectDefinition', 'configure', 'remove', 'prepare', 'execute', 'recordReceipt', 'invalidate', 'inspectAutomation','configureAutomation','revokeAutomation','trigger']) ipcMain.handle(`michi:localaction-${method}`, async (event, envelope) => {
     assertMain(event)
     const current = await coordinator()
-    if (['inspectDefinition', 'configure', 'remove', 'execute'].includes(method)) {
+    if (['inspectDefinition', 'configure', 'remove', 'execute','inspectAutomation','configureAutomation'].includes(method)) {
       if (!envelope || Object.keys(envelope).length !== 2 || !Object.hasOwn(envelope, 'request') || typeof envelope.proofNonce !== 'string') throw new Error('本人のPC操作確認ボタンから操作してください')
       return current[method](envelope.request, envelope.proofNonce)
     }

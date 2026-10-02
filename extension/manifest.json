@@ -1,0 +1,10 @@
+{
+  "manifest_version": 3,
+  "name": "michi 選択引用",
+  "version": "0.1.0",
+  "description": "選んだ引用だけを確認してJSONファイルに保存します。",
+  "permissions": ["activeTab", "scripting", "contextMenus", "downloads"],
+  "background": { "service_worker": "background.js", "type": "module" },
+  "action": { "default_title": "選んだ引用を確認" },
+  "content_security_policy": { "extension_pages": "script-src 'self'; object-src 'none'; connect-src 'none'" }
+}

@@ -1,4 +1,10 @@
 const { contextBridge, ipcRenderer } = require('electron')
+window.addEventListener('click', event => {
+  if (!event.isTrusted || !(event.target instanceof Element)) return
+  const button=event.target.closest('button[data-voice-input]')
+  if (!button || button.disabled) return
+  ipcRenderer.send(button.getAttribute('data-voice-input')==='start'?'michi:voice-native-start':'michi:voice-native-stop')
+}, true)
 
 let nativeLocalAPIProof = null
 window.addEventListener('click', event => {
@@ -75,6 +81,10 @@ function localActionNativeCall(method, kind, reference, request) {
   return ipcRenderer.invoke(`michi:localaction-${method}`, { request, proofNonce: proof.nonce })
 }
 contextBridge.exposeInMainWorld('michiLocalActions', {
+  inspectAutomation: request => localActionNativeCall('inspectAutomation','configure',`automation-inspect:${request?.actionId}`,request),
+  configureAutomation: request => localActionNativeCall('configureAutomation','configure',request?.reference,request),
+  revokeAutomation: request => ipcRenderer.invoke('michi:localaction-revokeAutomation',request),
+  trigger: request => ipcRenderer.invoke('michi:localaction-trigger',request),
   status: () => ipcRenderer.invoke('michi:localaction-status'),
   inspectDefinition: request => localActionNativeCall('inspectDefinition', 'configure', 'inspect', request),
   configure: request => localActionNativeCall('configure', 'configure', request?.reference, request),

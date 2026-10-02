@@ -64,7 +64,7 @@ export function createVoiceMediaController(dependencies: VoiceMediaDependencies)
           start: () => { if (epoch !== inputEpoch) return; update({ input: 'recording' }); recordingTimer = setTimeout(stopInput, 60000) },
           result: transcript => { if (epoch !== inputEpoch || typeof transcript !== 'string') return; clearTimer(); update({ input: 'reviewing', transcript: transcript.slice(0, 6000) }) },
           end: () => { if (epoch !== inputEpoch) return; clearTimer(); update({ input: state.transcript.trim() ? 'reviewing' : 'idle' }) },
-          error: () => { if (epoch !== inputEpoch) return; cancelInput(); update({ notice: 'マイクの許可または音声認識を利用できませんでした。テキスト入力を続けられます。' }) },
+          error: code => { if (epoch !== inputEpoch) return; cancelInput(); update({ notice: ['not-allowed','service-not-allowed'].includes(code) ? 'マイクが許可されていません。テキスト入力を続けられます。' : '音声認識を利用できませんでした。テキスト入力を続けられます。' }) },
         })
       } catch { if (epoch === inputEpoch) { cancelInput(); update({ notice: '音声入力を開始できませんでした。テキスト入力を続けられます。' }) } }
     },
@@ -76,7 +76,7 @@ export function createVoiceMediaController(dependencies: VoiceMediaDependencies)
 }
 export type VoiceMediaController = ReturnType<typeof createVoiceMediaController>
 
-type BrowserRecognition = { processLocally: boolean; lang: string; continuous: boolean; interimResults: boolean; onstart: (() => void) | null; onend: (() => void) | null; onerror: (() => void) | null; onresult: ((event: { results: ArrayLike<{ isFinal: boolean; 0: { transcript: string } }> }) => void) | null; start(): void; stop(): void; abort(): void }
+type BrowserRecognition = { processLocally: boolean; lang: string; continuous: boolean; interimResults: boolean; onstart: (() => void) | null; onend: (() => void) | null; onerror: ((event: { error?: string }) => void) | null; onresult: ((event: { results: ArrayLike<{ isFinal: boolean; 0: { transcript: string } }> }) => void) | null; start(): void; stop(): void; abort(): void }
 type RecognitionConstructor = { new(): BrowserRecognition; available?(options: { langs: string[]; processLocally: true }): Promise<string> }
 export function createBrowserRecognitionAdapter(host: { SpeechRecognition?: RecognitionConstructor; webkitSpeechRecognition?: RecognitionConstructor }): RecognitionAdapter | null {
   const Recognition = host.SpeechRecognition ?? host.webkitSpeechRecognition
@@ -91,7 +91,7 @@ export function createBrowserRecognitionAdapter(host: { SpeechRecognition?: Reco
       const recognition = new Recognition(); recognition.processLocally = true
       if (recognition.processLocally !== true) throw new Error('端末内の音声認識が未対応です')
       recognition.lang = 'ja-JP'; recognition.continuous = false; recognition.interimResults = false
-      recognition.onstart = events.start; recognition.onend = () => { if (active === recognition) active = null; events.end() }; recognition.onerror = () => events.error('音声認識を利用できません')
+      recognition.onstart = events.start; recognition.onend = () => { if (active === recognition) active = null; events.end() }; recognition.onerror = event => events.error(event.error ?? 'recognition-error')
       recognition.onresult = event => { const final = Array.from(event.results).filter(result => result.isFinal).map(result => result[0].transcript).join(''); if (final.trim()) events.result(final) }
       active = recognition; recognition.start()
     },

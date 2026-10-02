@@ -28,7 +28,7 @@ export type LabelDefinition = { id: string; groupId: string | null; ownerId: str
 export type TemplateTask = { title: string; notes: string; labels: string[]; importance: number; energyNeed?: number | null; focusNeed?: number | null; positiveFeeling?: number | null; score: ScoreInput; checklistTexts: string[]; containerKey: string | null }
 export type TemplateContainer = { key: string; parentKey: string | null; kind: Container['kind']; name: string }
 export type SavedTemplate = { id: string; familyId: string; ownerId: string; name: string; version: number; kind: 'task' | 'project'; containers: TemplateContainer[]; tasks: TemplateTask[]; createdAt: string }
-export type TaskNote = { id: string; taskId: string; ownerId: string; kind: 'self' | 'source'; body: string; createdAt: string }
+export type TaskNote = { id: string; taskId: string; ownerId: string; kind: 'self' | 'source'; body: string; createdAt: string; sourceId?:string; sourceRevision?:number }
 /** authorKind/authorLabel mark a comment returned by a share recipient (I06); absent means the owner wrote it. */
 export type TaskComment = { id: string; taskId: string; ownerId: string; body: string; createdAt: string; authorKind?: 'share_recipient'; authorLabel?: string }
 export type TaskAttachment = { id: string; taskId: string; ownerId: string; name: string; mediaType: string; size: number; sha256: string; blob: Blob; createdAt: string }

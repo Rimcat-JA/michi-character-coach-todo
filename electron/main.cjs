@@ -19,6 +19,7 @@ const { createScheduleTransport } = require('./schedule-network.cjs')
 const { installScheduleRefreshIPC, scheduleQAFixtureMode } = require('./schedule-refresh-ipc.cjs')
 const { installCalDAVIPC } = require('./caldav-ipc.cjs')
 const { installLocalAPIIPC } = require('./local-api-ipc.cjs')
+const { installMediaPermissionPolicy } = require('./media-permission.cjs')
 const { githubQAFetch } = require('./github-qa.cjs')
 const { createOSNotificationGuard, notificationTextAllowed } = require('./notification-delivery.cjs')
 const { createTrayMode } = require('./tray-mode.cjs')
@@ -349,7 +350,6 @@ if (hasInstanceLock) app.whenReady().then(() => {
     try { callback({ cancel: !allowed.has(new URL(details.url).protocol) }) }
     catch { callback({ cancel: true }) }
   })
-  session.defaultSession.setPermissionRequestHandler((_contents, _permission, callback) => callback(false))
   // Spellcheck dictionaries are a Chromium download path outside the gateway.
   session.defaultSession.setSpellCheckerEnabled(false)
 
@@ -368,6 +368,7 @@ if (hasInstanceLock) app.whenReady().then(() => {
   installCalDAVIPC({ ipcMain, dialog, win, app, safeStorage, gateway: networkGateway, assertFrame: assertAppFrame, readDatabase: readAppDatabase, refreshScheduler, qaLoopback: qaSchedule })
   installFolderWatchIPC({ ipcMain, dialog, win, assertFrame: assertAppFrame, readDatabase: readAppDatabase })
   installLocalAPIIPC({ ipcMain, win, app, safeStorage, assertFrame: assertAppFrame, readDatabase: readAppDatabase })
+  installMediaPermissionPolicy({ session: session.defaultSession, ipcMain, win })
   ipcMain.handle('michi:network-status', async event => {
     assertAppFrame(event)
     await networkGateway.refresh()

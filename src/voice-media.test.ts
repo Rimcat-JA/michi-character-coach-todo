@@ -35,7 +35,7 @@ describe('本人操作の端末内音声と音楽', () => {
   })
   it('マイク拒否・取消後の遅い認識結果を捨て、テキスト入力の縮退案内を出す', async () => {
     const f = fixture(); await f.controller.startInput(); f.input().error('not-allowed')
-    expect(f.controller.snapshot()).toMatchObject({ input: 'idle', transcript: '', notice: expect.stringContaining('テキスト入力') })
+    expect(f.controller.snapshot()).toMatchObject({ input: 'idle', transcript: '', notice: 'マイクが許可されていません。テキスト入力を続けられます。' })
     await f.controller.startInput(); f.input().start(); const old = f.input(); f.controller.cancelInput(); old.result('取消した原音からの文字')
     expect(f.controller.snapshot()).toMatchObject({ input: 'idle', transcript: '' })
   })

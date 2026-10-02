@@ -6,6 +6,7 @@ import { assertTripTaskScoreChangeAllowed, freezeTripBundle } from './trip-bundl
 import { cancelCoachNotificationTarget } from './coach-notification-save'
 import { allocationAssessmentForFirstCompletion, pointsForRecompletion } from './allocation-completion'
 import { recordHumanCommand } from './command-bus'
+import { localTriggerAfterCommit } from './local-action-trigger'
 
 /** Owner-editable values recorded as before/after in structured audits (K12-G3). */
 export const auditedTaskValues = (task: Task): Record<string, unknown> => ({ title: task.title, notes: task.notes, project: task.project, containerId: task.containerId ?? null, labels: task.labels, scheduledDate: task.scheduledDate, dueDate: task.dueDate, dueAt: task.dueAt ?? null, dueTimezone: task.dueTimezone ?? null, targetDate: task.targetDate, reviewDate: task.reviewDate, availableFrom: task.availableFrom, deferredUntil: task.deferredUntil ?? null, importance: task.importance, frog: task.frog ?? null, weight: task.weight ?? null, energyNeed: task.energyNeed ?? null, focusNeed: task.focusNeed ?? null, positiveFeeling: task.positiveFeeling ?? null, score: task.score, effectivePoints: task.effectivePoints, status: task.status, deletedAt: task.deletedAt })
@@ -167,6 +168,7 @@ export async function completeTask(id: string, expectedRevision: number, key: st
     await db.tasks.put({ ...task, status: 'completed', revision: task.revision + 1, updatedAt: at })
     await cancelCoachNotificationTarget(id, at)
     await recordHumanCommand({ operation: 'complete', taskId: id, commandKey: key, before: { status: task.status, completionPoints: existing ? existing.netPoints : null }, after: { status: 'completed', completionPoints: points }, revisionBefore: task.revision, revisionAfter: task.revision + 1, summary: points === null ? 'ポイント未設定で完了' : `${points}ptで完了`, at })
+    localTriggerAfterCommit('task.completed',(await db.completions.where('taskId').equals(id).first())!.id)
     return id
   }, true, true)
 }
@@ -306,5 +308,6 @@ export async function logSession(taskId: string, startedAt: string, endedAt: str
     }
     if (!(await db.tasks.get(taskId))) throw new Error('作業対象のタスクがありません')
     await db.sessions.add({ id: sessionId, taskId, startedAt, endedAt, minutes, revision: 1, corrections: [] })
+    localTriggerAfterCommit('work_session.logged',sessionId)
   })
 }

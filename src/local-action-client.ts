@@ -2,7 +2,7 @@ import { db } from './db'
 import { canonicalJSON, contentDigest } from './canonical'
 import { changePolicyFor } from './change-set'
 import { operationMode } from './automation-policy'
-import { localActionReceiptKey, type LocalActionDefinition, type LocalActionDefinitionInput, type LocalActionGateway, type LocalActionInspection, type LocalActionPrepared, type LocalActionResult, type LocalActionStatus } from './local-action-types'
+import { localActionReceiptKey, type LocalActionAutomation, type LocalActionAutomationInspection, type LocalActionDefinition, type LocalActionDefinitionInput, type LocalActionGateway, type LocalActionInspection, type LocalActionPrepared, type LocalActionResult, type LocalActionStatus } from './local-action-types'
 const record=(value:unknown):value is Record<string,unknown>=>Boolean(value&&typeof value==='object'&&!Array.isArray(value)&&Object.getPrototypeOf(value)===Object.prototype)
 const exact=(value:Record<string,unknown>,keys:string[])=>Object.keys(value).length===keys.length&&keys.every(key=>Object.hasOwn(value,key))
 const token=(value:unknown)=>typeof value==='string'&&/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/.test(value)
@@ -24,15 +24,21 @@ export function validateLocalActionInput(value:unknown):asserts value is LocalAc
   if(value.argv.some(arg=>typeof arg==='string'?arg.length>4096||/[\0\r\n]/.test(arg):!record(arg)||!exact(arg,['param'])||!token(arg.param)||!Object.hasOwn(value.schema as object,arg.param as string)))fail()
 }
 function definition(value:unknown):asserts value is LocalActionDefinition {
-  if(!record(value)||!exact(value,['title','executable','cwd','argv','schema','id','revision','ownerId','datasetId','deviceId','executableRoot','sha256'])||!token(value.id)||!integer(value.revision,1)||!token(value.ownerId)||!token(value.datasetId)||!token(value.deviceId)||!text(value.executableRoot)||!hash(value.sha256))fail()
+  if(!record(value)||!exact(value,['title','executable','cwd','argv','schema','id','revision','ownerId','datasetId','deviceId','executableRoot','sha256',...(Object.hasOwn(value,'automation')?['automation']:[])])||!token(value.id)||!integer(value.revision,1)||!token(value.ownerId)||!token(value.datasetId)||!token(value.deviceId)||!text(value.executableRoot)||!hash(value.sha256))fail()
+  if(Object.hasOwn(value,'automation'))automation(value.automation)
   validateLocalActionInput({title:value.title,executable:value.executable,cwd:value.cwd,argv:value.argv,schema:value.schema})
+}
+function automation(value:unknown):asserts value is LocalActionAutomation {
+ if(!record(value)||!exact(value,['events','params','lowRisk','expiresAt','maxRunsPerHour','grantedAt','policyEpoch','sourcePermissionRevision'])||!Array.isArray(value.events)||!value.events.length||value.events.length>2||new Set(value.events).size!==value.events.length||value.events.some(e=>!['task.completed','work_session.logged'].includes(e))||!record(value.params)||Object.keys(value.params).length>16||Object.values(value.params).some(p=>!['string','number','boolean'].includes(typeof p))||typeof value.lowRisk!=='boolean'||!integer(value.maxRunsPerHour,1)||Number(value.maxRunsPerHour)>6||!['expiresAt','grantedAt','policyEpoch','sourcePermissionRevision'].every(k=>integer(value[k]))||Number(value.expiresAt)<=Number(value.grantedAt)||Number(value.expiresAt)>Number(value.grantedAt)+30*86400000)fail('自動実行の条件を確認できません。')
 }
 export function validateLocalActionResult(value:unknown):asserts value is LocalActionResult {
   if(!record(value)||!exact(value,['version','requestId','digest','ownerId','datasetId','deviceId','actionId','policyEpoch','sourcePermissionRevision','definitionRevision','startedAt','status','exitCode','signal','output','outputTruncated','timedOut','completedAt','signature'])||value.version!==1||!['requestId','ownerId','datasetId','deviceId','actionId'].every(key=>token(value[key]))||!hash(value.digest)||!hash(value.signature)||!['policyEpoch','sourcePermissionRevision','startedAt','completedAt'].every(key=>integer(value[key]))||!integer(value.definitionRevision,1)||Number(value.completedAt)<Number(value.startedAt)||!['succeeded','failed','timed_out','canceled','unknown'].includes(value.status as string)||value.exitCode!==null&&!Number.isInteger(value.exitCode)||value.signal!==null&&!text(value.signal,100)||typeof value.output!=='string'||new TextEncoder().encode(value.output).length>65536||typeof value.outputTruncated!=='boolean'||typeof value.timedOut!=='boolean')fail('実行結果の形式を確認できません。タスクの完了には反映していません。')
   if(value.status==='succeeded'&&(value.exitCode!==0||value.timedOut)||value.status==='timed_out'&&!value.timedOut)fail()
 }
 function status(value:unknown):asserts value is LocalActionStatus {
-  if(!record(value)||!exact(value,['version','available','enabled','ownerId','datasetId','deviceId','definitions','results','notice'])||value.version!==1||typeof value.available!=='boolean'||typeof value.enabled!=='boolean'||!token(value.ownerId)||!token(value.datasetId)||!token(value.deviceId)||!Array.isArray(value.definitions)||value.definitions.length>20||!Array.isArray(value.results)||value.results.length>100||typeof value.notice!=='string'||value.notice.length>2000)fail()
+  if(!record(value)||!exact(value,['version','available','enabled','ownerId','datasetId','deviceId','definitions','results','notice',...(Object.hasOwn(value,'pending')?['pending']:[]),...(Object.hasOwn(value,'runs')?['runs']:[])])||value.version!==1||typeof value.available!=='boolean'||typeof value.enabled!=='boolean'||!token(value.ownerId)||!token(value.datasetId)||!token(value.deviceId)||!Array.isArray(value.definitions)||value.definitions.length>20||!Array.isArray(value.results)||value.results.length>100||typeof value.notice!=='string'||value.notice.length>2000)fail()
+  if(value.pending!==undefined){if(!Array.isArray(value.pending)||value.pending.length>100)fail();value.pending.forEach(prepared)}
+  if(value.runs!==undefined&&(!Array.isArray(value.runs)||value.runs.length>2000||value.runs.some(r=>!record(r)||!exact(r,['actionId','event','requestId','at'])||!token(r.actionId)||!token(r.requestId)||!integer(r.at)||!['task.completed','work_session.logged'].includes(r.event as string))))fail()
   value.definitions.forEach(definition);value.results.forEach(validateLocalActionResult)
   if(new Set(value.definitions.map(item=>item.id)).size!==value.definitions.length||new Set(value.results.map(item=>item.requestId)).size!==value.results.length||value.definitions.some(item=>item.ownerId!==value.ownerId||item.datasetId!==value.datasetId||item.deviceId!==value.deviceId)||value.results.some(item=>item.ownerId!==value.ownerId||item.datasetId!==value.datasetId||item.deviceId!==value.deviceId))fail()
 }
@@ -42,14 +48,14 @@ function inspection(value:unknown):asserts value is LocalActionInspection {
   if(value.definition.ownerId!==value.ownerId||value.definition.datasetId!==value.datasetId||value.definition.deviceId!==value.deviceId)fail()
 }
 function prepared(value:unknown):asserts value is LocalActionPrepared {
-  if(!record(value)||!exact(value,['version','reference','event','review'])||value.version!==1||!token(value.reference)||value.event!=='owner-click'||!record(value.review))fail()
+  if(!record(value)||!exact(value,['version','reference','event','review'])||value.version!==1||!token(value.reference)||!['owner-click','task.completed','work_session.logged'].includes(value.event as string)||!record(value.review))fail()
   const review=value.review
   if(!exact(review,['requestId','digest','actionId','executable','argv','cwd','expiresAt','approvalRequired','ownerId','datasetId','deviceId','policyEpoch','sourcePermissionRevision','definitionRevision'])||!['requestId','actionId','ownerId','datasetId','deviceId'].every(key=>token(review[key]))||!hash(review.digest)||!text(review.executable)||!text(review.cwd)||!Array.isArray(review.argv)||review.argv.length>64||review.argv.some(arg=>typeof arg!=='string'||arg.length>4096||/[\0\r\n]/.test(arg))||!integer(review.expiresAt,1)||review.approvalRequired!==true||!integer(review.policyEpoch)||!integer(review.sourcePermissionRevision)||!integer(review.definitionRevision,1))fail()
 }
 export type LocalActionOutcome={result:LocalActionResult;receiptSaved:boolean}
 /** Public objects are display data; only objects obtained through this app gateway may execute. */
 export function createLocalActionController(gateway:LocalActionGateway) {
-  const inspections=new Map<string,LocalActionInspection>(),requests=new Map<string,LocalActionPrepared>(),results=new Map<string,LocalActionResult>()
+  const inspections=new Map<string,LocalActionInspection>(),automations=new WeakSet<object>(),requests=new Map<string,LocalActionPrepared>(),results=new Map<string,LocalActionResult>()
   let current:LocalActionStatus|null=null
   function clear(){inspections.clear();requests.clear()}
   async function assertOwner(ownerId:string,datasetId:string,deviceId:string,epoch?:number,sourceRevision?:number) {
@@ -61,6 +67,7 @@ export function createLocalActionController(gateway:LocalActionGateway) {
     status(value);await assertOwner(value.ownerId,value.datasetId,value.deviceId)
     if(current&&canonicalJSON({definitions:current.definitions,enabled:current.enabled})!==canonicalJSON({definitions:value.definitions,enabled:value.enabled}))clear()
     current=freeze(structuredClone(value));for(const result of current.results)results.set(result.requestId,result)
+    for(const row of current.pending??[]){const def=current.definitions.find(d=>d.id===row.review.actionId);if(!def?.automation||row.review.definitionRevision!==def.revision||!def.automation.events.includes(row.event as 'task.completed')||row.review.executable!==def.executable||row.review.cwd!==def.cwd||canonicalJSON(def.argv.map(a=>typeof a==='string'?a:String(def.automation!.params[a.param])))!==canonicalJSON(row.review.argv))fail();requests.set(row.reference,row)}
     return current
   }
   async function persist(result:LocalActionResult):Promise<LocalActionOutcome> {
@@ -81,6 +88,16 @@ export function createLocalActionController(gateway:LocalActionGateway) {
   return {
     clearAuthority:clear,
     refresh:async()=>adopt(await gateway.status()),
+    async inspectAutomationFromUI(input:Parameters<NonNullable<LocalActionGateway['inspectAutomation']>>[0],event:Event){
+      click(event);if(!gateway.inspectAutomation||!current?.definitions.some(d=>d.id===input.actionId))fail()
+      const value=await gateway.inspectAutomation(structuredClone(input));automation(value.automation)
+      if(!record(value)||!exact(value,['reference','digest','actionId','definitionRevision','ownerId','datasetId','policyEpoch','sourcePermissionRevision','automation','expiresAt'])||!token(value.reference)||!hash(value.digest)||value.expiresAt<=Date.now()||value.expiresAt>Date.now()+300000)fail()
+      const {digest,...payload}=value;if(digest!==await contentDigest(payload))fail()
+      await assertOwner(value.ownerId,value.datasetId,current.deviceId,value.policyEpoch,value.sourcePermissionRevision)
+      const result=freeze(structuredClone(value));automations.add(result);return result
+    },
+    async configureAutomationFromUI(value:LocalActionAutomationInspection,event:Event){click(event);if(!gateway.configureAutomation||!automations.has(value)||value.expiresAt<=Date.now())fail();await assertOwner(value.ownerId,value.datasetId,current!.deviceId,value.policyEpoch,value.sourcePermissionRevision);await gateway.configureAutomation({reference:value.reference,digest:value.digest});automations.delete(value);return adopt(await gateway.status())},
+    async revokeAutomation(actionId:string|null){if(!gateway.revokeAutomation)fail();await gateway.revokeAutomation({actionId});return adopt(await gateway.status())},
     async inspectFromUI(input:LocalActionDefinitionInput,event:Event) {
       click(event);validateLocalActionInput(input)
       const raw=await gateway.inspectDefinition(structuredClone(input));inspection(raw)
