@@ -12,7 +12,7 @@ import type { FileBridgeGateway, FileBridgeRegistration, FileBridgeStatus } from
 import { egressNotice, ownerNotesForEgress, scoreAssistText } from './egress-policy'
 import { adoptDetectedTask, enableSyntheticAI, humanClick, importWorkSlack, otherModel, quoteModel, secretQuote } from './source-quote-fixtures'
 
-beforeEach(async () => { await db.delete(); await db.open(); await ensureSettings(); await enableSyntheticAI(); clearDetectionAuthority(); clearCoachTurnAuthority(); clearChangeSetAuthority() })
+beforeEach(async () => { await db.delete(); await db.open(); await ensureSettings(); await enableSyntheticAI(); await db.settings.update('main',{externalAI:{version:1,enabled:true,epoch:0,clients:[]}}); clearDetectionAuthority(); clearCoachTurnAuthority(); clearChangeSetAuthority() })
 afterEach(() => { vi.restoreAllMocks() })
 
 const legacyNotes = (sourceId: string) => `資料から検出し本人が確認する候補。検出=${quoteModel} / 検証=${quoteModel}（同じモデル、独立評価未通過）\n根拠: explicit_request / requested\n[${sourceId} 内容版1 ${sourceId}:1:1] ${secretQuote}\n期限の原文: ${secretQuote}`

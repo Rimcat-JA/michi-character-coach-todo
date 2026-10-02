@@ -12,7 +12,7 @@ async function fixture(t, { getReceiptOverride, auto = null } = {}) {
   t.after(async () => { const resolved = path.resolve(root); assert.equal(path.dirname(resolved), path.resolve(await fs.realpath(os.tmpdir()))); assert.ok(path.basename(resolved).startsWith('michi-filebridge-service-')); await fs.rm(resolved, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }) })
   // N09 operation table as main reads it from the app DB; only operation/mode/shift matter here.
   const operations = [{ operation: 'task.text', mode: 'auto_within_bounds', max_schedule_days_delta: null }, { operation: 'task.schedule', mode: 'auto_within_bounds', max_schedule_days_delta: 3 }]
-  const settings = { profileId: 'owner', datasetId: crypto.randomUUID(), aiEnabled: true, changePolicy: { epoch: 1, sourcePermissionRevision: 1, aiChangesEnabled: true, ...(auto ? { operations } : {}) } }
+  const settings = { profileId: 'owner', datasetId: crypto.randomUUID(), aiEnabled: true, externalAI: {version:1,enabled:true,epoch:0,clients:[]}, changePolicy: { epoch: 1, sourcePermissionRevision: 1, aiChangesEnabled: true, ...(auto ? { operations } : {}) } }
   const task = { id: crypto.randomUUID(), revision: 1, title: '正式タスク', notes: '本人のメモ', scheduledDate: '2026-10-01', containerId: null, deletedAt: null }
   const receipts = new Map(), proofs = new Map(); let configuration = null
   const native = (kind, reference = '') => { const nonce = crypto.randomUUID(); proofs.set(nonce, { kind, reference }); return nonce }
@@ -96,7 +96,7 @@ test('revocation acknowledges a DB commit already made and revokes remaining aut
 })
 test('AI OFF after a lease cancels an uncommitted attempt and disables the client', async t => {
   const f = await fixture(t), { binding } = await f.command(), lease = await f.service.authorizeApplication(binding, f.native('approve', binding.reference))
-  f.settings.aiEnabled = false
+  f.settings.externalAI.enabled = false
   assert.equal((await f.service.status()).connected, false)
   const result = await f.service.cancelApplication({ leaseId: lease.leaseId, reference: binding.reference })
   assert.equal(result.state, 'unknown'); assert.equal(f.receipts.size, 0)
@@ -169,7 +169,7 @@ test('file bridge invalidate leaves the PC-operation and GitHub private stores u
   const listing = async () => Object.fromEntries(await Promise.all(others.map(async name => [name, (await fs.readdir(path.join(root, name), { recursive: true })).sort()])))
   const contents = () => Promise.all(others.map(name => fs.readFile(path.join(root, name, 'connection.bin'), 'utf8')))
   for (const name of others) { await fs.mkdir(path.join(root, name, 'journal'), { recursive: true }); await fs.writeFile(path.join(root, name, 'connection.bin'), `${name}-sentinel`); await fs.writeFile(path.join(root, name, 'journal', 'entry.json'), '{}') }
-  const settings = { profileId: 'owner', datasetId: crypto.randomUUID(), aiEnabled: true, changePolicy: { epoch: 1, sourcePermissionRevision: 1, aiChangesEnabled: true } }
+  const settings = { profileId: 'owner', datasetId: crypto.randomUUID(), aiEnabled: true, externalAI: {version:1,enabled:true,epoch:0,clients:[]}, changePolicy: { epoch: 1, sourcePermissionRevision: 1, aiChangesEnabled: true } }
   const task = { id: crypto.randomUUID(), revision: 1, title: '正式タスク', notes: '', scheduledDate: '2026-10-01', containerId: null, deletedAt: null }
   let configuration = null
   const proofs = new Set(['configure-proof'])

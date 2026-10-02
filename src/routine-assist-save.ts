@@ -12,7 +12,7 @@ export type RoutineSourceGuard = { assertCurrent: () => Promise<void>; businessK
 export type PreparedRoutineAssistance = Readonly<{ id: string; instruction: VerifiedRoutineInstruction; configuration: CalendarConfigurationProposal; digest: string }>
 const preparedRegistry = new Map<string, PreparedRoutineAssistance>()
 const sourceGuards = new Map<string, RoutineSourceGuard>()
-export function clearRoutineAssistanceAuthority() { preparedRegistry.clear(); sourceGuards.clear(); clearRoutineInstructionAuthority() }
+export function clearRoutineAssistanceAuthority(options: {coachOnly?: boolean} = {}) { if(options.coachOnly){for(const value of preparedRegistry.values())if(!['manual','external_request'].includes(value.instruction.basis))cancelRoutineAssistance(value)}else{preparedRegistry.clear(); sourceGuards.clear(); clearRoutineInstructionAuthority()} }
 export function cancelRoutineAssistance(prepared: PreparedRoutineAssistance) {
   if (preparedRegistry.get(prepared.id) !== prepared) return
   preparedRegistry.delete(prepared.id); sourceGuards.delete(prepared.instruction.id); revokeRoutineInstruction(prepared.instruction); discardCalendarConfigurationProposal(prepared.configuration)

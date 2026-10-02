@@ -34,7 +34,7 @@ async function createFileBridgeService({ agentDirectory, journalDirectory, signi
   await fs.mkdir(agentDirectory, { recursive: true }); await fs.mkdir(journalDirectory, { recursive: true })
   async function currentContext(registration) {
     const settings = await getSettings(), current = policy(settings)
-    return { ownerId: settings.profileId, datasetId: settings.datasetId, clientId: registration.client.id, policyEpoch: current.epoch, sourcePermissionRevision: current.sourcePermissionRevision, registrationRevision: registration.client.revision, grantEpoch: registration.client.grant_epoch, enabled: Boolean(connection?.registration.client.id === registration.client.id && settings.aiEnabled && current.aiChangesEnabled) }
+    return { ownerId: settings.profileId, datasetId: settings.datasetId, clientId: registration.client.id, policyEpoch: current.epoch, sourcePermissionRevision: current.sourcePermissionRevision, registrationRevision: registration.client.revision, grantEpoch: registration.client.grant_epoch, enabled: Boolean(connection?.registration.client.id === registration.client.id && settings.externalAI?.version === 1 && settings.externalAI.enabled === true && current.aiChangesEnabled) }
   }
   function receiptFor(lease, stored) {
     if (!stored || stored.key !== receiptKey(lease.prepared.command.command_id) || stored.hash !== lease.binding.applicationDigest || typeof stored.resultId !== 'string') return null
@@ -92,7 +92,7 @@ async function createFileBridgeService({ agentDirectory, journalDirectory, signi
     if (Object.hasOwn(request, 'allowSplit') && typeof request.allowSplit !== 'boolean' || !Array.isArray(ruleIds) || ruleIds.length > 50 || ruleIds.some(id => !uuid(id)) || new Set(ruleIds).size !== ruleIds.length) fail('CONFIG_INVALID')
     await ensure()
     const settings = await getSettings(), current = policy(settings)
-    if (request.ownerId !== settings.profileId || request.datasetId !== settings.datasetId || request.policyEpoch !== current.epoch || request.sourcePermissionRevision !== current.sourcePermissionRevision || !settings.aiEnabled || !current.aiChangesEnabled) fail('AUTHORITY_CHANGED')
+    if (request.ownerId !== settings.profileId || request.datasetId !== settings.datasetId || request.policyEpoch !== current.epoch || request.sourcePermissionRevision !== current.sourcePermissionRevision || !settings.externalAI?.enabled || settings.externalAI.version !== 1 || !current.aiChangesEnabled) fail('AUTHORITY_CHANGED')
     if (automation !== null && !n09Automatic(current, request.fields, automation.maxScheduleShiftDays)) fail('AUTOMATION_NOT_GRANTED')
     if (!Array.isArray(request.taskIds) || request.taskIds.length > 100 || request.taskIds.some(id => !uuid(id)) || new Set(request.taskIds).size !== request.taskIds.length) fail('TASK_SCOPE')
     const tasks = await getTasks(request.taskIds)

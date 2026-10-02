@@ -1,3 +1,4 @@
+import { authorityMatches, processingAllowed, processingEpoch } from './external-authority'
 import Dexie from 'dexie'
 import { db } from './db'
 import { canonicalJSON, contentDigest } from './canonical'
@@ -18,7 +19,7 @@ export type VerifiedSplitInstruction = Readonly<{
   issuedAt: string; expiresAt: string; messageDigest: string; taskId: string; expectedRevision: number; parentScoreBefore: ScoreInput; children: SplitChild[]; digest: string
 }>
 export type PreparedTaskSplit = Readonly<{
-  version: 1; kind: 'task.split'; id: string; principal: ChangePrincipal; ownerId: string; datasetId: string; policyEpoch: number; sourcePermissionRevision: number; aiEnabledAtPrepare: boolean; sourceRevisions: SourceRevision[]
+  version: 1; kind: 'task.split'; id: string; principal: ChangePrincipal; ownerId: string; datasetId: string; policyEpoch: number; sourcePermissionRevision: number; aiEnabledAtPrepare: boolean; processingEpoch: number; sourceRevisions: SourceRevision[]
   createdAt: string; expiresAt: string; taskId: string; baseRevision: number; parentTitle: string; parentScoreBefore: ScoreInput; parentAssessmentBefore: string; parentEffectiveBefore: number | null
   children: SplitChild[]; total: number; instruction: VerifiedSplitInstruction; reason: string; digest: string
 }>
@@ -31,7 +32,7 @@ function record(value: unknown): value is Record<string, unknown> { return Boole
 const issued = new Map<string, VerifiedSplitInstruction>()
 const proposals = new Map<string, PreparedTaskSplit>()
 const approvals = new WeakMap<TaskSplitApproval, { splitId: string; digest: string; userId: string; policyEpoch: number; consumed: boolean }>()
-export function clearTaskSplitAuthority() { issued.clear(); proposals.clear() }
+export function clearTaskSplitAuthority(options: {coachOnly?: boolean; externalOnly?: boolean; clientId?: string} = {}) { if(options.coachOnly||options.externalOnly||options.clientId){for(const [id,value] of proposals)if(authorityMatches(value.principal,options))proposals.delete(id)}else{issued.clear(); proposals.clear()} }
 function ownerEvent(context: ChangeContext, event: Event) {
   if (context.principal.kind !== 'human' || context.principal.id !== context.ownerId || !(event instanceof Event) || !event.isTrusted || !['click', 'submit'].includes(event.type)) fail('HUMAN_APPROVAL_REQUIRED', 'アプリの本人確認ボタンから操作してください')
   const getter = Object.getOwnPropertyDescriptor(Event.prototype, 'type')?.get
@@ -45,7 +46,7 @@ async function settingsFor(context: ChangeContext): Promise<Settings> {
 /** Splits move manual points, so agents need AI on, changes on and both the split and manual-points operations not denied (N09). */
 export function splitPolicyDecision(settings: Settings, principal: ChangePrincipal): ChangePolicyDecision {
   const policy = changePolicyFor(settings)
-  if (principal.kind !== 'human' && (!settings.aiEnabled || !policy.aiChangesEnabled || operationMode(policy, 'task.split') === 'deny' || operationMode(policy, 'task.manual_points') === 'deny')) return { status: 'denied', reason: 'AIによるタスクの分割は停止しています（自動化設定）', protectedFields: ['manualPoints'] }
+  if (principal.kind !== 'human' && (!processingAllowed(settings, principal) || !policy.aiChangesEnabled || operationMode(policy, 'task.split') === 'deny' || operationMode(policy, 'task.manual_points') === 'deny')) return { status: 'denied', reason: 'AIによるタスクの分割は停止しています（自動化設定）', protectedFields: ['manualPoints'] }
   return { status: 'awaiting_approval', reason: 'タスクの分割は毎回本人が配分を確認します', protectedFields: ['manualPoints'] }
 }
 async function ownedContainer(task: Task, ownerId: string) {
@@ -95,7 +96,7 @@ function assertInstruction(value: VerifiedSplitInstruction, settings: Settings) 
 function authorize(prepared: PreparedTaskSplit, context: ChangeContext, settings: Settings, asApprover: boolean) {
   const policy = changePolicyFor(settings)
   if (prepared.ownerId !== context.ownerId || prepared.datasetId !== context.datasetId || !asApprover && canonicalJSON({ ...context.principal, model: context.principal.model ?? null }) !== canonicalJSON(prepared.principal)) fail('UNAUTHORIZED', 'この分割案を実行する権限がありません')
-  if (policy.epoch !== prepared.policyEpoch || settings.aiEnabled !== prepared.aiEnabledAtPrepare) fail('POLICY_CHANGED', '分割案の作成後にAIまたは権限設定が変わりました。差分を作り直してください')
+  if (policy.epoch !== prepared.policyEpoch || processingAllowed(settings, prepared.principal) !== prepared.aiEnabledAtPrepare || processingEpoch(settings, prepared.principal) !== prepared.processingEpoch) fail('POLICY_CHANGED', '分割案の作成後にAIまたは権限設定が変わりました。差分を作り直してください')
   if (policy.sourcePermissionRevision !== prepared.sourcePermissionRevision) fail('POLICY_CHANGED', '利用許可が変わりました。差分を作り直してください')
   if (splitPolicyDecision(settings, prepared.principal).status === 'denied') fail('CHANGES_STOPPED', 'AIによる変更は停止しています')
   if (Date.parse(prepared.expiresAt) <= Date.now()) fail('EXPIRED', '分割案の確認期限が切れました。差分を作り直してください')
@@ -121,7 +122,7 @@ export async function prepareTaskSplit(instruction: VerifiedSplitInstruction, co
     const total = instruction.children.reduce((sum, child) => sum + child.points, 0)
     if (total !== task.score.manualPoints) fail('SPLIT_INVALID', `配分合計を親の${task.score.manualPoints}ptに合わせてください`)
     const policy = changePolicyFor(settings), createdAt = new Date().toISOString()
-    return { version: 1 as const, kind: 'task.split' as const, id: uid(), principal: { id: context.principal.id, kind: context.principal.kind, model: context.principal.model ?? null }, ownerId: context.ownerId, datasetId: context.datasetId, policyEpoch: policy.epoch, sourcePermissionRevision: policy.sourcePermissionRevision, aiEnabledAtPrepare: settings.aiEnabled, sourceRevisions: structuredClone(context.sourceRevisions), createdAt, expiresAt: instruction.expiresAt, taskId: task.id, baseRevision: task.revision, parentTitle: task.title, parentScoreBefore: structuredClone(task.score), parentAssessmentBefore: task.assessmentId, parentEffectiveBefore: task.effectivePoints, children: structuredClone(instruction.children), total, instruction, reason }
+    return { version: 1 as const, kind: 'task.split' as const, id: uid(), principal: { id: context.principal.id, kind: context.principal.kind, model: context.principal.model ?? null }, ownerId: context.ownerId, datasetId: context.datasetId, policyEpoch: policy.epoch, sourcePermissionRevision: policy.sourcePermissionRevision, aiEnabledAtPrepare: processingAllowed(settings, context.principal), processingEpoch: processingEpoch(settings, context.principal), sourceRevisions: structuredClone(context.sourceRevisions), createdAt, expiresAt: instruction.expiresAt, taskId: task.id, baseRevision: task.revision, parentTitle: task.title, parentScoreBefore: structuredClone(task.score), parentAssessmentBefore: task.assessmentId, parentEffectiveBefore: task.effectivePoints, children: structuredClone(instruction.children), total, instruction, reason }
   })
   const prepared = freeze({ ...payload, digest: await contentDigest(payload) })
   proposals.set(prepared.id, prepared)

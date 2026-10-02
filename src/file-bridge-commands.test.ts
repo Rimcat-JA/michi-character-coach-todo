@@ -13,7 +13,7 @@ import { isPendingCommand, pendingCommands, submitCommand } from './command-bus'
 import { assertFileBridgeCommand, assertFileBridgeInboxEntry, assertFileBridgeStatus } from './file-bridge-contract'
 import { fileBridgeReceiptKey, fileBridgeScopeKey, type FileBridgeApplicationBinding, type FileBridgeGateway, type FileBridgeInboxEntry, type FileBridgeLease, type FileBridgeRegistration, type FileBridgeResult, type FileBridgeStatus } from './file-bridge-types'
 
-beforeEach(async()=>{await db.delete();await db.open();await ensureSettings();await db.settings.update('main',{aiEnabled:true});clearChangeSetAuthority()})
+beforeEach(async()=>{await db.delete();await db.open();await ensureSettings();await db.settings.update('main',{aiEnabled:true,externalAI:{version:1,enabled:true,epoch:0,clients:[]}});clearChangeSetAuthority()})
 afterEach(()=>{vi.restoreAllMocks();vi.useRealTimers()})
 const future=(ms=600000)=>new Date(Date.now()+ms).toISOString()
 // Node-only test fixture; native browser Event.isTrusted has no writable setter.
@@ -83,14 +83,14 @@ describe('registered external file commands require native owner approval',()=>{
   })
   it.each(['ai','epoch','source','owner','dataset'] as const)('rejects %s changes before reservation or task effects',async(kind)=>{
     const f=await fixture(),prepared=await f.controller.prepare(f.reference),current=(await db.settings.get('main'))!
-    const patch=kind==='ai'?{aiEnabled:false}:kind==='epoch'?{changePolicy:{...changePolicyFor(current),epoch:1}}:kind==='source'?{changePolicy:{...changePolicyFor(current),sourcePermissionRevision:1}}:kind==='owner'?{profileId:crypto.randomUUID()}:{datasetId:crypto.randomUUID()}
+    const patch=kind==='ai'?{externalAI:{...current.externalAI!,enabled:false,epoch:current.externalAI!.epoch+1}}:kind==='epoch'?{changePolicy:{...changePolicyFor(current),epoch:1}}:kind==='source'?{changePolicy:{...changePolicyFor(current),sourcePermissionRevision:1}}:kind==='owner'?{profileId:crypto.randomUUID()}:{datasetId:crypto.randomUUID()}
     await db.settings.update('main',patch)
     await expect(f.controller.applyFromUI(prepared,click())).rejects.toMatchObject({code:kind==='owner'||kind==='dataset'?'OWNER_CHANGED':'AUTHORITY_CHANGED'})
     expect(f.gateway.authorizeApplication).not.toHaveBeenCalled();expect((await db.tasks.get(f.taskId))?.revision).toBe(1)
   })
   it('rechecks authority in the task transaction after main creates its durable reservation',async()=>{
     const f=await fixture(),prepared=await f.controller.prepare(f.reference),authorize=f.gateway.authorizeApplication
-    f.gateway.authorizeApplication=vi.fn(async input=>{const lease=await authorize(input);await db.settings.update('main',{aiEnabled:false});return lease})
+    f.gateway.authorizeApplication=vi.fn(async input=>{const lease=await authorize(input);await db.settings.update('main',{externalAI:{version:1,enabled:false,epoch:1,clients:[]}});return lease})
     await expect(f.controller.applyFromUI(prepared,click())).rejects.toMatchObject({code:'AUTHORITY_CHANGED'})
     expect(f.gateway.cancelApplication).toHaveBeenCalledOnce();expect(f.gateway.recordApplied).not.toHaveBeenCalled()
     expect((await db.tasks.get(f.taskId))?.revision).toBe(1);expect(await db.commands.get(fileBridgeReceiptKey(f.command.command_id))).toBeUndefined()

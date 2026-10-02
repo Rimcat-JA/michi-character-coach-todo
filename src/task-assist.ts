@@ -1,3 +1,4 @@
+import { processingAllowed, processingEpoch } from './external-authority'
 import { createTasksAtomic, newTaskInput, type TaskInput } from './commands'
 import { addDays, emptyScore, uid, validateDate, validateTaskDue, validateTaskInput } from './domain'
 import { db } from './db'
@@ -9,7 +10,7 @@ export type AssistedDraft = { input: TaskInput; notices: string[] }
 export type SourcedDraft = AssistedDraft & { source: string }
 /** The verified external actor behind a file/MCP creation; covered by the digest the owner approves (S21 shows it, not the coach). */
 export type AssistActor = { kind: 'external-agent'; id: string; entrance: 'file' | 'mcp' | 'api'; commandId: string }
-export type PreparedAssistedTasks = { id: string; profileId: string; datasetId: string; expiresAt: string; inputs: TaskInput[]; sources: string[]; origin: 'manual' | 'ai'; policyEpoch: number | null; actor?: AssistActor; digest: string }
+export type PreparedAssistedTasks = { id: string; profileId: string; datasetId: string; expiresAt: string; inputs: TaskInput[]; sources: string[]; origin: 'manual' | 'ai'; policyEpoch: number | null; processingEpoch: number; actor?: AssistActor; digest: string }
 const assistActorValid = (actor: unknown) => Boolean(actor && typeof actor === 'object' && !Array.isArray(actor) && Object.keys(actor).length === 4 && (actor as AssistActor).kind === 'external-agent' && ['file', 'mcp', 'api'].includes((actor as AssistActor).entrance) && [(actor as AssistActor).id, (actor as AssistActor).commandId].every(value => typeof value === 'string' && /^[\w.:-]{1,200}$/.test(value)))
 
 function uniqueNumber(raw: string, pattern: RegExp, maximum: number): number | null {
@@ -96,8 +97,8 @@ export async function prepareAssistedTasks(drafts: SourcedDraft[], origin: 'manu
   if (!settings) throw new Error('端末の設定が見つかりません')
   // AI proposals follow the AI-processing and AI-change stops; raw-text drafts saved by the owner do not.
   const policy = changePolicyFor(settings)
-  if (origin === 'ai' && (!settings.aiEnabled || !policy.aiChangesEnabled)) throw new Error('AIによる変更案の受付は停止中です。原文から下書きを使ってください')
-  const payload = { id: uid(), profileId: settings.profileId, datasetId: settings.datasetId, expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(), inputs: structuredClone(drafts.map(draft => draft.input)), sources: drafts.map(draft => draft.source), origin, policyEpoch: origin === 'ai' ? policy.epoch : null, ...(actor ? { actor: { kind: actor.kind, id: actor.id, entrance: actor.entrance, commandId: actor.commandId } } : {}) }
+  if (origin === 'ai' && (!processingAllowed(settings, actor ?? {kind:'coach',id:'app-coach'}) || !policy.aiChangesEnabled)) throw new Error('AIによる変更案の受付は停止中です。原文から下書きを使ってください')
+  const payload = { id: uid(), profileId: settings.profileId, datasetId: settings.datasetId, expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(), inputs: structuredClone(drafts.map(draft => draft.input)), sources: drafts.map(draft => draft.source), origin, policyEpoch: origin === 'ai' ? policy.epoch : null, processingEpoch: origin === 'ai' ? processingEpoch(settings, actor ?? {kind:'coach',id:'app-coach'}) : 0, ...(actor ? { actor: { kind: actor.kind, id: actor.id, entrance: actor.entrance, commandId: actor.commandId } } : {}) }
   return { ...payload, digest: await contentDigest(payload) }
 }
 
@@ -110,7 +111,7 @@ export async function applyAssistedTasks(prepared: PreparedAssistedTasks, confir
     const settings = await db.settings.get('main')
     if (settings?.profileId !== prepared.profileId || settings?.datasetId !== prepared.datasetId) throw new Error('確認したデータセットと一致しません')
     // Stops and resumes both bump the epoch, so a proposal prepared before a stop never survives it.
-    if (prepared.origin === 'ai') { const policy = changePolicyFor(settings); if (!settings.aiEnabled || !policy.aiChangesEnabled || policy.epoch !== prepared.policyEpoch) throw new Error('AIの停止または権限の変更により、この案は使えません。作り直してください') }
+    if (prepared.origin === 'ai') { const policy = changePolicyFor(settings); if (!processingAllowed(settings, prepared.actor ?? {kind:'coach',id:'app-coach'}) || !policy.aiChangesEnabled || policy.epoch !== prepared.policyEpoch || processingEpoch(settings, prepared.actor ?? {kind:'coach',id:'app-coach'}) !== prepared.processingEpoch) throw new Error('AIの停止または権限の変更により、この案は使えません。作り直してください') }
     const ids = await createTasksAtomic(prepared.inputs, `assist:${prepared.id}`)
     const auditId = `assist-approval:${prepared.id}`
     if (!await db.audits.get(auditId)) await db.audits.add({ id: auditId, taskId: null, operation: 'assist.approved', at: new Date().toISOString(), detail: `本人承認 ${confirmedDigest}; origin=${prepared.origin === 'ai' ? 'ai_accepted' : 'human'}; tasks=${ids.join(',')}${prepared.actor ? `; actor=external-agent:${prepared.actor.id}; entrance=${prepared.actor.entrance}; command=${prepared.actor.commandId}` : ''}` })

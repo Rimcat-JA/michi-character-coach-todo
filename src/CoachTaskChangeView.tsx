@@ -36,15 +36,15 @@ export default function CoachTaskChangeView({selectedTask,settings,onEdit,onAppl
   const bridge=window.michiAI?.proposeTaskChange,splitBridge=window.michiAI?.proposeTaskSplit
   const aiAvailable=Boolean(settings.aiEnabled&&settings.aiModel&&bridge)
   const stale=Boolean(draft&&(!selectedTask||draft.snapshot.id!==selectedTask.id||draft.snapshot.revision!==selectedTask.revision))
-  useEffect(()=>{generation.current++},[selectedTask?.id,selectedTask?.revision,settings.aiEnabled,settings.aiModel,policy.epoch,policy.sourcePermissionRevision,settings.datasetId,settings.profileId])
+  useEffect(()=>{generation.current++},[selectedTask?.id,selectedTask?.revision,settings.aiEnabled,settings.aiConnectionEpoch,settings.aiModel,policy.epoch,policy.sourcePermissionRevision,settings.datasetId,settings.profileId])
   useEffect(()=>{
     const prepared=preview?.command.changeSet
-    if(preview&&prepared&&(settings.aiEnabled!==prepared.aiEnabledAtPrepare||policy.epoch!==prepared.policyEpoch||policy.sourcePermissionRevision!==prepared.sourcePermissionRevision||settings.datasetId!==prepared.datasetId||settings.profileId!==prepared.ownerId||selectedTask?.id!==prepared.changes[0].taskId||selectedTask?.revision!==prepared.changes[0].baseRevision)){
+    if(preview&&prepared&&(settings.aiEnabled!==prepared.aiEnabledAtPrepare||(settings.aiConnectionEpoch??0)!==prepared.processingEpoch||policy.epoch!==prepared.policyEpoch||policy.sourcePermissionRevision!==prepared.sourcePermissionRevision||settings.datasetId!==prepared.datasetId||settings.profileId!==prepared.ownerId||selectedTask?.id!==prepared.changes[0].taskId||selectedTask?.revision!==prepared.changes[0].baseRevision)){
       let active=true
       void cancelCommand(preview.command).catch(()=>undefined).then(()=>{if(active){setPreview(current=>current?.command.id===preview.command.id?null:current);setNotice('タスクまたは利用許可が変わったため、本人指示と確認をやり直してください。相談文と入力欄は残っています。')}})
       return()=>{active=false}
     }
-  },[preview,selectedTask?.id,selectedTask?.revision,settings.aiEnabled,policy.epoch,policy.sourcePermissionRevision,settings.datasetId,settings.profileId])
+  },[preview,selectedTask?.id,selectedTask?.revision,settings.aiEnabled,settings.aiConnectionEpoch,policy.epoch,policy.sourcePermissionRevision,settings.datasetId,settings.profileId])
   useEffect(()=>{
     const target=splitPreview?.envelope
     if(splitPreview&&target&&(selectedTask?.id!==target.target_id||selectedTask?.revision!==target.expected_revision||!settings.aiEnabled)){

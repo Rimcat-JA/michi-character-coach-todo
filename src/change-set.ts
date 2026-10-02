@@ -1,3 +1,4 @@
+import { authorityMatches, processingAllowed, processingEpoch } from './external-authority'
 import Dexie from 'dexie'
 import { db } from './db'
 import { contentDigest, canonicalJSON } from './canonical'
@@ -41,7 +42,7 @@ export type TaskChangeValues = Pick<Task,'title'|'notes'|'scheduledDate'|'dueDat
 export type TaskChange = { taskId: string; baseRevision: number; title: string; before: TaskChangeValues; after: TaskChangeValues; fields: TaskChangeField[]; patch: TaskChangePatch; scoreBefore: ScoreInput; scoreAfter: ScoreInput; assessmentBefore: string; effectivePointsBefore: number|null; fieldOrigins:Partial<Record<TaskChangeField,TaskFieldOrigin>> }
 export type PreparedChangeSet = {
   version: 1; id: string; principal: ChangePrincipal; ownerId: string; datasetId: string
-  policyEpoch: number; sourcePermissionRevision: number; aiEnabledAtPrepare: boolean; sourceRevisions: SourceRevision[]
+  policyEpoch: number; sourcePermissionRevision: number; aiEnabledAtPrepare: boolean; processingEpoch: number; sourceRevisions: SourceRevision[]
   createdAt: string; expiresAt: string; changes: TaskChange[]; reason: string; instruction: VerifiedTaskInstruction|null; digest: string
 }
 export type UIChangeApproval = Readonly<{ id: string; changeSetId: string; digest: string; approvedBy: string; expiresAt: string }>
@@ -63,7 +64,7 @@ const sourceOrder = (a:SourceRevision,b:SourceRevision) => a.id<b.id?-1:a.id>b.i
 // prepared ChangeSet id -> audit id (single) or task id -> audit id (whole ChangeSet undo)
 const undoLinks = new Map<string, string | Record<string, string>>()
 /** Dataset restore/logout only reduces authority; no serialized grant is trusted. */
-export function clearChangeSetAuthority() { proposals.clear(); undoLinks.clear(); clearTaskInstructionAuthority() }
+export function clearChangeSetAuthority(options: {coachOnly?: boolean; externalOnly?: boolean; clientId?: string} = {}) { if(options.coachOnly||options.externalOnly||options.clientId){for(const [id,value] of proposals)if(authorityMatches(value.principal,options))proposals.delete(id)}else{proposals.clear(); undoLinks.clear(); clearTaskInstructionAuthority()} }
 function record(value: unknown): value is Record<string, unknown> { return Boolean(value && typeof value === 'object' && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype) }
 function exactKeys(value: Record<string, unknown>, keys: readonly string[]) { return Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key)) }
 function integer(value: unknown, min: number, max: number) { return Number.isInteger(value) && Number(value) >= min && Number(value) <= max }
@@ -138,7 +139,7 @@ function freeze<T>(value: T): T {
   return value
 }
 async function verifyProposal(value: PreparedChangeSet): Promise<PreparedChangeSet> {
-  if (!record(value) || !exactKeys(value,['version','id','principal','ownerId','datasetId','policyEpoch','sourcePermissionRevision','aiEnabledAtPrepare','sourceRevisions','createdAt','expiresAt','changes','reason','instruction','digest'])) fail('INVALID_CHANGE_SET','変更案の形式が不正です')
+  if (!record(value) || !exactKeys(value,['version','id','principal','ownerId','datasetId','policyEpoch','sourcePermissionRevision','aiEnabledAtPrepare','processingEpoch','sourceRevisions','createdAt','expiresAt','changes','reason','instruction','digest'])) fail('INVALID_CHANGE_SET','変更案の形式が不正です')
   const saved = proposals.get(value.id)
   if (!saved) fail('UNVERIFIED_CHANGE_SET','この変更案をアプリで作り直してください')
   const copy = structuredClone(value)
@@ -151,9 +152,9 @@ function authorizeProposal(prepared: PreparedChangeSet, context: ChangeContext, 
   const policy = changePolicyFor(settings)
   if (prepared.ownerId !== context.ownerId || prepared.datasetId !== context.datasetId || !asApprover && canonicalJSON(principal(context.principal)) !== canonicalJSON(prepared.principal)) fail('UNAUTHORIZED','この変更案を実行する権限がありません')
   if (prepared.changes.some(change => change.fields.some(field => !context.allowedFields.includes(field)))) fail('UNAUTHORIZED','この項目の変更は許可されていません')
-  if (policy.epoch !== prepared.policyEpoch || settings.aiEnabled !== prepared.aiEnabledAtPrepare) fail('POLICY_CHANGED','変更案の作成後にAIまたは権限設定が変わりました。差分を作り直してください')
+  if (policy.epoch !== prepared.policyEpoch || processingAllowed(settings, prepared.principal) !== prepared.aiEnabledAtPrepare || processingEpoch(settings, prepared.principal) !== prepared.processingEpoch) fail('POLICY_CHANGED','変更案の作成後にAIまたは権限設定が変わりました。差分を作り直してください')
   if (policy.sourcePermissionRevision !== prepared.sourcePermissionRevision || canonicalJSON(context.sourceRevisions.slice().sort(sourceOrder)) !== canonicalJSON(prepared.sourceRevisions)) fail('SOURCE_PERMISSION_CHANGED','出典の版または利用許可が変わりました。差分を作り直してください')
-  if (prepared.principal.kind !== 'human' && (!settings.aiEnabled || !policy.aiChangesEnabled || deniedOperation(policy,prepared.changes.flatMap(change=>change.fields)))) fail('CHANGES_STOPPED','AIによる変更は停止しています')
+  if (prepared.principal.kind !== 'human' && (!processingAllowed(settings, prepared.principal) || !policy.aiChangesEnabled || deniedOperation(policy,prepared.changes.flatMap(change=>change.fields)))) fail('CHANGES_STOPPED','AIによる変更は停止しています')
   if (Date.parse(prepared.expiresAt) <= Date.now()) fail('EXPIRED','変更案の確認期限が切れました。差分を作り直してください')
   return policy
 }
@@ -228,7 +229,7 @@ export async function prepareTaskChanges(requests: TaskChangeRequest[], context:
   }
   const payload = await db.transaction('r',db.tasks,db.settings,db.containers,db.tripBundles,async()=>{
     const settings = await currentSettings(context), policy=changePolicyFor(settings)
-    if (context.principal.kind !== 'human' && (!settings.aiEnabled || !policy.aiChangesEnabled || deniedOperation(policy,requests.flatMap(request=>Object.keys(request.patch) as TaskChangeField[])))) fail('CHANGES_STOPPED','AIによる変更は停止しています')
+    if (context.principal.kind !== 'human' && (!processingAllowed(settings, context.principal) || !policy.aiChangesEnabled || deniedOperation(policy,requests.flatMap(request=>Object.keys(request.patch) as TaskChangeField[])))) fail('CHANGES_STOPPED','AIによる変更は停止しています')
     const changes: TaskChange[] = []
     for (const request of requests) {
       const task=await db.tasks.get(request.taskId)
@@ -253,7 +254,7 @@ export async function prepareTaskChanges(requests: TaskChangeRequest[], context:
     }
     if(context.principal.kind!=='human'&&(changes.some(change=>change.fields.includes('title'))&&policy.fieldRules?.title==='deny'||deniedOperation(policy,changes.flatMap(change=>change.fields))))fail('CHANGES_STOPPED','この項目の代理変更は停止しています')
     const createdAt=now()
-    return {version:1 as const,id:uid(),principal:principal(context.principal),ownerId:context.ownerId,datasetId:context.datasetId,policyEpoch:policy.epoch,sourcePermissionRevision:policy.sourcePermissionRevision,aiEnabledAtPrepare:settings.aiEnabled,sourceRevisions:structuredClone(context.sourceRevisions.slice().sort(sourceOrder)),createdAt,expiresAt:instruction?.expiresAt??new Date(Date.now()+24*60*60*1000).toISOString(),changes,reason,instruction}
+    return {version:1 as const,id:uid(),principal:principal(context.principal),ownerId:context.ownerId,datasetId:context.datasetId,policyEpoch:policy.epoch,sourcePermissionRevision:policy.sourcePermissionRevision,aiEnabledAtPrepare:processingAllowed(settings, context.principal),processingEpoch:processingEpoch(settings, context.principal),sourceRevisions:structuredClone(context.sourceRevisions.slice().sort(sourceOrder)),createdAt,expiresAt:instruction?.expiresAt??new Date(Date.now()+24*60*60*1000).toISOString(),changes,reason,instruction}
   })
   const prepared=freeze({...payload,digest:await Dexie.waitFor(contentDigest(payload))})
   proposals.set(prepared.id,prepared)

@@ -1,3 +1,4 @@
+import { externalAIFor } from './external-authority'
 import { db } from './db'
 import { canonicalJSON } from './canonical'
 import { today, type Settings } from './domain'
@@ -32,7 +33,7 @@ export function triggerForCommand(trigger: CalendarRule['trigger']): FileBridgeT
 function scopeFromCommand(scope: FileBridgeScope): CalendarChangeScope {
   return scope.kind === 'this_and_future' ? { kind: 'this_and_future', fromDate: scope.from_date } : scope.kind === 'this_instance' ? { kind: 'this_instance', generationKey: scope.generation_key } : { kind: 'all_uncompleted' }
 }
-function stopped(settings: Settings) { const policy = changePolicyFor(settings); return !settings.aiEnabled || !policy.aiChangesEnabled || operationMode(policy, 'routine.change') === 'deny' }
+function stopped(settings: Settings) { const policy = changePolicyFor(settings); return !externalAIFor(settings).enabled || !policy.aiChangesEnabled || operationMode(policy, 'routine.change') === 'deny' }
 /** Builds a candidate that keeps the rule's title, steps, points and period; only the recurrence and scope come from the agent. */
 export function externalRoutineCandidate(envelope: CommandEnvelope, state: CalendarRulesState, actorId: string): RoutineAssistCandidate {
   const rule = state.rules.find(value => value.id === envelope.target_id)

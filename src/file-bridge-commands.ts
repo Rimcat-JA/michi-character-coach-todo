@@ -1,3 +1,4 @@
+import { externalAIFor } from './external-authority'
 import './external-task-create'
 import Dexie from 'dexie'
 import { db } from './db'
@@ -33,7 +34,7 @@ function assertSettings(registration:FileBridgeRegistration,value:Settings) {
   const policy=changePolicyFor(value)
   if(value.profileId!==registration.owner_id||value.datasetId!==registration.dataset_id)rejectFileBridge('OWNER_CHANGED')
   // The shared reason is named so S06, file and MCP report the same code.
-  if(agentChangesStopped(value,fileBridgeCommandGrant(registration)))rejectFileBridge('AUTHORITY_CHANGED','AIによる変更は停止しています。接続を確認してください。','CHANGES_STOPPED')
+  if(agentChangesStopped(value,fileBridgeCommandGrant(registration),{kind:'external-agent',id:registration.client.id}))rejectFileBridge('AUTHORITY_CHANGED','AIによる変更は停止しています。接続を確認してください。','CHANGES_STOPPED')
   if(policy.epoch!==registration.policy_epoch||policy.sourcePermissionRevision!==registration.source_permission_revision)rejectFileBridge('AUTHORITY_CHANGED','本人・AI設定または利用許可が変わりました。接続を確認してください。','POLICY_CHANGED')
   if(Date.parse(registration.client.grant.expires_at)<=Date.now())rejectFileBridge('EXPIRED')
 }
@@ -97,6 +98,9 @@ export function createFileBridgeController(gateway:FileBridgeGateway) {
       if(value.profileId!==current.profileId||value.datasetId!==current.datasetId)rejectFileBridge('OWNER_CHANGED')
       const key=fileBridgeScopeKey(value.profileId,value.datasetId),previous=await db.commands.get(key)
       if(previous&&registration){try{const old=JSON.parse(previous.resultId).registration as FileBridgeRegistration|null;if(old?.client.id===registration.client.id&&(old.client.revision>registration.client.revision||old.client.grant_epoch>registration.client.grant_epoch))rejectFileBridge('REGISTRATION_ROLLBACK')}catch(error){if(error instanceof Error&&'code'in error)throw error}}
+      const external=externalAIFor(value), clients=external.clients.filter(client=>client.registration.client.id!==registration?.client.id).map(client=>!registration&&client.registration.client.id===currentStatus?.registration?.client.id?{...client,status:'revoked' as const}:client)
+      if(registration)clients.push({registration:structuredClone(registration),status:'active',capabilityChecks:external.clients.find(client=>client.registration.client.id===registration.client.id)?.capabilityChecks??[],shippingState:'implemented'})
+      await db.settings.put({...value,externalAI:{...external,clients:clients.slice(-50)}})
       await db.commands.put({key,hash:await Dexie.waitFor(contentDigest(payload)),resultId:JSON.stringify(payload),at:new Date().toISOString()})
     })
     if(currentStatus&&canonicalJSON({registration:currentStatus.registration,snapshot:currentStatus.snapshot})!==canonicalJSON({registration:status.registration,snapshot:status.snapshot}))clear()
@@ -207,7 +211,7 @@ export function createFileBridgeController(gateway:FileBridgeGateway) {
     async configure(request:Pick<FileBridgeConfigure,'intendedHost'|'taskIds'|'fields'|'lifetimeHours'|'allowSplit'|'ruleIds'>&{automation?:FileBridgeConfigure['automation']},event:Event) {
       trustedClick(event)
       const current=await settings(),policy=changePolicyFor(current)
-      if(!current.aiEnabled||!policy.aiChangesEnabled)rejectFileBridge('AUTHORITY_CHANGED')
+      if(!externalAIFor(current).enabled||!policy.aiChangesEnabled)rejectFileBridge('AUTHORITY_CHANGED')
       if(request.automation&&!fileBridgeAutomationAllowed(policy,request.fields,request.automation.maxScheduleShiftDays))rejectFileBridge('AUTOMATION_NOT_GRANTED','自動化設定（S20）でメモ・予定日の範囲内自動を許可してから、同じかより狭い範囲で委任してください。')
       const {allowSplit,ruleIds,...basic}=structuredClone(request),extended=allowSplit||ruleIds?.length?{allowSplit:Boolean(allowSplit),ruleIds:ruleIds??[]}:{}
       const value={...basic,automation:request.automation??null,...extended,ownerId:current.profileId,datasetId:current.datasetId,policyEpoch:policy.epoch,sourcePermissionRevision:policy.sourcePermissionRevision}
@@ -286,7 +290,7 @@ export function createFileBridgeController(gateway:FileBridgeGateway) {
      *  CHANGES_STOPPED only when AI changes are off or every operation this grant carries is denied (N09 ∩ grant); otherwise POLICY_CHANGED. */
     async closePending(requested:'CHANGES_STOPPED'|'POLICY_CHANGED'='CHANGES_STOPPED') {
       const reg=currentStatus?.registration,current=await db.settings.get('main')
-      const code=requested==='CHANGES_STOPPED'&&current&&agentChangesStopped(current,reg?fileBridgeCommandGrant(reg):null)?'CHANGES_STOPPED' as const:'POLICY_CHANGED' as const
+      const code=requested==='CHANGES_STOPPED'&&current&&agentChangesStopped(current,reg?fileBridgeCommandGrant(reg):null,{kind:'external-agent',id:reg?.client.id??'external'})?'CHANGES_STOPPED' as const:'POLICY_CHANGED' as const
       const state=code==='CHANGES_STOPPED'?'denied' as const:'expired' as const
       for(const reference of [...entries.keys()]){const outcome={commandId:null,entrance:null,state,code,message:code==='CHANGES_STOPPED'?'AIによる変更の停止で待機中のコマンドを閉じました':'設定・権限の変更で待機中のコマンドを閉じました',receipt:null};const prepared=[...preparedRegistry.values()].find(value=>value.reference===reference)??null;await noteOutcome(reference,prepared,outcome);await reportOutcome(reference,outcome)}
     },

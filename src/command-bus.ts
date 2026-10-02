@@ -1,3 +1,4 @@
+import { authorityMatches, processingAllowed } from './external-authority'
 import Dexie from 'dexie'
 import { db } from './db'
 import { canonicalJSON } from './canonical'
@@ -89,9 +90,9 @@ export function commandOperationStopped(policy: ChangePolicy, type: string): boo
   return operationMode(policy, 'task.text') === 'deny' && operationMode(policy, 'task.schedule') === 'deny'
 }
 /** N09: AI changes are off, or every operation the connection's grant carries is denied (no grant = task edits). */
-export function agentChangesStopped(settings: Settings, grant?: CommandGrant | null): boolean {
+export function agentChangesStopped(settings: Settings, grant?: CommandGrant | null, principal: ChangePrincipal = {kind: 'coach', id: 'app-coach'}): boolean {
   const policy = changePolicyFor(settings)
-  if (!settings.aiEnabled || !policy.aiChangesEnabled) return true
+  if (!processingAllowed(settings, principal) || !policy.aiChangesEnabled) return true
   return (grant?.operations ?? ['task.update']).every(type => commandOperationStopped(policy, type))
 }
 /** An authority change seen while AI changes are stopped reports the stop itself (design 29.4 puts stop first). */
@@ -99,7 +100,7 @@ export async function refineCommandOutcome(outcome: CommandOutcome, actor: Actor
   if (!actor || actor.principal.kind === 'human' || outcome.code !== 'POLICY_CHANGED') return outcome
   try {
     const settings = await db.settings.get('main'), policy = settings ? changePolicyFor(settings) : null
-    if (settings && policy && agentChangesStopped(settings, actor.grant)) return freeze({ ...outcome, state: 'denied', code: 'CHANGES_STOPPED' })
+    if (settings && policy && agentChangesStopped(settings, actor.grant, actor.principal)) return freeze({ ...outcome, state: 'denied', code: 'CHANGES_STOPPED' })
   } catch { /* An unreadable policy keeps the original outcome. */ }
   return outcome
 }
@@ -118,7 +119,7 @@ export function uiCoachActor(settings: Pick<Settings, 'profileId' | 'datasetId'>
 }
 /** Only the file controller calls this, after main verified the signed registration. */
 export function externalAgentActor(binding: { ownerId: string; datasetId: string; clientId: string; registrationRevision: number; grantEpoch: number; host: string }, entrance: 'file' | 'mcp' | 'api', grant: CommandGrant, creationContainerId?: string | null): ActorContext {
-  return issue({ entrance, principal: { id: binding.clientId, kind: 'external-agent', model: null }, ownerId: binding.ownerId, datasetId: binding.datasetId, grant, sourceRevisions: [{ id: `external-registration:${binding.clientId}`, revision: binding.registrationRevision }, { id: `external-grant:${binding.clientId}`, revision: binding.grantEpoch }], label: binding.host, ...(entrance==='api' ? {creationContainerId:creationContainerId??null} : {}) })
+  return issue({ entrance, principal: { id: entrance==='api'?`localapi:${binding.clientId}`:binding.clientId, kind: 'external-agent', model: null }, ownerId: binding.ownerId, datasetId: binding.datasetId, grant, sourceRevisions: [{ id: `external-registration:${binding.clientId}`, revision: binding.registrationRevision }, { id: `external-grant:${binding.clientId}`, revision: binding.grantEpoch }], label: binding.host, ...(entrance==='api' ? {creationContainerId:creationContainerId??null} : {}) })
 }
 export function changeContextFor(actor: ActorContext): ChangeContext {
   const allowedFields = actor.grant ? actor.grant.fields.map(field => commandFieldMap[field]) : [...taskChangeFields]
@@ -180,7 +181,7 @@ const updateHandler: CommandTypeHandler = {
     if (!instruction && actor.principal.kind !== 'human' && Object.keys(envelope.payload).some(field => protectedCommandFields.includes(field as CommandField))) {
       const settings = await db.settings.get('main'), policy = settings ? changePolicyFor(settings) : null
       if (!settings || settings.profileId !== actor.ownerId || settings.datasetId !== actor.datasetId) fail('UNAUTHORIZED', 'この領域の変更は許可されていません')
-      if (!settings.aiEnabled || !policy!.aiChangesEnabled || operationsForFields(Object.keys(patch) as TaskChangeField[]).some(operation => operationMode(policy!, operation) === 'deny') || Object.hasOwn(patch, 'title') && policy!.fieldRules?.title === 'deny') fail('CHANGES_STOPPED', 'AIによる変更は停止しています')
+      if (!processingAllowed(settings, actor.principal) || !policy!.aiChangesEnabled || operationsForFields(Object.keys(patch) as TaskChangeField[]).some(operation => operationMode(policy!, operation) === 'deny') || Object.hasOwn(patch, 'title') && policy!.fieldRules?.title === 'deny') fail('CHANGES_STOPPED', 'AIによる変更は停止しています')
       const task = await db.tasks.get(request.taskId)
       if (!task || task.deletedAt) fail('UNAUTHORIZED', 'この領域の変更は許可されていません')
       if (task.revision !== request.expectedRevision) fail('CONFLICT', 'タスクが更新されています。新しい版で差分を作り直してください')
@@ -223,7 +224,7 @@ export function subscribeCommands(listener: () => void) { listeners.add(listener
 export const commandsVersion = () => pendingVersion
 function sweep(notify = true) { let removed = false; for (const [key, value] of pending) if (Date.parse(value.expiresAt) <= Date.now()) { pending.delete(key); removed = true } if (removed && notify) changed() }
 /** Logout, restore and dataset changes only reduce authority. */
-export function clearCommandAuthority() { pending.clear(); received.clear(); changed() }
+export function clearCommandAuthority(options: {coachOnly?: boolean; externalOnly?: boolean; clientId?: string} = {}) { if(options.coachOnly||options.externalOnly||options.clientId){for(const [id,value] of pending)if(authorityMatches(value.actor.principal,options))pending.delete(id)}else{pending.clear(); received.clear()} changed() }
 /** Read during render (S21), so it never notifies subscribers. */
 export function pendingCommands(): PreparedCommand[] { sweep(false); return [...pending.values()].sort((a, b) => a.createdAt.localeCompare(b.createdAt)) }
 export function isPendingCommand(prepared: PreparedCommand | null | undefined): prepared is PreparedCommand { return Boolean(prepared && pending.get(prepared.id) === prepared) }

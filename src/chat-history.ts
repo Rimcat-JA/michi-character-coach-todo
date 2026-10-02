@@ -14,7 +14,7 @@ import { coachCoverageCard, type CoachCoverageCard } from './coach-coverage'
 export type ChatSourceRef = { kind: 'task' | 'goal' | 'goal-checkin' | 'library' | 'memory'; id: string; revision: number; digest: string | null; permissionRevision: number | null }
 export type CoachConversation = { id: string; ownerId: string; title: string; timezone: string; revision: number; draft: string; draftRevision: number; pendingMessageId: string | null; createdAt: string; updatedAt: string; deletedAt: string | null; retentionUntil?: string | null }
 export type CoachMessage = { id: string; conversationId: string; ownerId: string; sequence: number; role: 'user' | 'assistant'; origin: 'human' | 'live_ai' | 'template' | 'notice'; text: string; model: string | null; provider: 'openrouter' | null; replyTo: string | null; selectedSources: ChatSourceRef[]; policyEpoch: number | null; sourcePermissionRevision: number | null; createdAt: string; coverageCard?: CoachCoverageCard }
-export type CoachTurn = { conversationId: string; userMessageId: string; ownerId: string; datasetId: string; mode: 'local' | 'ai'; model: string | null; policyEpoch: number; sourcePermissionRevision: number; selectedSources: ChatSourceRef[]; selectedContext: string | null }
+export type CoachTurn = { conversationId: string; userMessageId: string; ownerId: string; datasetId: string; mode: 'local' | 'ai'; model: string | null; policyEpoch: number; aiConnectionEpoch: number; sourcePermissionRevision: number; selectedSources: ChatSourceRef[]; selectedContext: string | null }
 export type CoachTurnInput = { text: string; mode: 'local' | 'ai'; taskId?: string | null; goalId?: string | null; sourceIds?: string[]; memoryIds?: string[]; expectedContextDigest?: string }
 
 export { maxChatSourceRefs }
@@ -108,7 +108,7 @@ async function preparedContext(input: CoachTurnInput, current: Settings) {
   let index = 0; for (const ref of prepared.refs) if (ref.kind === 'goal-checkin') ref.digest = checkInDigests[index++]
   return prepared
 }
-async function contextDigest(prepared: Awaited<ReturnType<typeof preparedContext>>, current: Settings) { return Dexie.waitFor(digest(JSON.stringify([prepared.context, prepared.refs, current.profileId, current.datasetId, changePolicyFor(current).epoch, current.aiModel ?? null]))) }
+async function contextDigest(prepared: Awaited<ReturnType<typeof preparedContext>>, current: Settings) { return Dexie.waitFor(digest(JSON.stringify([prepared.context, prepared.refs, current.profileId, current.datasetId, changePolicyFor(current).epoch, current.aiConnectionEpoch??0, current.aiModel ?? null]))) }
 export async function previewCoachTurnContext(input: Omit<CoachTurnInput, 'text'>): Promise<{ context: string | null; sources: ChatSourceRef[]; digest: string; withheldQuotes: number; notesWithheld: boolean }> {
   validateSelections(input)
   const current = await settings(); if (input.mode === 'ai') { if (!current.aiEnabled) throw new Error('AIは停止中です'); modelId(current.aiModel) }
@@ -127,7 +127,7 @@ export async function beginCoachTurn(id: string, expectedRevision: number, input
   if (input.expectedContextDigest !== undefined && input.expectedContextDigest !== await contextDigest(prepared, initial)) throw new ConflictError()
   const turn = await db.transaction('rw', tables(), async () => {
     const current = await settings(), row = await conversation(id, current.profileId), policy = changePolicyFor(current)
-    if (current.profileId !== initial.profileId || current.datasetId !== initial.datasetId || current.aiEnabled !== initial.aiEnabled || current.aiModel !== initial.aiModel || policy.epoch !== changePolicyFor(initial).epoch || row.revision !== expectedRevision) throw new ConflictError()
+    if (current.profileId !== initial.profileId || current.datasetId !== initial.datasetId || current.aiEnabled !== initial.aiEnabled || (current.aiConnectionEpoch??0)!==(initial.aiConnectionEpoch??0) || current.aiModel !== initial.aiModel || policy.epoch !== changePolicyFor(initial).epoch || row.revision !== expectedRevision) throw new ConflictError()
     if (row.pendingMessageId) throw new Error('前の応答を待っています。中断してから再送してください')
     const fresh = await preparedContext(input, current)
     if (fresh.context !== prepared.context || JSON.stringify(fresh.checkInBodies) !== JSON.stringify(prepared.checkInBodies)) throw new ConflictError()
@@ -141,7 +141,7 @@ export async function beginCoachTurn(id: string, expectedRevision: number, input
     await db.coachConversations.put({ ...row, revision: nextRevision(row.revision), ...(clearDraft ? { draft: '', draftRevision: nextRevision(row.draftRevision) } : {}), pendingMessageId: userMessageId, updatedAt: at })
     if (input.mode === 'ai') for (const ref of prepared.refs) if (ref.kind === 'library') await recordSourceSent({ id: ref.id, latestRevision: ref.revision, permissionRevision: ref.permissionRevision! }, current.aiModel!, 'coach-chat')
     if (input.mode === 'ai' && fresh.taskEgress && input.taskId) await recordEgressAudit({ kind: 'ai-model', route: 'coach-chat', model: current.aiModel ?? null }, [{ taskId: input.taskId, egress: fresh.taskEgress }])
-    return { conversationId: id, userMessageId, ownerId: current.profileId, datasetId: current.datasetId, mode: input.mode, model: input.mode === 'ai' ? current.aiModel! : null, policyEpoch: policy.epoch, sourcePermissionRevision: policy.sourcePermissionRevision, selectedSources: prepared.refs, selectedContext: prepared.context }
+    return { conversationId: id, userMessageId, ownerId: current.profileId, datasetId: current.datasetId, mode: input.mode, model: input.mode === 'ai' ? current.aiModel! : null, policyEpoch: policy.epoch, aiConnectionEpoch: current.aiConnectionEpoch??0, sourcePermissionRevision: policy.sourcePermissionRevision, selectedSources: prepared.refs, selectedContext: prepared.context }
   })
   activeTurns.set(turn.userMessageId, JSON.stringify(turn))
   return turn
@@ -172,7 +172,7 @@ export async function appendCoachReply(turn: CoachTurn, value: string, origin: '
   const result = await db.transaction('rw', tables(), async () => {
     const current = await settings(), row = await conversation(turn.conversationId, current.profileId), policy = changePolicyFor(current), user = await db.coachMessages.get(turn.userMessageId)
     if (current.profileId !== turn.ownerId || current.datasetId !== turn.datasetId || row.pendingMessageId !== turn.userMessageId || !user || user.ownerId !== current.profileId || user.role !== 'user' || user.conversationId !== row.id || !sameRefs(user.selectedSources, turn.selectedSources)) throw new ConflictError()
-    if (origin !== 'notice' && (!await referencesCurrent(turn.selectedSources, current, origin === 'live_ai' ? turn.model : null) || origin === 'live_ai' && (!current.aiEnabled || current.aiModel !== turn.model || policy.epoch !== turn.policyEpoch || policy.sourcePermissionRevision !== turn.sourcePermissionRevision))) throw new ConflictError()
+    if (origin !== 'notice' && (!await referencesCurrent(turn.selectedSources, current, origin === 'live_ai' ? turn.model : null) || origin === 'live_ai' && (!current.aiEnabled || current.aiModel !== turn.model || (current.aiConnectionEpoch??0)!==turn.aiConnectionEpoch || policy.epoch !== turn.policyEpoch || policy.sourcePermissionRevision !== turn.sourcePermissionRevision))) throw new ConflictError()
     const messages = await db.coachMessages.where('conversationId').equals(row.id).toArray(), id = uid(), at = timestamp(row.updatedAt)
     if (messages.some(message => message.replyTo === turn.userMessageId)) throw new ConflictError()
     await db.coachMessages.add({ id, conversationId: row.id, ownerId: current.profileId, sequence: Math.max(0, ...messages.map(message => message.sequence)) + 1, role: 'assistant', origin, text: value, ...(origin !== 'notice' && turn.selectedSources.some(ref => ref.kind === 'library') ? { coverageCard: await coachCoverageCard(turn.selectedSources, value) } : {}), model: origin === 'live_ai' ? turn.model : null, provider: origin === 'live_ai' ? 'openrouter' : null, replyTo: user.id, selectedSources: origin === 'notice' ? [] : turn.selectedSources, policyEpoch: origin === 'live_ai' ? turn.policyEpoch : null, sourcePermissionRevision: origin === 'live_ai' ? turn.sourcePermissionRevision : null, createdAt: at })

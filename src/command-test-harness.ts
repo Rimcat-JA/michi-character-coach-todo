@@ -21,7 +21,7 @@ const { createMCPFileClient, createMCPRouter } = require('../electron/mcp-file-c
 export function click(type = 'click') { const event = new Event(type); Object.defineProperty(event, 'isTrusted', { value: true }); return event }
 export async function resetApp(model = 'synthetic/coach-a') {
   clearChangeSetAuthority(); clearCommandAuthority(); clearTaskSplitAuthority()
-  await db.delete(); await db.open(); await ensureSettings(); await db.settings.update('main', { aiEnabled: true, aiModel: model })
+  await db.delete(); await db.open(); await ensureSettings(); await db.settings.update('main', { externalAI: {version:1,enabled:true,epoch:0,clients:[]}, aiEnabled: true, aiModel: model })
   return (await db.settings.get('main'))!
 }
 const clone = <T>(value: T): T => value === undefined ? value : structuredClone(value)
