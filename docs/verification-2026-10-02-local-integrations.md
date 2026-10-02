@@ -12,13 +12,13 @@
 - マイクは本人PTTの5秒proof・main frame・audioだけ。video/display/foreign拒否、停止/hide/navigationで取消。拒否と一般認識障害を分け、原音保存・資産の自動取得なし。
 - AI停止・本人/dataset/epoch/資料権限・凍結・復元をmainで再検証。接続一覧にAPI/Webhookと個別停止を追加。
 
-レビューで、taskNotes追加による保持期限transactionのロック競合を再現し既存evidence経路へ統合して解消。待機/配送済み100件が後続を妨げる経路、未完成operation tableの権限拡大、ping再送表示、期限切れカード、共通受信API履歴、イベント結果receiptも修正しました。
+レビューで、taskNotes追加による保持期限transactionのロック競合を再現し既存evidence経路へ統合して解消。待機/配送済み100件が後続を妨げる経路、未完成operation tableの権限拡大、ping再送表示、期限切れカード、共通受信API履歴、イベント結果receiptも修正しました。通信応答待ち中の取消は永続化queueを待たず権限を縮小し、batchの残りを止める回帰試験を追加。
 
 [Electron Session](https://www.electronjs.org/docs/latest/api/session)、[Chrome scripting](https://developer.chrome.com/docs/extensions/reference/api/scripting)、[Dexie DBCore](https://dexie.org/docs/DBCore/DBCore)を参照。
 
 ## 自動試験
 
-途中チェック：Vitest1846件、Electron241件、CJS48ファイルの構文、TypeScript/build、lint、PWA offline10段階成功。レビュー後Webhook8件成功。最終全チェック・PR head両OS CIは追記します。
+最終ローカルチェック：Vitest1847件、Electron244件、CJS48ファイルの構文、TypeScript/build、lint警告0、PWA offline10段階成功。その後、通信応答待ち中の停止が残るbatchへ即時反映する修正と回帰試験を追加し、Webhook9件成功。最終PR headの両OS CIを確認します。
 
 APIの実HTTP/rate/Host/Origin/size/署名receipt復旧、triggerの一回実行/事実/引数/期限/回数/再起動/停止、音声permission matrix/障害、引用26000文字の順序/backup/消去、Webhook固定vector/改変/時刻/重複/SSRF/実HTTP/offline/失効/再起動/後続公平性/transaction rollbackを含みます。Node暗号化fixtureはAES-GCMで実Windows safeStorageと区別。
 
@@ -37,3 +37,5 @@ Windows実画面へ合成SpeechRecognitionを差し込み、not-allowed/audio-ca
 ## 要件と残り
 
 AT-I03/I08は自動試験とWindows DEV・このPC内API/固定実行の範囲で確認。実Zapier/公開到達・OSアカウント分離・別端末transportは未確認/未提供。I02はnative activeTab手順と転送受信/送信者認証が残るため一部実装。K10は実ASR/マイク/Live2D未提供のため一部実装を維持。
+
+追加TTS停止試験はQA/CDP待機がタイムアウトして完了証跡を取れず、成功に数えていません。アプリ応答と応答本文は維持され、QA音声を取消して専用プロセス/receiverを終了しました。実音声停止の追加受入は未確認です。

@@ -22,7 +22,9 @@ function retryDelay(attempts, retryAfter, now) {
 }
 async function createWebhookService({ directory, safeStorage, gateway, getContext, readDatabase, verifyNativeProof, now = Date.now }) {
   const store = await createPrivateJSONStore({ directory, safeStorage, maxBytes: 1024 * 1024 })
-  let config = null, queue = Promise.resolve(), busy = false
+  let config = null, queue = Promise.resolve(), busy = false, revokeAllPending = false
+  const revokedImmediately = new Set()
+  const revoked = sub => revokeAllPending || revokedImmediately.has(sub.id) || !!sub.revokedAt
   const serialize = action => { const work = queue.then(action); queue = work.catch(() => {}); return work }
   async function load() {
     if (config) return
@@ -51,7 +53,13 @@ async function createWebhookService({ directory, safeStorage, gateway, getContex
       return { subscription: publicSub(sub), secret }
     })
   }
-  async function revoke(id = null) { return serialize(async () => { await load(); if (id !== null && !uuid(id)) fail('WEBHOOK_ID_INVALID'); const next = { ...config, subscriptions: config.subscriptions.map(s => id === null || s.id === id ? { ...s, revokedAt: new Date(now()).toISOString() } : s) }; await store.save('config.bin', next); config = next; return true }) }
+  async function revoke(id = null) {
+    if (id !== null && !uuid(id)) fail('WEBHOOK_ID_INVALID')
+    // Reduce authority immediately, even while a HTTP response is outstanding.
+    // The serialized durable update must never leave a queued batch able to send.
+    if (id === null) revokeAllPending = true; else revokedImmediately.add(id)
+    return serialize(async () => { await load(); const next = { ...config, subscriptions: config.subscriptions.map(s => id === null || s.id === id ? { ...s, revokedAt: new Date(now()).toISOString() } : s) }; await store.save('config.bin', next); config = next; if (id === null) revokeAllPending = false; return true })
+  }
   const filename = (sub, event) => 'd-' + sub.id + '-' + event.id + '.bin'
   const publicDelivery = d => ({ id: d.id, subscriptionId: d.subscriptionId, eventId: d.eventId, event: d.event, state: d.state, attempts: d.attempts, nextAt: d.nextAt, updatedAt: d.updatedAt, ...(d.httpStatus ? { httpStatus: d.httpStatus } : {}), ...(d.error ? { error: d.error } : {}) })
   async function records() {
@@ -59,7 +67,7 @@ async function createWebhookService({ directory, safeStorage, gateway, getContex
     for (const name of names) { const row = await store.load(name); if (!row || filename({ id: row.subscriptionId }, { id: row.eventId }) !== name || !uuid(row.id) || !uuid(row.eventId) || !uuid(row.subscriptionId) || !Number.isInteger(row.attempts) || row.attempts < 0 || row.attempts > 7 || !['in_flight','retrying','unknown','delivered','rejected','blocked_by_policy','cancelled','exhausted'].includes(row.state) || !/^[a-f0-9]{64}$/.test(row.digest)) fail('WEBHOOK_JOURNAL_INVALID'); rows.push(row) }
     return rows
   }
-  async function status() { await queue; await load(); const c = await context(), history = await records(), settled = new Set(history.filter(d=>['delivered','rejected','cancelled','exhausted'].includes(d.state)).map(d=>d.subscriptionId+':'+d.eventId)), rows = await readDatabase('integrationOutbox',null); return { subscriptions: config.subscriptions.map(s => ({ ...publicSub(s), active: c.enabled && !s.revokedAt && matches(s,c) })), deliveries: history.sort((a,b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0,100).map(publicDelivery), settledEventIds:rows.filter(row=>rowValid(row)&&row.subscriptionIds.every(id=>settled.has(id+':'+row.id))).map(row=>row.id), notice: '秘密は端末内に保存します。通知はID・日時・ポイントのみ（タイトルは個別の明示許可時だけ）。送信結果が不明な場合は成功にしません。通常イベントは初回＋最大6回の再送。試験用pingは一回だけ送ります。同じイベントIDで受信側が重複を拒否します。' } }
+  async function status() { await queue; await load(); const c = await context(), history = await records(), settled = new Set(history.filter(d=>['delivered','rejected','cancelled','exhausted'].includes(d.state)).map(d=>d.subscriptionId+':'+d.eventId)), rows = await readDatabase('integrationOutbox',null); return { subscriptions: config.subscriptions.map(s => ({ ...publicSub(s), active: c.enabled && !revoked(s) && matches(s,c) })), deliveries: history.sort((a,b) => b.updatedAt.localeCompare(a.updatedAt)).slice(0,100).map(publicDelivery), settledEventIds:rows.filter(row=>rowValid(row)&&row.subscriptionIds.every(id=>settled.has(id+':'+row.id))).map(row=>row.id), notice: '秘密は端末内に保存します。通知はID・日時・ポイントのみ（タイトルは個別の明示許可時だけ）。送信結果が不明な場合は成功にしません。通常イベントは初回＋最大6回の再送。試験用pingは一回だけ送ります。同じイベントIDで受信側が重複を拒否します。' } }
   function rowValid(row) {
     const p = row?.payload
     return exact(row,['id','at','state','subscriptionIds','payload','ownerId','datasetId','policyEpoch','sourcePermissionRevision']) && uuid(row.id) && row.state === 'pending' && Number.isFinite(Date.parse(row.at)) && uuid(row.ownerId) && uuid(row.datasetId) && Number.isSafeInteger(row.policyEpoch) && Number.isSafeInteger(row.sourcePermissionRevision) && Array.isArray(row.subscriptionIds) && row.subscriptionIds.length <= 50 && row.subscriptionIds.every(uuid) && (exact(p,['id','type','occurred_at','task_id','dataset_id','points']) || exact(p,['id','type','occurred_at','task_id','dataset_id','points','title'])) && p.id === row.id && p.occurred_at === row.at && EVENTS.includes(p.type) && uuid(p.task_id) && p.dataset_id === row.datasetId && (p.points === null || Number.isInteger(p.points) && p.points >= 0 && p.points <= 100000) && (p.title === undefined || typeof p.title === 'string' && p.title.length <= 300)
@@ -72,7 +80,7 @@ async function createWebhookService({ directory, safeStorage, gateway, getContex
     const save = async changes => { state = { ...state, ...changes, updatedAt: new Date(now()).toISOString() }; await store.save(name,state); return publicDelivery(state) }
     if (['delivered','rejected','cancelled','exhausted'].includes(state.state)) return publicDelivery(state)
     const c = await context()
-    if (!c.enabled || sub.revokedAt || !matches(sub,c) || !matches(row,c) || !ping && (!sub.events.includes(payload.type) || row.at < sub.createdAt)) return save({ state: 'cancelled', error: 'AUTHORITY_CHANGED', nextAt: null })
+    if (!c.enabled || revoked(sub) || !matches(sub,c) || !matches(row,c) || !ping && (!sub.events.includes(payload.type) || row.at < sub.createdAt)) return save({ state: 'cancelled', error: 'AUTHORITY_CHANGED', nextAt: null })
     if (state.state === 'in_flight') return save({ state: 'unknown', error: 'INTERRUPTED_DELIVERY', nextAt: now() + retryDelay(state.attempts,null,now()) })
     if (state.nextAt && state.nextAt > now()) return publicDelivery(state)
     if (state.attempts >= 7) return save({ state: 'exhausted', nextAt: null })
@@ -80,7 +88,7 @@ async function createWebhookService({ directory, safeStorage, gateway, getContex
     // Claim is durable before dispatch. A restart cannot manufacture a delivered response.
     await save({ state: 'in_flight', attempts: state.attempts + 1, nextAt: null, error: undefined })
     const latest = await context()
-    if (!latest.enabled || !matches(sub,latest) || !matches(row,latest)) return save({state:'cancelled',error:'AUTHORITY_CHANGED',nextAt:null,attempts:state.attempts-1})
+    if (!latest.enabled || revoked(sub) || !matches(sub,latest) || !matches(row,latest)) return save({state:'cancelled',error:'AUTHORITY_CHANGED',nextAt:null,attempts:state.attempts-1})
     const timestamp = String(Math.floor(now()/1000))
     let response
     try {
@@ -98,7 +106,7 @@ async function createWebhookService({ directory, safeStorage, gateway, getContex
   }
   async function dispatch() {
     if (busy) return []; busy = true
-    try { return await serialize(async () => { await load(); const rows = await readDatabase('integrationOutbox',null), output=[], history=await records(), terminal=new Set(history.filter(d=>['delivered','rejected','cancelled','exhausted'].includes(d.state)).map(d=>d.subscriptionId+':'+d.eventId)); if (!Array.isArray(rows)) fail('WEBHOOK_OUTBOX_INVALID'); for (const row of rows.slice().sort((a,b)=>String(a.at).localeCompare(String(b.at)))) { if (!rowValid(row)) continue; for (const sub of config.subscriptions.filter(s=>row.subscriptionIds.includes(s.id))) {if(terminal.has(sub.id+':'+row.id))continue;const previous=history.find(d=>d.subscriptionId===sub.id&&d.eventId===row.id),c=await context();if(previous?.nextAt>now()&&!sub.revokedAt&&c.enabled&&matches(sub,c)&&matches(row,c))continue;output.push(await deliver(sub,row));if(output.length>=100)return output} } return output }) } finally { busy = false }
+    try { return await serialize(async () => { await load(); const rows = await readDatabase('integrationOutbox',null), output=[], history=await records(), terminal=new Set(history.filter(d=>['delivered','rejected','cancelled','exhausted'].includes(d.state)).map(d=>d.subscriptionId+':'+d.eventId)); if (!Array.isArray(rows)) fail('WEBHOOK_OUTBOX_INVALID'); for (const row of rows.slice().sort((a,b)=>String(a.at).localeCompare(String(b.at)))) { if (!rowValid(row)) continue; for (const sub of config.subscriptions.filter(s=>row.subscriptionIds.includes(s.id))) {if(terminal.has(sub.id+':'+row.id))continue;const previous=history.find(d=>d.subscriptionId===sub.id&&d.eventId===row.id),c=await context();if(previous?.nextAt>now()&&!revoked(sub)&&c.enabled&&matches(sub,c)&&matches(row,c))continue;output.push(await deliver(sub,row));if(output.length>=100)return output} } return output }) } finally { busy = false }
   }
   async function test(input,proof) { if (!exact(input,['id']) || !uuid(input.id) || !await verifyNativeProof('test:'+input.id,proof)) fail('HUMAN_APPROVAL_REQUIRED'); return serialize(async()=>{ await load(); const sub=config.subscriptions.find(s=>s.id===input.id); if(!sub) fail('WEBHOOK_NOT_FOUND'); const c=await context(),id=crypto.randomUUID(),at=new Date(now()).toISOString(); return deliver(sub,{...c,id,at,payload:{id,type:'webhook.ping',occurred_at:at,dataset_id:c.datasetId,points:null}},true) }) }
   return { add,revoke,status,dispatch,test,invalidate:()=>revoke(null) }

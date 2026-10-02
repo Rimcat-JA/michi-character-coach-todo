@@ -115,3 +115,16 @@ test('invalid external operation table fails closed and trial ping has no advert
   const h=await fixture(t,{transport:async()=>{throw Error('response lost')}}),{subscription:s3}=await h.add()
   const unknown=await h.service.test({id:s3.id},'test:'+s3.id);assert.equal(unknown.state,'unknown');assert.equal(unknown.nextAt,null)
 })
+
+test('stop immediately prevents the rest of an outstanding batch before durable revoke can acquire the queue',async t=>{
+  for(const all of [false,true]){
+    let release,started,calls=0;const entered=new Promise(resolve=>{started=resolve})
+    const f=await fixture(t,{transport:async()=>{calls++;started();return new Promise(resolve=>{release=()=>resolve(new Response(null,{status:204}))})}}),{subscription:s}=await f.add()
+    for(let n=0;n<3;n++)f.event(s)
+    const dispatch=f.service.dispatch();await entered
+    const revoke=f.service.revoke(all?null:s.id);release()
+    const results=await dispatch;await revoke
+    assert.equal(calls,1);assert.deepEqual(results.map(row=>row.state),['delivered','cancelled','cancelled'])
+    const next=await f.add();assert.equal(next.subscription.revokedAt,null)
+  }
+})
