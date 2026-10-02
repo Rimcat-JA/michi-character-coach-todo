@@ -17,7 +17,7 @@ export type GitHubPublishRequest = { exportId: string; attemptId: string; approv
 export type GitHubPublishReceipt = {
   exportId: string; attemptId: string; approvalDigest: string; repositoryId: number; publicId: string
   commitSha: string; branch: string; recordPath: string; publishedAt: string; url: string
-  contribution: 'pending' | 'unverified'; pullRequestUrl: string | null
+  contribution: 'pending' | 'unverified' | 'pr_pending'; pullRequestUrl: string | null
 }
 export type GitHubPublishResult = { status: 'published' | 'pr_pending'; receipt: GitHubPublishReceipt } | { status: 'unknown' | 'failed'; code: string }
 export type GitHubConfigurationInspection = { reference: string; digest: string; target: GitHubRepositoryTarget }

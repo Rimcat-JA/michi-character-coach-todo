@@ -45,6 +45,16 @@ async function fixture(points: number | null = 40) {
 }
 beforeEach(async () => { clearAchievementAuthority(); await db.delete(); await db.open() })
 describe('実績の本人承認・保存・送信状態', () => {
+  it('PRのreceiptは公開ポイントを確定せず、squash mergeの読取確認後にだけ公開receiptを保存する', async () => {
+    const value=await fixture(100),id=await approveAchievementFromUI(await value.proposal(),nativeClick(),value.gateway.api)
+    value.gateway.api.publish=async request=>{const row=(await achievementDB.achievementExports.get(id))!;return {status:'pr_pending',receipt:{...request,repositoryId:42,publicId:row.publicId,commitSha:'a'.repeat(40),branch:'michi-achievements/'+row.publicId,recordPath:row.recordPath,publishedAt:new Date().toISOString(),url:'https://github.com/test-owner/test-achievements/commit/'+'a'.repeat(40),contribution:'pr_pending',pullRequestUrl:'https://github.com/test-owner/test-achievements/pull/1'}}}
+    const pending=await publishAchievementFromUI(id,nativeClick(),value.gateway.api)
+    expect(pending.state).toBe('pr_pending');expect(pending.publishedSummary).toBeNull();expect(value.gateway.recordReceipt).not.toHaveBeenCalled()
+    expect(await db.commands.get(`achievement:publish:${id}:${pending.attemptId}`)).toBeUndefined()
+    value.gateway.setReconcile({status:'published',receipt:{exportId:id,attemptId:pending.attemptId!,approvalDigest:pending.manifest.approvalDigest,repositoryId:42,publicId:pending.publicId,commitSha:'b'.repeat(40),branch:'main',recordPath:pending.recordPath,publishedAt:new Date().toISOString(),url:'https://github.com/test-owner/test-achievements/commit/'+'b'.repeat(40),contribution:'unverified',pullRequestUrl:'https://github.com/test-owner/test-achievements/pull/1'}})
+    const merged=await reconcileAchievementExport(id,value.gateway.api)
+    expect(merged).toMatchObject({state:'published',publishedSummary:{points:100},commitSha:'b'.repeat(40)});expect(value.gateway.recordReceipt).toHaveBeenCalledOnce()
+  })
   it('未接続でも草稿/原本/公開説明はローカル保存でき、第三者送信しない', async () => {
     await ensureSettings()
     const taskId = await createTask({ ...newTaskInput(), title: 'offline', score: { ...emptyScore(), mode: 'manual', manualPoints: 40 } })

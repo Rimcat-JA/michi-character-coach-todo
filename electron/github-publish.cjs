@@ -82,6 +82,7 @@ function createGitHubPublisher({token,repository,readAttempt,writeAttempt,verify
   async function authority(manifest){if(Date.parse(manifest.expiresAt)<=now()||await verifyAuthority(manifest)!==true)fail('AUTHORITY_CHANGED')}
   async function unusedRecords(manifest,target){for(const file of manifest.files.filter(file=>file.kind==='record')){try{await request('GET',`/contents/${file.path.split('/').map(encodeURIComponent).join('/')}?ref=${encodeURIComponent(target.headSha)}`);fail('PUBLIC_RECORD_ALREADY_EXISTS')}catch(error){if(error.status!==404)throw error}}}
   async function reconcileAttempt(attempt){
+    if(attempt?.pullRequestBranch)return prPublisher().reconcile(attempt)
     if(!attempt||!gitSha(attempt.commitSha))return null
     const manifest=attempt.manifest,target=await currentTarget(),commit=await request('GET',`/git/commits/${attempt.commitSha}`)
     if(commit.sha!==attempt.commitSha||commit.tree?.sha!==attempt.treeSha||!Array.isArray(commit.parents)||commit.parents.length!==1||commit.parents[0].sha!==attempt.parentSha)fail('COMMIT_MISMATCH')
@@ -96,7 +97,7 @@ function createGitHubPublisher({token,repository,readAttempt,writeAttempt,verify
     if(!attempt||attempt.manifest.exportId!==exportId||attempt.attemptId!==attemptId)fail('ATTEMPT_MISSING')
     if(attempt.state==='published')return structuredClone(attempt.receipt)
     const receipt=await reconcileAttempt(attempt)
-    if(receipt){await writeAttempt({...attempt,state:'published',receipt},false);return receipt}
+    if(receipt){if(!attempt.pullRequestBranch)await writeAttempt({...attempt,state:'published',receipt},false);return receipt}
     return null
   }
   async function publish({manifest,completionId,attemptId,approvalDigest},proof){
@@ -115,7 +116,7 @@ function createGitHubPublisher({token,repository,readAttempt,writeAttempt,verify
     const prior=await readAttempt(repository.repositoryId,completionId)
     if(prior){if(prior.approvalDigest!==approvalDigest||prior.manifest.exportId!==manifest.exportId)fail('COMPLETION_ALREADY_RESERVED');if(prior.state==='published')return {state:'published',receipt:structuredClone(prior.receipt)};fail('ATTEMPT_ALREADY_USED')}
     let target=await currentTarget()
-    if(target.protected)return {state:'pr_pending',receipt:null,reason:'PROTECTED_BRANCH_REQUIRES_SEPARATE_PR'}
+    if(target.protected)return prPublisher().publish(input,target)
     await unusedRecords(manifest,target)
     let attempt={version:1,repositoryId:repository.repositoryId,completionId,attemptId,approvalDigest,manifest,state:'preparing',parentSha:null,treeSha:null,commitSha:null,receipt:null,startedAt:new Date(now()).toISOString(),phase:'reserved'}
     await writeAttempt(attempt,true)
@@ -145,6 +146,7 @@ function createGitHubPublisher({token,repository,readAttempt,writeAttempt,verify
       fail('CONFLICT_LIMIT')
     }catch(error){await save({state:'unknown'}).catch(()=>{});return {state:'unknown',receipt:null,reason:typeof error.code==='string'&&/^[A-Z0-9_]{1,60}$/.test(error.code)?error.code:'PUBLICATION_UNKNOWN'}}
   }
+  function prPublisher(){return require('./github-pr-publish.cjs').createGitHubPRPublisher({request,repository,writeAttempt,currentTarget,authority,unusedRecords,now})}
   return Object.freeze({publish,reconcile})
 }
 module.exports={createGitHubPublisher,inspectGitHubRepository,createGitHubHTTP,validateGitHubPublicationManifest:validateManifest,validateGitHubRepository:validateRepository,githubPublicationDigest:publicationDigest,githubValueDigest:digest,canonicalGitHubJSON:canonical,githubContentHash:contentHash,githubBlobSha:blobSha}

@@ -37,3 +37,27 @@ test('empty fixture uses Contents initialization and rejects a second initializa
     assert.equal((await request()).status,201);assert.equal((await request()).status,409);assert.equal(remote.git(['rev-list','--count','main']),'1')
   } finally { await remote.dispose() }
 })
+
+test('protected default stays untouched; a real dedicated PR is pending until its squash merge is verified',async()=>{
+ const remote=await createGitHubEmulator({protectedBranch:true})
+ try{const {input,client,repository}=await publication(remote),result=await client.publish(input,{})
+  assert.equal(result.state,'pr_pending');assert.equal(remote.head(),repository.headSha);assert.equal(remote.state.pulls.length,1)
+  assert.equal(remote.git(['rev-list','--count',repository.headSha+'..'+result.receipt.commitSha]),'1')
+  assert.equal(remote.state.requests.some(row=>row.method==='PATCH'&&row.path.endsWith('/heads/main')),false)
+  remote.merge(1)
+  const receipt=await client.reconcile({completionId:input.completionId,exportId:input.manifest.exportId,attemptId:input.attemptId})
+  assert.equal(receipt.publicationState,'published');assert.equal(receipt.commitSha,remote.head());assert.notEqual(receipt.commitSha,result.receipt.commitSha)
+  assert.equal(remote.git(['show',remote.head()+':unrelated.txt']),'Unrelated synthetic content')
+ }finally{await remote.dispose()}
+})
+test('lost PR creation response is read reconciled, never repeated; closing it without merge cannot publish',async()=>{
+ const remote=await createGitHubEmulator({protectedBranch:true})
+ try{const {input,client,repository}=await publication(remote);remote.state.drop='pr'
+  assert.equal((await client.publish(input,{})).state,'unknown')
+  const lookup={completionId:input.completionId,exportId:input.manifest.exportId,attemptId:input.attemptId}
+  assert.equal((await client.reconcile(lookup)).publicationState,'pr_pending');assert.equal(remote.state.pulls.length,1)
+  remote.state.pulls[0].state='closed'
+  assert.equal((await client.reconcile(lookup)).code,'PR_CLOSED_UNMERGED');assert.equal(remote.head(),repository.headSha)
+  assert.equal(remote.state.requests.filter(row=>row.method==='POST'&&row.path.endsWith('/pulls')).length,1)
+ }finally{await remote.dispose()}
+})

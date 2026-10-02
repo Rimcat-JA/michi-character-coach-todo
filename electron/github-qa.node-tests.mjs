@@ -15,5 +15,5 @@ test('packaged, non-literal loopback and non-QA profiles cannot activate the fix
     let calls=0;const adapter=githubQAFetch({app,endpoint,fetchImpl:async url=>{calls++;assert.equal(url,'http://127.0.0.1:9000/user');return new Response('{}')}})
     for(const url of ['https://api.github.com/user','https://example.test/user'])await assert.rejects(adapter.fetchImpl(url,{headers:{Authorization:'Bearer real_secret_token'}}))
     assert.equal(calls,0);const response=await adapter.fetchImpl('https://api.github.com/user',{headers:{Authorization:'Bearer qa_'+'a'.repeat(36)}});assert.equal(response.url,'https://api.github.com/user');assert.equal(calls,1)
-  }finally{if(path.dirname(root)!==os.tmpdir()||!path.basename(root).startsWith('github-guard-'))throw Error('fixture boundary');await fs.rm(root,{recursive:true})}
+  }finally{assert.equal(path.dirname(root),os.tmpdir());assert.match(path.basename(root),/^github-guard-/);await fs.rm(root,{recursive:true})}
 })

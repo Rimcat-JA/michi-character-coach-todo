@@ -26,7 +26,7 @@ export type AchievementExport = {
   evidenceRefs: { id: string; revision: number; publicRevision: number; originalSha256: string; publicSha256: string }[]
   approvedAt: string | null; approvedBy: string | null; attemptId: string | null; attemptStartedAt: string | null; attemptCount: number
   commitSha: string | null; branch: string | null; recordPath: string; publishedAt: string | null; url: string | null; pullRequestUrl: string | null
-  contribution: 'not_published' | 'pending' | 'unverified'; failureCode: string | null; previousCommitSha: string | null
+  contribution: 'not_published' | 'pending' | 'unverified' | 'pr_pending'; failureCode: string | null; previousCommitSha: string | null
   history: { at: string; state: AchievementState; commitSha: string | null; approvalDigest: string }[]; createdAt: string; updatedAt: string
 }
 export type AchievementFacts = { settings: Settings; task: Task; completion: Completion; ledger: LedgerEntry[]; assessments: Assessment[]; containers: Container[]; policy: AchievementPolicy; evidence: AchievementEvidence[] }
