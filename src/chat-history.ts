@@ -9,10 +9,11 @@ import { purgeExpiredSources, recordSourceSent } from './source-library'
 import { maxChatSourceRefs } from './chat-history-validation'
 import { loadTaskEgress, recordEgressAudit, type TaskEgress } from './egress-policy'
 import { defaultCoachConversationRetention } from './retention-defaults'
+import { coachCoverageCard, type CoachCoverageCard } from './coach-coverage'
 
 export type ChatSourceRef = { kind: 'task' | 'goal' | 'goal-checkin' | 'library' | 'memory'; id: string; revision: number; digest: string | null; permissionRevision: number | null }
 export type CoachConversation = { id: string; ownerId: string; title: string; timezone: string; revision: number; draft: string; draftRevision: number; pendingMessageId: string | null; createdAt: string; updatedAt: string; deletedAt: string | null; retentionUntil?: string | null }
-export type CoachMessage = { id: string; conversationId: string; ownerId: string; sequence: number; role: 'user' | 'assistant'; origin: 'human' | 'live_ai' | 'template' | 'notice'; text: string; model: string | null; provider: 'openrouter' | null; replyTo: string | null; selectedSources: ChatSourceRef[]; policyEpoch: number | null; sourcePermissionRevision: number | null; createdAt: string }
+export type CoachMessage = { id: string; conversationId: string; ownerId: string; sequence: number; role: 'user' | 'assistant'; origin: 'human' | 'live_ai' | 'template' | 'notice'; text: string; model: string | null; provider: 'openrouter' | null; replyTo: string | null; selectedSources: ChatSourceRef[]; policyEpoch: number | null; sourcePermissionRevision: number | null; createdAt: string; coverageCard?: CoachCoverageCard }
 export type CoachTurn = { conversationId: string; userMessageId: string; ownerId: string; datasetId: string; mode: 'local' | 'ai'; model: string | null; policyEpoch: number; sourcePermissionRevision: number; selectedSources: ChatSourceRef[]; selectedContext: string | null }
 export type CoachTurnInput = { text: string; mode: 'local' | 'ai'; taskId?: string | null; goalId?: string | null; sourceIds?: string[]; memoryIds?: string[]; expectedContextDigest?: string }
 
@@ -85,7 +86,7 @@ async function selectedContext(input: CoachTurnInput, current: Settings): Promis
     const snapshot = await db.contextSnapshots.get(`${id}:${source.latestRevision}`)
     if (!snapshot || snapshot.ownerId !== current.profileId) throw new Error('選択した資料本文がありません')
     refs.push({ kind: 'library', id, revision: snapshot.revision, digest: snapshot.sha256, permissionRevision: source.permissionRevision })
-    parts.push(`選択した資料: ${source.title}\n${snapshot.text}`)
+    parts.push(`選択した資料: ${source.title}\n取得範囲 ${source.coverage.fromDate}〜${source.coverage.toDate}（本人取込・全履歴ではない）。範囲外・未読箇所は未取得・未確認。\n${snapshot.text}`)
   }
   for (const id of input.memoryIds ?? []) {
     const { memory, digest } = await memoryForSelectedChat(id, current.profileId, input.mode === 'ai' ? current.aiModel! : null)
@@ -95,7 +96,8 @@ async function selectedContext(input: CoachTurnInput, current: Settings): Promis
   const unique = refs.filter((ref, index) => refs.findIndex(other => other.kind === ref.kind && other.id === ref.id) === index)
   // One limit for storage and backups: refs bind the reply to what was sent, so they are never trimmed.
   if (unique.length > maxChatSourceRefs) throw new Error('選択した資料・記憶が多すぎます。資料か記憶の選択を減らしてください')
-  return { refs: unique, context: parts.join('\n\n').slice(0, 6000) || null, checkInBodies, taskEgress }
+  const card = await coachCoverageCard(unique, '')
+  return { refs: unique, context: [card?.text, ...parts].filter(Boolean).join('\n\n').slice(0, 6000) || null, checkInBodies, taskEgress }
 }
 function sameRefs(left: ChatSourceRef[], right: ChatSourceRef[]) { return JSON.stringify(left) === JSON.stringify(right) }
 function validateSelections(input: Omit<CoachTurnInput, 'text'>) {
@@ -173,7 +175,7 @@ export async function appendCoachReply(turn: CoachTurn, value: string, origin: '
     if (origin !== 'notice' && (!await referencesCurrent(turn.selectedSources, current, origin === 'live_ai' ? turn.model : null) || origin === 'live_ai' && (!current.aiEnabled || current.aiModel !== turn.model || policy.epoch !== turn.policyEpoch || policy.sourcePermissionRevision !== turn.sourcePermissionRevision))) throw new ConflictError()
     const messages = await db.coachMessages.where('conversationId').equals(row.id).toArray(), id = uid(), at = timestamp(row.updatedAt)
     if (messages.some(message => message.replyTo === turn.userMessageId)) throw new ConflictError()
-    await db.coachMessages.add({ id, conversationId: row.id, ownerId: current.profileId, sequence: Math.max(0, ...messages.map(message => message.sequence)) + 1, role: 'assistant', origin, text: value, model: origin === 'live_ai' ? turn.model : null, provider: origin === 'live_ai' ? 'openrouter' : null, replyTo: user.id, selectedSources: origin === 'notice' ? [] : turn.selectedSources, policyEpoch: origin === 'live_ai' ? turn.policyEpoch : null, sourcePermissionRevision: origin === 'live_ai' ? turn.sourcePermissionRevision : null, createdAt: at })
+    await db.coachMessages.add({ id, conversationId: row.id, ownerId: current.profileId, sequence: Math.max(0, ...messages.map(message => message.sequence)) + 1, role: 'assistant', origin, text: value, ...(origin !== 'notice' && turn.selectedSources.some(ref => ref.kind === 'library') ? { coverageCard: await coachCoverageCard(turn.selectedSources, value) } : {}), model: origin === 'live_ai' ? turn.model : null, provider: origin === 'live_ai' ? 'openrouter' : null, replyTo: user.id, selectedSources: origin === 'notice' ? [] : turn.selectedSources, policyEpoch: origin === 'live_ai' ? turn.policyEpoch : null, sourcePermissionRevision: origin === 'live_ai' ? turn.sourcePermissionRevision : null, createdAt: at })
     await db.coachConversations.put({ ...row, revision: nextRevision(row.revision), pendingMessageId: null, updatedAt: at })
     return id
   })

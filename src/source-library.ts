@@ -9,6 +9,9 @@ import { purgeCoachNotificationSource } from './coach-notification-save'
 import type { CoachMessage } from './chat-history'
 import { legacyReviewTasks, purgeTaskSourceEvidence, scrubLegacySourceCopies, type LegacyReviewTask } from './task-source-evidence'
 import { candidateExpired, defaultSourceRetention } from './retention-defaults'
+import { withdrawSourceObligations } from './detection-ledger'
+import { validateDocumentMetadata } from './document-metadata'
+import { assertSourceProcessingActive } from './source-processing-guard'
 
 export type SourceProvider = 'local' | 'slack' | 'line' | 'teams' | 'discord' | 'other'
 export type SourcePermissions = { acquire: boolean; retain: boolean; index: boolean; aiEgress: boolean; notify: boolean; externalWrite: boolean; disclose: boolean }
@@ -19,16 +22,24 @@ export type ContextSource = {
   retentionUntil: string | null; createdAt: string; updatedAt: string; deletedAt: string | null
 }
 export type SourceSpan = { id: string; index: number; start: number; end: number; text: string }
-export type ContextSnapshot = { id: string; sourceId: string; ownerId: string; revision: number; originalText: string; text: string; sha256: string; spans: SourceSpan[]; createdAt: string }
+/** Office/PDF extraction metadata: locations[i] names where span i came from (page, paragraph, slide or cell). The original file is not kept, only its whole-file hash. */
+export type SnapshotDocument = { format: 'pdf' | 'docx' | 'pptx' | 'xlsx'; name: string; fileSha256: string; size: number; locations: string[]; unread: { location: string; reason: string }[]; notices: string[] }
+export type ContextSnapshot = { id: string; sourceId: string; ownerId: string; revision: number; originalText: string; text: string; sha256: string; spans: SourceSpan[]; createdAt: string; document?: SnapshotDocument }
 export type SourceSummary = { id: string; ownerId: string; sourceId: string; sourceRevision: number; permissionRevision: number; policyEpoch: number; sourcePermissionRevision: number; model: string; provider: 'openrouter'; text: string; sha256: string; createdAt: string }
 export type SourceArtifact = { id: string; ownerId: string; sourceId: string; sourceRevision: number; permissionRevision: number; kind: 'cache' | 'embedding' | 'candidate'; payload: string; createdAt: string }
 /** retentionUntil omitted = design default (conversation exports 90 days, local documents none); null = owner chose no expiry. */
-export type SourceImport = Pick<ContextSource, 'title' | 'provider' | 'externalId' | 'conversation' | 'author' | 'sourceUrl' | 'date' | 'permissions' | 'allowedModels'> & { retentionUntil?: string | null; text: string; fromDate: string; toDate: string; timezone?: string }
+export type SourceImport = Pick<ContextSource, 'title' | 'provider' | 'externalId' | 'conversation' | 'author' | 'sourceUrl' | 'date' | 'permissions' | 'allowedModels'> & { retentionUntil?: string | null; text: string; fromDate: string; toDate: string; timezone?: string; document?: SnapshotDocument }
 export type SourceErasure = { original: number; summaries: number; caches: number; embeddings: number; candidates: number; memories: number; aiReplies: number; taskQuotes: number; legacyCopies: number }
 export type SourceDeletionReport = { sourceId: string; alreadyDeleted: boolean; erased: SourceErasure; reviewTaskIds: string[]; reviewTasks: LegacyReviewTask[]; sentModels: string[] }
 export type SourceSendRoute = 'source-summary' | 'source-detection' | 'coach-chat'
 export type SourceDerivedCounts = { summaries: number; caches: number; embeddings: number; candidates: number; taskQuotes: number; memories: number }
 export const sourceDb = baseDb
+/** Page/paragraph/cell of a span id (`${snapshotId}:${index}`), when the snapshot came from an extracted document. */
+export function spanLocation(snapshot: Pick<ContextSnapshot, 'id' | 'document'> | undefined, spanId: string): string | null {
+  if (!snapshot?.document || !spanId.startsWith(`${snapshot.id}:`)) return null
+  const index = Number(spanId.slice(snapshot.id.length + 1))
+  return Number.isSafeInteger(index) ? snapshot.document.locations[index] ?? null : null
+}
 const db = sourceDb
 const providerNames: SourceProvider[] = ['local', 'slack', 'line', 'teams', 'discord', 'other']
 export const permissionKeys = ['acquire', 'retain', 'index', 'aiEgress', 'notify', 'externalWrite', 'disclose'] as const
@@ -62,7 +73,7 @@ async function bumpPolicy() {
   await db.settings.put({ ...settings, changePolicy: { ...policy, epoch: policy.epoch + 1, sourcePermissionRevision: policy.sourcePermissionRevision + 1 } })
 }
 // Expiry erases the same rows but needs no report, so tasks, receipts and audits stay unlocked.
-const expiryTables = () => [db.contextSources, db.contextSnapshots, db.sourceSummaries, db.sourceArtifacts, db.coachMemories, db.memoryTombstones, db.coachConversations, db.coachMessages, db.settings, db.taskSourceEvidence]
+const expiryTables = () => [db.contextSources, db.contextSnapshots, db.sourceSummaries, db.sourceArtifacts, db.coachMemories, db.memoryTombstones, db.coachConversations, db.coachMessages, db.settings, db.taskSourceEvidence, db.detectedObligations, db.obligationObservations]
 const purgeTables = () => [...expiryTables(), db.tasks, db.audits, db.commands]
 /** Redacted deletion record shared by manual deletion, expiry and restore. */
 export function erasedSourceRow(source: ContextSource, at: string): ContextSource {
@@ -78,6 +89,8 @@ async function purgeDerived(source: ContextSource, at: string, quotes: boolean):
   const aiReplies = await purgeChatSourceResponses(source.id, source.ownerId), artifacts = await db.sourceArtifacts.where('sourceId').equals(source.id).toArray()
   const erased = { summaries: await db.sourceSummaries.where('sourceId').equals(source.id).delete(), caches: artifacts.filter(row => row.kind === 'cache').length, embeddings: artifacts.filter(row => row.kind === 'embedding').length, candidates: artifacts.filter(row => row.kind === 'candidate').length, memories: 0, aiReplies, taskQuotes: quotes ? await purgeTaskSourceEvidence(source.id) : 0 }
   await db.sourceArtifacts.where('sourceId').equals(source.id).delete()
+  // Erasure is 出典失効: open ledger observations are withdrawn, digests stay so a dismissal still suppresses a re-import.
+  if (quotes) await withdrawSourceObligations(source.ownerId, source.id, at)
   const memories = await db.coachMemories.where('ownerId').equals(source.ownerId).toArray()
   for (const memory of memories) if (!memory.sourcePurged && !memory.contentPurged && usesSource(memory, source.id)) {
     erased.memories++
@@ -95,11 +108,11 @@ async function purgeDerived(source: ContextSource, at: string, quotes: boolean):
 // Models that already received this source's text; the provider copy cannot be recalled (design 23.3).
 async function sentModels(source: ContextSource): Promise<string[]> {
   const models = new Set((await db.sourceSummaries.where('sourceId').equals(source.id).toArray()).map(row => row.model))
-  for (const row of await db.sourceArtifacts.where('sourceId').equals(source.id).toArray()) if (row.kind === 'candidate') { try { const model = (JSON.parse(row.payload) as { detectorModel?: unknown }).detectorModel; if (typeof model === 'string') models.add(model) } catch { /* Malformed caches carry no provenance. */ } }
+  for (const row of await db.sourceArtifacts.where('sourceId').equals(source.id).toArray()) if (row.kind === 'candidate') { try { const payload = JSON.parse(row.payload) as { detectorModel?: unknown; verifierModel?: unknown }; for (const model of [payload.detectorModel, payload.verifierModel]) if (typeof model === 'string') models.add(model) } catch { /* Malformed caches carry no provenance. */ } }
   for (const audit of await db.audits.toArray()) if (audit.operation === 'detection.approved' || audit.operation === 'source.sent' || audit.operation.startsWith('egress.')) {
     try {
       const detail = JSON.parse(audit.detail) as { source?: { sourceId?: unknown }; detectorModel?: unknown; sourceId?: unknown; model?: unknown; tasks?: { sources?: { sourceId?: unknown }[] }[] }
-      if (audit.operation === 'detection.approved') { if (detail.source?.sourceId === source.id && typeof detail.detectorModel === 'string') models.add(detail.detectorModel) }
+      if (audit.operation === 'detection.approved') { if (detail.source?.sourceId === source.id && typeof detail.detectorModel === 'string') models.add(detail.detectorModel); if (detail.source?.sourceId === source.id && typeof (detail as { verifierModel?: unknown }).verifierModel === 'string') models.add((detail as { verifierModel: string }).verifierModel) }
       else if (typeof detail.model === 'string' && (detail.sourceId === source.id || Array.isArray(detail.tasks) && detail.tasks.some(task => Array.isArray(task?.sources) && task.sources.some(ref => ref?.sourceId === source.id)))) models.add(detail.model)
     } catch { /* Plain audit text is not send provenance. */ }
   }
@@ -108,7 +121,9 @@ async function sentModels(source: ContextSource): Promise<string[]> {
 }
 
 export async function importLocalSource(input: SourceImport): Promise<string> {
+  await assertSourceProcessingActive()
   const text = normalizeSourceText(input.text)
+  if (input.document) validateDocumentMetadata(input.document, text.split('\n').length)
   const timezone = input.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone
   try { if (typeof timezone !== 'string' || !timezone.trim() || timezone.length > 100) throw new Error(); new Intl.DateTimeFormat('en-US', { timeZone: timezone }).format() } catch { throw new Error('資料のタイムゾーンを確認してください') }
   if (typeof input.title !== 'string' || !input.title.trim() || input.title.length > 200 || !providerNames.includes(input.provider)) throw new Error('資料名と由来を確認してください')
@@ -122,18 +137,43 @@ export async function importLocalSource(input: SourceImport): Promise<string> {
   if (input.permissions.aiEgress && !input.allowedModels.length) throw new Error('AI送信を許可するモデルIDを指定してください')
   if (retentionUntil !== null && Date.parse(retentionUntil) <= Date.now()) throw new Error('保持期限は未来の日時にしてください')
   const digest = await Dexie.waitFor(hash(text)), id = uid(), snapshotId = `${id}:1`, spans = sourceSpans(snapshotId, text), at = new Date().toISOString()
-  return db.transaction('rw', [db.contextSources, db.contextSnapshots, db.settings], async () => {
+  return db.transaction('rw', [db.contextSources, db.contextSnapshots, db.settings, db.datasetState], async () => {
+    await assertSourceProcessingActive()
     const settings = await owner()
     const existing = await db.contextSources.where('ownerId').equals(settings.profileId).toArray()
     if (existing.length >= 10000) throw new Error('資料は10000件まで取り込めます')
     for (const source of existing.filter(source => live(source, settings.profileId) && source.provider === input.provider && source.externalId === input.externalId && source.title === input.title.trim())) {
       const snapshot = await db.contextSnapshots.get(`${source.id}:${source.latestRevision}`)
-      if (snapshot?.sha256 === digest) return source.id
+      if (snapshot?.sha256 === digest && snapshot.document?.fileSha256 === input.document?.fileSha256) return source.id
     }
     await bumpPolicy()
     await db.contextSources.add({ id, ownerId: settings.profileId, title: input.title.trim(), provider: input.provider, externalId: input.externalId, conversation: input.conversation, author: input.author, sourceUrl: input.sourceUrl, date: input.date, timezone, revision: 1, latestRevision: 1, permissionRevision: 1, permissions: { ...input.permissions }, aiProvider: 'openrouter', allowedModels: [...input.allowedModels], coverage: { fromDate: input.fromDate, toDate: input.toDate, complete: false, method: 'manual-import', lastCheckedAt: at }, retentionUntil, createdAt: at, updatedAt: at, deletedAt: null })
-    await db.contextSnapshots.add({ id: snapshotId, sourceId: id, ownerId: settings.profileId, revision: 1, originalText: input.text, text, sha256: digest, spans, createdAt: at })
+    await db.contextSnapshots.add({ id: snapshotId, sourceId: id, ownerId: settings.profileId, revision: 1, originalText: input.text, text, sha256: digest, spans, createdAt: at, ...(input.document ? { document: structuredClone(input.document) } : {}) })
     return id
+  })
+}
+
+/** Owner accepts a watched file's new revision; missing files never call this operation. */
+export async function addSourceRevision(id: string, expectedRevision: number, input: { text: string; document?: SnapshotDocument }) {
+  await assertSourceProcessingActive()
+  const text = normalizeSourceText(input.text)
+  if (input.document) validateDocumentMetadata(input.document, text.split('\n').length)
+  const digest = await hash(text)
+  return db.transaction('rw', [...purgeTables(), db.datasetState], async () => {
+    await assertSourceProcessingActive()
+    const settings = await owner(), source = await db.contextSources.get(id)
+    if (!source || !canRead(source, settings.profileId) || source.revision !== expectedRevision) throw new ConflictError()
+    const previous = await db.contextSnapshots.get(`${id}:${source.latestRevision}`)
+    if (previous?.sha256 === digest && previous.document?.fileSha256 === input.document?.fileSha256) return source.latestRevision
+    const revision = source.latestRevision + 1, snapshotId = `${id}:${revision}`, at = new Date().toISOString()
+    if (revision > 100000) throw new Error('資料の版数が上限に達しています')
+    // Previous original and citations are retained; candidates, vectors, and model replies expire.
+    await purgeDerived(source, at, false)
+    await withdrawSourceObligations(source.ownerId, id, at)
+    await bumpPolicy()
+    await db.contextSources.put({ ...source, latestRevision: revision, revision: source.revision + 1, updatedAt: at, coverage: { ...source.coverage, lastCheckedAt: at } })
+    await db.contextSnapshots.add({ id: snapshotId, sourceId: id, ownerId: settings.profileId, revision, originalText: input.text, text, sha256: digest, spans: sourceSpans(snapshotId, text), createdAt: at, ...(input.document ? { document: structuredClone(input.document) } : {}) })
+    return revision
   })
 }
 

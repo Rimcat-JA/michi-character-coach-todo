@@ -25,6 +25,9 @@ declare global {
       proposeRoutine: (request: RoutineAssistRequest) => Promise<string>
       detectObligations: (input: { model: string; request: DetectionRequest }) => Promise<string>
       verifyObligations: (input: { model: string; request: DetectionRequest; change: DetectionChange }) => Promise<string>
+      embedTexts?: (input: { endpoint: string; model: string; inputs: string[] }) => Promise<{ dims: number; vectors: number[][] }>
+      extractDocument?: (input: { name: string; bytes: Uint8Array }) => Promise<{ text: string; document: import('./source-library').SnapshotDocument }>
+      folderWatch?: import('./FolderWatchView').FolderWatchBridge
       notificationText?: NotificationTextTransport
       resolveTarget?: (request: { model: string; message: string; candidates: CoachTargetCandidate[] }) => Promise<string>
       usage: () => Promise<AIUsageSnapshot>

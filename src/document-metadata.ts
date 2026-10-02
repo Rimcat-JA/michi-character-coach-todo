@@ -1,0 +1,6 @@
+import type { SnapshotDocument } from './source-library'
+
+export function validateDocumentMetadata(value: unknown, lineCount: number): asserts value is SnapshotDocument {
+  const row = value as SnapshotDocument
+  if (!row || typeof row !== 'object' || Array.isArray(row) || Object.keys(row).sort().join(',') !== 'fileSha256,format,locations,name,notices,size,unread' || !['pdf', 'docx', 'pptx', 'xlsx'].includes(row.format) || typeof row.name !== 'string' || !row.name.trim() || row.name.length > 200 || !/^[a-f0-9]{64}$/.test(row.fileSha256) || !Number.isSafeInteger(row.size) || row.size < 1 || row.size > 25 * 1024 * 1024 || !Array.isArray(row.locations) || row.locations.length !== lineCount || row.locations.some(location => typeof location !== 'string' || !location.trim() || location.length > 300) || !Array.isArray(row.unread) || row.unread.length > 10000 || row.unread.some(item => !item || Object.keys(item).sort().join(',') !== 'location,reason' || typeof item.location !== 'string' || item.location.length > 300 || typeof item.reason !== 'string' || item.reason.length > 500) || !Array.isArray(row.notices) || row.notices.length > 30 || row.notices.some(text => typeof text !== 'string' || text.length > 500)) throw new Error('文書の出典位置・未読範囲が不正です')
+}

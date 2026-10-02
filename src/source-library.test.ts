@@ -21,7 +21,7 @@ async function saved() { return { sources: await sourceDb.contextSources.toArray
 
 describe('本人が選んだ資料と7項目の許可', () => {
   it('選択したタイムゾーンを保存し、外側のatomic取込でもdigest待機中にtransactionを失効させない', async () => {
-    const id = await db.transaction('rw', db.contextSources, db.contextSnapshots, db.sourceArtifacts, db.settings, async () => {
+    const id = await db.transaction('rw', db.datasetState, db.contextSources, db.contextSnapshots, db.sourceArtifacts, db.settings, async () => {
       const id = await importLocalSource(input({ timezone: 'America/New_York' }))
       await db.sourceArtifacts.add({ id: 'import-provenance', sourceId: id, ownerId, sourceRevision: 1, permissionRevision: 1, kind: 'cache', payload: 'synthetic immutable import provenance', createdAt: new Date().toISOString() })
       return id
@@ -31,7 +31,7 @@ describe('本人が選んだ資料と7項目の許可', () => {
     const count = await db.contextSources.count()
     await expect(importLocalSource(input({ timezone: 'Invalid/Timezone' }))).rejects.toThrow('タイムゾーン')
     expect(await db.contextSources.count()).toBe(count)
-    await expect(db.transaction('rw', db.contextSources, db.contextSnapshots, db.settings, async () => {
+    await expect(db.transaction('rw', db.datasetState, db.contextSources, db.contextSnapshots, db.settings, async () => {
       await importLocalSource(input({ externalId: 'other', timezone: 'Asia/Tokyo' }))
       throw new Error('import provenance failed')
     })).rejects.toThrow('provenance failed')

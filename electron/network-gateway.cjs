@@ -1,6 +1,6 @@
 /** The single egress point of the main process. Every external request names a purpose;
  * offline_only rejects before URL parsing, DNS or the underlying fetch. Counters carry no URLs or secrets. */
-const PURPOSE_HOSTS=Object.freeze({openrouter:Object.freeze(['openrouter.ai']),github:Object.freeze(['api.github.com']),webhook:Object.freeze([])})
+const PURPOSE_HOSTS=Object.freeze({openrouter:Object.freeze(['openrouter.ai']),github:Object.freeze(['api.github.com']),webhook:Object.freeze([]),embedding:Object.freeze(['127.0.0.1','[::1]'])})
 const POLICIES=['offline_only','explicit_online']
 const uuid=value=>typeof value==='string'&&/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)
 function gatewayError(code,message){const error=new Error(message);error.code=code;return error}
@@ -26,7 +26,8 @@ function createNetworkGateway({getPolicy,fetchImpl=globalThis.fetch,hosts=PURPOS
   await assertAllowed(purpose)
   let target=null
   try{target=new URL(url)}catch{/* rejected below */}
-  if(!target||typeof url!=='string'||target.protocol!=='https:'||target.username||target.password||target.port&&target.port!=='443'||!hosts[purpose].includes(target.hostname)){counters[purpose].blockedHost++;throw gatewayError('NETWORK_HOST_NOT_ALLOWED','許可されていない通信先です')}
+  const transportAllowed=target&&(purpose==='embedding'?target.protocol==='http:'&&Boolean(target.port):target.protocol==='https:'&&(!target.port||target.port==='443'))
+  if(!target||typeof url!=='string'||!transportAllowed||target.username||target.password||!hosts[purpose].includes(target.hostname)){counters[purpose].blockedHost++;throw gatewayError('NETWORK_HOST_NOT_ALLOWED','許可されていない通信先です')}
   counters[purpose].attempts++
   try{return await fetchImpl(url,{...init,redirect:'error'})}
   catch(error){counters[purpose].failed++;throw error}

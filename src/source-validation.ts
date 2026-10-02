@@ -1,5 +1,6 @@
 import { validateDate } from './domain'
 import type { ContextSnapshot, ContextSource, SourceArtifact, SourceSummary } from './source-library'
+import { validateDocumentMetadata } from './document-metadata'
 
 function fail(): never { throw new Error('バックアップの資料・取得範囲・派生情報が不正です') }
 function object(value: unknown, keys: string[]): Record<string, unknown> {
@@ -52,13 +53,14 @@ export function validateSourceRecords(sourceRows: unknown, snapshotRows: unknown
   }
   const snapshotIds = new Set<string>(), snapshotVersions = new Set<string>()
   for (const raw of snapshots) {
-    const snapshot = object(raw, ['id', 'sourceId', 'ownerId', 'revision', 'originalText', 'text', 'sha256', 'spans', 'createdAt'])
+    const snapshot = object(raw, ['id', 'sourceId', 'ownerId', 'revision', 'originalText', 'text', 'sha256', 'spans', 'createdAt', ...(raw && typeof raw === 'object' && Object.hasOwn(raw, 'document') ? ['document'] : [])])
     addId(snapshotIds, snapshot.id)
     const source = bySource.get(snapshot.sourceId as string)
     if (!source || source.deletedAt || !source.permissions.retain || snapshot.ownerId !== ownerId || !integer(snapshot.revision, 1, source.latestRevision) || snapshot.id !== `${source.id}:${snapshot.revision}` || !string(snapshot.originalText, 200000) || !string(snapshot.text, 200000) || snapshot.text !== normalized(snapshot.originalText) || !digest(snapshot.sha256)) fail()
     timestamp(snapshot.createdAt)
     if (snapshot.createdAt < source.createdAt || snapshot.createdAt > source.updatedAt) fail()
     const lines = snapshot.text.split('\n')
+    if (snapshot.document !== undefined) validateDocumentMetadata(snapshot.document, lines.length)
     if (!Array.isArray(snapshot.spans) || snapshot.spans.length !== lines.length || lines.length > 10000) fail()
     let start = 0
     for (let index = 0; index < lines.length; index++) {

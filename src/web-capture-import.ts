@@ -267,7 +267,7 @@ export async function saveCaptureImportFromUI(preview: CaptureImportPreview, eve
   nativeClick(event)
   const record = prepared.get(preview)
   if (!record) fail('この画面で確認した取込案を選んでください。')
-  return sourceDb.transaction('rw', sourceDb.contextSources, sourceDb.contextSnapshots, sourceDb.sourceArtifacts, sourceDb.settings, async () => {
+  return sourceDb.transaction('rw', sourceDb.datasetState, sourceDb.contextSources, sourceDb.contextSnapshots, sourceDb.sourceArtifacts, sourceDb.settings, async () => {
     if (Date.parse(preview.expiresAt) <= Date.now() || preview.digest !== await Dexie.waitFor(contentDigest({ preview: record.previewPayload, input: record.input, provenance: record.provenance, artifactId: record.artifactId, selectedSha256: record.selectedSha256 }))) fail('取込案の期限または内容が変わりました。もう一度確認してください。')
     const settings = await sourceDb.settings.get('main')
     if (!settings || settings.profileId !== preview.ownerId || settings.datasetId !== preview.datasetId) fail('本人またはデータが切り替わりました。もう一度確認してください。')

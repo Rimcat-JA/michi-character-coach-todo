@@ -10,6 +10,7 @@ import type { TaskSourceEvidence } from './task-source-evidence'
 import type { HandoffRecord, LocalDevice } from './handoff-heads'
 import type { ResourceGrant, SharedInbound, ShareContact, ShareIdentity, ShareProposal } from './share-types'
 import { datasetGuardMiddleware, type DatasetState } from './dataset-guard'
+import type { DetectedObligation, ObligationObservation } from './detection-ledger'
 import type { Assessment, Audit, CalendarEvent, ChecklistItem, CommandReceipt, Completion, Container, DayNote, FocusProjectSelection, Goal, GoalCheckIn, Habit, HabitLog, LabelDefinition, LabelGroup, LedgerEntry, PlanningBucket, PomodoroCycle, RolloverEntry, Routine, SavedTemplate, Settings, SmartList, Task, TaskAttachment, TaskComment, TaskDependency, TaskNote, ThemeRule, TimeBlock, TrackerDefinition, TrackerEntry, WorkSession } from './domain'
 
 export const db = new Dexie('character-coach-v1') as Dexie & {
@@ -69,6 +70,8 @@ export const db = new Dexie('character-coach-v1') as Dexie & {
   resourceGrants: EntityTable<ResourceGrant, 'id'>
   sharedInbound: EntityTable<SharedInbound, 'id'>
   shareProposals: EntityTable<ShareProposal, 'id'>
+  detectedObligations: EntityTable<DetectedObligation, 'id'>
+  obligationObservations: EntityTable<ObligationObservation, 'id'>
 }
 db.version(1).stores({
   tasks: 'id, &generationKey, status, scheduledDate, dueDate, project, routineId, deletedAt, updatedAt',
@@ -207,6 +210,8 @@ db.version(24).stores({ taskSourceEvidence: 'id, ownerId, taskId, sourceId, runI
 // I05/I06 device-local tables: never exported in a .coachbundle and never cleared by a restore.
 db.version(25).stores({ localDevice: 'id', datasetState: 'id', handoffHeads: 'id, bundleId, datasetId, direction, createdAt', shareIdentity: 'id', shareContacts: 'id, verifiedAt', resourceGrants: 'id, recipientId, revokedAt', sharedInbound: 'id, ownerFp, revokedAt', shareProposals: 'id, grantId, taskId, state' })
 db.use(datasetGuardMiddleware)
+// Body-free obligation ledger: digests and ids only, so a dismissal survives re-import without keeping quotes.
+db.version(26).stores({ detectedObligations: 'id, ownerId, &[ownerId+canonicalKey], state, linkedTaskId', obligationObservations: 'id, ownerId, obligationId, runId' })
 
 export async function ensureSettings() {
   const current = await db.settings.get('main')

@@ -29,7 +29,7 @@ export function legacyNotesState(notes: string): LegacyNotesState {
   return notes.split('\n').some(line => line.startsWith(legacyDetectionHeader) || citationPattern.test(line)) ? 'edited' : 'none'
 }
 export function detectionProvenanceNotes(detector: string, verifier: string, basis: string, state: string, runId: string): string {
-  return `資料から検出し本人が採用した候補。検出=${detector} / 検証=${verifier}（同じモデル、独立評価未通過）\n根拠: ${basis} / ${state}\n資料の引用はメモに複写せず「資料の根拠」に保存（検出 ${runId}）。資料の削除・期限切れで引用も消去します。`
+  return `資料から検出し本人が採用した候補。検出=${detector} / 検証=${verifier}（${detector === verifier ? '同じモデル' : '別のモデル'}、独立評価未通過）\n根拠: ${basis} / ${state}\n資料の引用はメモに複写せず「資料の根拠」に保存（検出 ${runId}）。資料の削除・期限切れで引用も消去します。`
 }
 export async function quoteDigest(quote: string): Promise<string> { return [...new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(quote)))].map(byte => byte.toString(16).padStart(2, '0')).join('') }
 export function sourceEvidenceUsable(source: ContextSource | undefined | null, ownerId: string, now = Date.now()): source is ContextSource {
