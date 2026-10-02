@@ -3,6 +3,7 @@ const path = require('node:path')
 const crypto = require('node:crypto')
 const { constants } = require('node:fs')
 const { parseEnvelope, validateFileBridgeRegistration, canonicalFileJSON, FILE_BRIDGE_REJECTED_STATES, FILE_BRIDGE_RESULT_STATES } = require('./local-file-bridge.cjs')
+const { parseTaskEdit, taskEditProposal } = require('./file-edit-commands.cjs')
 const LIMIT = 256 * 1024
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i
 const plain = value => Boolean(value && typeof value === 'object' && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype)
@@ -82,6 +83,26 @@ async function createMCPFileClient(directory) {
     if (!registration.client.grant.keys.includes('tasks:read')) fail('READ_NOT_GRANTED')
     return { manifest, tasks, ...(routines ? { routines: routines.rules } : {}), operations: operationsFor(registration), authentication: 'external-file-copy; app verifies signatures before applying proposals', signatureVerifiedByClient: false, authority: 'read-selected-and-propose-only' }
   }
+  async function taskEdits({ taskId, signal } = {}) {
+    const { registration, manifest, tasks } = await context(signal)
+    if (!registration.client.grant.keys.includes('tasks:read')) fail('READ_NOT_GRANTED')
+    if (taskId !== undefined && (!uuid(taskId) || !tasks.some(task => task.id === taskId))) fail('TARGET_OR_REVISION_INVALID')
+    const edits = []
+    for (const task of tasks.filter(task => taskId === undefined || task.id === taskId)) {
+      try {
+        const proposal = taskEditProposal(parseTaskEdit(await bytes(`edits/tasks/${task.id}.md`, signal)), task, manifest, registration.client.grant)
+        if (proposal) {
+          if (Object.hasOwn(proposal.payload, 'notes') && proposal.payload.notes.length > 1000) fail('PROPOSAL_INVALID')
+          parseEnvelope(JSON.stringify({ schema_version: '1', command_id: proposal.commandId, snapshot_id: proposal.snapshotId, expires_at: manifest.expires_at, type: 'task.update', target_id: proposal.targetId, expected_revision: proposal.expectedRevision, payload: proposal.payload }))
+          if (proposal.payload.scheduled_date && task.scheduled_date && Math.abs(Date.parse(proposal.payload.scheduled_date) - Date.parse(task.scheduled_date)) / 86400000 > registration.client.grant.max_schedule_shift_days) fail('SCHEDULE_BOUND')
+          edits.push(proposal)
+        }
+      } catch (error) { if (error.code !== 'ENOENT') throw error }
+    }
+    const latest = await context(signal)
+    if (latest.manifest.snapshot_id !== manifest.snapshot_id || canonicalFileJSON(latest.registration) !== canonicalFileJSON(registration)) fail('SNAPSHOT_CHANGED')
+    return edits
+  }
   async function propose(args, type, {signal} = {}) {
     // Serialize this client's claim section to bound concurrent inbox reservations.
     cancelled(signal)
@@ -157,7 +178,7 @@ async function createMCPFileClient(directory) {
   }
   async function toolNames({signal}={}) { const {registration}=await context(signal); return operationsFor(registration) }
   await context()
-  return {snapshot,proposeUpdate:(args,options)=>propose(args,'task.update',options),proposeCreate:(args,options)=>propose(args,'task.create',options),proposeSplit:(args,options)=>propose(args,'task.split',options),proposeRoutineChange:(args,options)=>propose(args,'routine.change',options),result,toolNames}
+  return {taskEdits,snapshot,proposeUpdate:(args,options)=>propose(args,'task.update',options),proposeCreate:(args,options)=>propose(args,'task.create',options),proposeSplit:(args,options)=>propose(args,'task.split',options),proposeRoutineChange:(args,options)=>propose(args,'routine.change',options),result,toolNames}
 }
 /** Tools follow the owner's grant: split and series proposals appear only when granted. */
 function operationsFor(registration) {
