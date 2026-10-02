@@ -6,6 +6,8 @@ import { applyCalendarCSVImportFromUI, cancelCalendarCSVImport } from './calenda
 import { applyCalendarProposalFromUI, discardCalendarConfigurationProposal, type CalendarConfigurationProposal } from './calendar-rules-save'
 import { calendarCSVRetentionUntil, readCalendarCSVFile } from './calendar-csv-view-input'
 import './CalendarCSVImportView.css'
+import CalendarCSVMappingStep from './CalendarCSVMappingStep'
+import type { CSVMappingProfile } from './calendar-csv-mapping'
 
 type Prepared = Awaited<ReturnType<typeof prepareCalendarCSVImport>>
 type Selection = { kind: 'calendar' | 'roster'; contextName: string; bindingId: string; personRef: string | null; calendarName: string; activityName: string | null; timezone: string; feedId: string; title: string; fromDate: string; toDate: string; retentionUntil: string }
@@ -57,6 +59,7 @@ export default function CalendarCSVImportView({ state, settings, onApplied }: Pr
   const [feedMode, setFeedMode] = useState<'new' | 'existing' | ''>(''), [sourceId, setSourceId] = useState(''), [feedId, setFeedId] = useState(''), [title, setTitle] = useState('')
   const [fromDate, setFromDate] = useState(''), [toDate, setToDate] = useState(''), [retention, setRetention] = useState('')
   const [fileName, setFileName] = useState(''), [bytes, setBytes] = useState<Uint8Array | null>(null)
+  const [mappingMode, setMappingMode] = useState(false), [mappingProfile, setMappingProfile] = useState<CSVMappingProfile | null>(null), [profileChangeConfirmed, setProfileChangeConfirmed] = useState(false), [newerFileConfirmed, setNewerFileConfirmed] = useState(false)
   const [savedPrepared, setPrepared] = useState<Prepared | null>(null), [selection, setSelection] = useState<Selection | null>(null), [proofSignature, setProofSignature] = useState('')
   const [checked, setChecked] = useState(false), [busy, setBusy] = useState(false), [notice, setNotice] = useState('')
   const [retireId, setRetireId] = useState(''), [retirement, setRetirement] = useState<CalendarConfigurationProposal | null>(null), [retireChecked, setRetireChecked] = useState(false), [eraseOriginals, setEraseOriginals] = useState(false)
@@ -98,10 +101,10 @@ export default function CalendarCSVImportView({ state, settings, onApplied }: Pr
     return () => clearTimeout(timer)
   }, [prepared, selection, revoke])
   function changed(action?: () => void) { revoke(); action?.(); setPrepared(null); setSelection(null); setProofSignature(''); setChecked(false); setNotice('') }
-  function resetFeed() { setFeedMode(''); setSourceId(''); setFeedId(''); setTitle('') }
+  function resetFeed() { setFeedMode(''); setSourceId(''); setFeedId(''); setTitle(''); setMappingProfile(null); setProfileChangeConfirmed(false); setNewerFileConfirmed(false) }
   async function readFile(file: File) {
     changed(() => { setFileName(file.name); setBytes(null) }); const token = ++sequence.current; setBusy(true)
-    try { const next = await readCalendarCSVFile(file); if (token !== sequence.current) throw new Error('読取中に対象や設定が変わりました。ファイルを選び直してください。'); setBytes(next); setNotice('ファイルを端末内で読みました。対象と期間を選んで確認案を作ってください。') }
+    try { const next = await readCalendarCSVFile(file, mappingMode ? 'undecided' : 'utf-8'); if (token !== sequence.current) throw new Error('読取中に対象や設定が変わりました。ファイルを選び直してください。'); setBytes(next); setNotice('ファイルを端末内で読みました。対象と期間を選んで確認案を作ってください。') }
     catch (error) { setNotice(errorText(error)) } finally { setBusy(false) }
   }
   async function prepare() {
@@ -115,7 +118,8 @@ export default function CalendarCSVImportView({ state, settings, onApplied }: Pr
       const retentionUntil = calendarCSVRetentionUntil(retention, timezone)
       const target: CSVImportTarget = { kind, contextId, bindingId, calendarId, activityId: kind === 'roster' ? activityId : null, feedId: chosenFeed, title, retentionUntil }
       const snapshot: Selection = { kind, contextName: context.name, bindingId, personRef: kind === 'roster' ? binding.personRef : null, calendarName: calendar.name, activityName: activity?.title ?? null, timezone, feedId: chosenFeed, title, fromDate, toDate, retentionUntil }
-      const next = await prepareCalendarCSVImport(target, bytes, { fromDate, toDate })
+      if (mappingMode && !mappingProfile) throw new Error('列対応を設定して「この列対応設定を確認案に使う」を押してください')
+      const next = await prepareCalendarCSVImport(target, bytes, { fromDate, toDate, ...(mappingMode && mappingProfile ? { mappingProfile, profileChangeConfirmed, newerFileConfirmed } : {}) })
       if (token !== sequence.current) { cancelCalendarCSVImport(next); throw new Error('確認中に対象や設定が変わりました。現在の選択で確認案を作り直してください。') }
       preparedRef.current = next; setPrepared(next); setSelection(snapshot); setProofSignature(signature); setChecked(false); setNotice('資料の確認案を作りました。まだ保存していません。')
     } catch (error) { setNotice(errorText(error)) } finally { setBusy(false) }
@@ -159,15 +163,20 @@ export default function CalendarCSVImportView({ state, settings, onApplied }: Pr
       {kind === 'roster' && <p className="csv-full">本人識別子：{binding?.personRef ?? '未設定'}。勤務表専用の活動がない場合は、共通カレンダーの本人対象登録で「活動は公開シフトの割当だけを使う」にチェックして登録してください。通常の週次活動との二重発生を防ぎます。</p>}
       <label className="field">取込元の選び方<select aria-label="CSVの取込元の選び方" value={feedMode} disabled={busy} onChange={event => changed(() => { setFeedMode(event.target.value as typeof feedMode); setSourceId(''); setFeedId(''); setTitle('') })}><option value="">選んでください</option><option value="new">新しい取込元</option><option value="existing">既存の取込元を更新</option></select></label>
       {/* An expired source's title is a placeholder, so the person names the refreshed material again. */}
-      {feedMode === 'existing' && <label className="field">固定の取込元<select aria-label="CSVの既存取込元" value={sourceId} disabled={busy} onChange={event => changed(() => { const item = sources.find(source => source.id === event.target.value); setSourceId(event.target.value); setTitle(item?.status === 'current' ? item.title : '') })}><option value="">選んでください</option>{sources.map(item => <option key={item.id} value={item.id}>{item.title} / v{item.revision} / {item.status === 'current' ? '取込済み' : '保持期限切れ・資料名を入力'}</option>)}</select></label>}
+      {feedMode === 'existing' && <label className="field">固定の取込元<select aria-label="CSVの既存取込元" value={sourceId} disabled={busy} onChange={event => changed(() => { const item = sources.find(source => source.id === event.target.value); setSourceId(event.target.value); setTitle(item?.status === 'current' ? item.title : ''); setMappingMode(Boolean(item?.csv?.mapping)); setMappingProfile(item?.csv?.mapping?.profile ?? null); setProfileChangeConfirmed(false); setNewerFileConfirmed(false) })}><option value="">選んでください</option>{sources.map(item => <option key={item.id} value={item.id}>{item.title} / v{item.revision} / {item.status === 'current' ? '取込済み' : '保持期限切れ・資料名を入力'}</option>)}</select></label>}
       {feedMode === 'new' && <label className="field">固定の取込元ID<input aria-label="CSVの新しい取込元ID" value={feedId} disabled={busy} onChange={event => changed(() => setFeedId(event.target.value))} /><button className="text-button" disabled={busy} onClick={() => changed(() => setFeedId(`csv-${uid()}`))}>新しい取込元IDを作る</button></label>}
       {feedMode === 'new' && sameTarget && <p className="csv-full csv-warning">同じ対象の取込元「{sameTarget.title}」があります。同じ記録を二重に取り込まないよう、「既存の取込元を更新」を選ぶか、下の「取込元の終了」で終了してから新しい取込元を作ってください。</p>}
       <label className="field">資料名<input aria-label="CSV資料名" value={title} disabled={busy} onChange={event => changed(() => setTitle(event.target.value))} /></label>
       <label className="field">取込開始<input aria-label="CSV取込開始" type="date" value={fromDate} disabled={busy} onChange={event => changed(() => setFromDate(event.target.value))} /></label>
       <label className="field">取込終了<input aria-label="CSV取込終了" type="date" value={toDate} disabled={busy} onChange={event => changed(() => setToDate(event.target.value))} /></label>
       <label className="field">選択タイムゾーンでの原文保持期限<input aria-label="CSV原文保持期限" type="datetime-local" value={retention} disabled={busy} onChange={event => changed(() => setRetention(event.target.value))} /></label>
-      <label className="field csv-full">CSVファイル<input aria-label="CSVファイル" type="file" accept=".csv,text/csv" disabled={busy} onChange={event => { const file = event.target.files?.[0]; event.target.value = ''; if (file) void readFile(file) }} /><small>{fileName ? `${fileName} / ${bytes ? `${bytes.byteLength}バイト読取済み` : '読取未完了'}` : '未選択'}</small></label>
+      <label className="csv-check csv-full"><input aria-label="任意列と文字コードを設定する" type="checkbox" checked={mappingMode} disabled={busy || Boolean(source?.csv?.mapping)} onChange={event => changed(() => { setMappingMode(event.target.checked); setMappingProfile(null); setProfileChangeConfirmed(false); setNewerFileConfirmed(false); setBytes(null); setFileName('') })} />任意列・Shift_JIS・TSVの対応を設定する</label>
+      <label className="field csv-full">CSVファイル<input aria-label="CSVファイル" type="file" accept=".csv,.tsv,text/csv,text/tab-separated-values" disabled={busy} onChange={event => { const file = event.target.files?.[0]; event.target.value = ''; if (file) void readFile(file) }} /><small>{fileName ? `${fileName} / ${bytes ? `${bytes.byteLength}バイト読取済み` : '読取未完了'}` : '未選択'}</small></label>
     </div>
+    {mappingMode && kind && <fieldset disabled={busy}><CalendarCSVMappingStep key={`${kind}:${sourceId}`} kind={kind} bytes={bytes} initial={source?.csv?.mapping?.profile} onChange={profile => changed(() => { setMappingProfile(profile); setProfileChangeConfirmed(false); setNewerFileConfirmed(false) })} />
+      {source && <label className="csv-check"><input type="checkbox" aria-label="列対応の変更を確認した" checked={profileChangeConfirmed} onChange={event => changed(() => setProfileChangeConfirmed(event.target.checked))} />既存資料の列対応変更と再検証を確認しました（ID・版の方式変更は取込元の終了が必要）。</label>}
+      {mappingProfile?.revisionStrategy === 'import_order' && <label className="csv-check"><input type="checkbox" aria-label="今回の資料が新しいことを確認した" checked={newerFileConfirmed} onChange={event => changed(() => setNewerFileConfirmed(event.target.checked))} />今回の資料が前回より新しいことを確認しました。</label>}
+    </fieldset>}
     <p>同じ資料の更新は同じ取込元を選んでください。終了日を省略した夜勤、未公開行、他者の行、欠けた記録から日時や取消を推測しません。</p>
     <div className="csv-actions"><button className="secondary-button" disabled={busy} onClick={() => void prepare()}>CSV資料の差分を確認</button></div>
     {prepared && selection && <><CalendarCSVPreview prepared={prepared} selection={selection} />{prepared.configuration && <><label className="csv-check"><input type="checkbox" aria-label="CSVの本人適用・期間・保持期限・原文と差分を確認した" checked={checked} disabled={busy} onChange={event => setChecked(event.target.checked)} /><span>本人適用・取込元・期間・タイムゾーン・保持期限・選択原文と表示された全差分を確認しました。</span></label><div className="csv-actions"><button className="primary-button" disabled={busy || !checked} onClick={event => void apply(event.nativeEvent)}>確認したCSV資料を保存</button></div></>}<div className="csv-actions"><button className="secondary-button" disabled={busy} onClick={() => changed()}>CSV確認案を取り消す</button></div></>}

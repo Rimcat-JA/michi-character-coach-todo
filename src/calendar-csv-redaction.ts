@@ -44,7 +44,7 @@ export function applyCurrentCSVRetention(restored: CalendarRulesState[], current
       for (const snapshot of csv.snapshots) snapshot.retentionUntil = earliest(snapshot.retentionUntil, now.retentionUntil)
       const erased = new Set(now.snapshots.flatMap(snapshot => snapshot.rows.filter(row => row.quote === null).map(row => `${row.recordId}:${row.recordRevision}:${row.quoteSha256}`)))
       const allErased = now.snapshots.every(snapshot => snapshot.rows.every(row => row.quote === null))
-      for (const snapshot of csv.snapshots) for (const row of snapshot.rows) if (allErased || erased.has(`${row.recordId}:${row.recordRevision}:${row.quoteSha256}`)) row.quote = null
+      for (const snapshot of csv.snapshots) for (const row of snapshot.rows) if (allErased || erased.has(`${row.recordId}:${row.recordRevision}:${row.quoteSha256}`)) { row.quote = null; if (row.mapped) { row.mapped.rawBase64 = ''; row.mapped.normalizedQuote = '' } }
       for (const head of csv.heads) {
         const row = csv.snapshots.find(snapshot => snapshot.revision === head.snapshotRevision)?.rows.find(item => item.rowIndex === head.rowIndex)
         if (row?.quote !== null || head.status === 'expired') continue
@@ -72,7 +72,7 @@ export function redactExpiredCSVRecords<T extends CSVRetentionRecords>(records: 
         const until = csvSnapshotRetentionUntil(csv, snapshot)
         if (until === null || until > at) continue
         expiredSourceIds.add(source.id)
-        for (const row of snapshot.rows) row.quote = null
+        for (const row of snapshot.rows) { row.quote = null; if (row.mapped) { row.mapped.rawBase64 = ''; row.mapped.normalizedQuote = '' } }
         for (const head of csv.heads.filter(head => head.snapshotRevision === snapshot.revision)) {
           head.status = 'expired'
           const fact = state.facts.find(fact => fact.id === head.factId && fact.sourceId === source.id)

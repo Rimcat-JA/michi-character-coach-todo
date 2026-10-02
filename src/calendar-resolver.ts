@@ -1,4 +1,5 @@
 import { canonicalJSON, contentDigest } from './canonical'
+import type { CSVMappingBinding, MappedCSVRowEvidence } from './calendar-csv-mapping'
 import { addDays, emptyScore, validateDate, validateScore, type ScoreInput } from './domain'
 import { expandRRule, parseRRule, rruleSeriesLimit } from './rrule'
 import { resolveZonedLocalTime, type AmbiguousTimePolicy, type NonexistentTimePolicy } from './zoned-time'
@@ -11,10 +12,10 @@ export type ICSComponentVersion = { uid: string; recurrenceId: string | null; se
 export type ICSImportMetadata = { feedId: string; readOnly: true; retentionUntil: string | null; snapshots: { revision: number; sha256: string; originalText: string | null; importedAt: string; fromDate: string; toDate: string }[]; components: ICSComponentVersion[] }
 /** Roster rows keep the local wall times read from the file, so evidence checks do not depend on later time-zone rule updates. */
 export type CSVRecordValue = { kind: 'calendar'; date: string; status: 'open' | 'closed' | 'withdrawn' } | { kind: 'roster'; status: 'scheduled' | 'cancelled'; startAt: string; endAt: string; startLocal: string; endLocal: string }
-export type CSVRowEvidence = { recordId: string; recordRevision: number; value: CSVRecordValue; digest: string; factId: string | null; rowIndex: number; lineStart: number; lineEnd: number; byteStart: number; byteEnd: number; quote: string | null; quoteSha256: string }
+export type CSVRowEvidence = { recordId: string; recordRevision: number; value: CSVRecordValue; digest: string; factId: string | null; rowIndex: number; lineStart: number; lineEnd: number; byteStart: number; byteEnd: number; quote: string | null; quoteSha256: string; mapped?: MappedCSVRowEvidence }
 export type CSVRecordHead = { recordId: string; recordRevision: number; digest: string; factId: string | null; status: 'current' | 'expired' | 'withdrawn'; snapshotRevision: number; rowIndex: number }
-export type CSVImportSnapshot = { revision: number; fingerprint: string; bodyHash: string; importedAt: string; fromDate: string; toDate: string; retentionUntil: string | null; rows: CSVRowEvidence[] }
-export type CSVImportMetadata = { format: 'calendar' | 'roster'; feedId: string; readOnly: true; retentionUntil: string | null; retiredAt: string | null; target: { bindingId: string; bindingRevision: number; calendarId: string; activityId: string | null; timezone: string; personRef: string | null; personRefHash: string | null }; heads: CSVRecordHead[]; snapshots: CSVImportSnapshot[] }
+export type CSVImportSnapshot = { revision: number; fingerprint: string; bodyHash: string; importedAt: string; fromDate: string; toDate: string; retentionUntil: string | null; rows: CSVRowEvidence[]; mapping?: CSVMappingBinding }
+export type CSVImportMetadata = { format: 'calendar' | 'roster'; feedId: string; readOnly: true; retentionUntil: string | null; retiredAt: string | null; target: { bindingId: string; bindingRevision: number; calendarId: string; activityId: string | null; timezone: string; personRef: string | null; personRefHash: string | null }; heads: CSVRecordHead[]; snapshots: CSVImportSnapshot[]; mapping?: CSVMappingBinding; mappingHistory?: { fingerprint: string; sequence: number }[]; identityReview?: boolean }
 export type ScheduleSource = { id: string; contextId: string; title: string; authorityScope: 'calendar' | 'activity' | 'roster'; coverageFrom: string; coverageTo: string; status: 'current' | 'stale'; revision: number; importedAt: string; bodyHash: string; ics?: ICSImportMetadata; csv?: CSVImportMetadata }
 type FactBase = { id: string; sourceId: string; contextId: string; revision: number; validity: 'active' | 'withdrawn'; supersedes: string[] }
 export type ScheduleFact = FactBase & (
@@ -124,6 +125,7 @@ function csvSourceNeedsReview(state: CalendarRulesState, source: ScheduleSource,
   const csv = source.csv
   // A source the person retired contributes no facts and no longer holds its series for review.
   if (!csv || csv.retiredAt) return false
+  if (csv.identityReview) return true
   const overlaps = (left: string, right: string) => left <= to && right >= from
   const binding = state.bindings.find(row => row.id === csv.target.bindingId && row.contextId === source.contextId)
   const context = state.contexts.find(row => row.id === source.contextId)
