@@ -215,7 +215,7 @@ export async function importSelectedExternalMessagesFromUI(value: PreparedExtern
   const retention = retentionUntil === undefined ? defaultSourceRetention(value.provider) : retentionUntil
   if (!Array.isArray(selectedIds) || !selectedIds.length || selectedIds.length > maxSelected || new Set(selectedIds).size !== selectedIds.length || selectedIds.some(id => !value.messages.some(message => message.id === id))) throw new Error('プレビュー内の発言を1〜200件選択してください')
   const confirmed = prepared.get(value)!, selected = value.messages.filter(message => selectedIds.includes(message.id))
-  const result = await db.transaction('rw', db.contextSources, db.contextSnapshots, db.commands, db.settings, async () => {
+  const result = await db.transaction('rw', db.datasetState, db.contextSources, db.contextSnapshots, db.commands, db.settings, async () => {
     await assertPrepared(value)
     const existing = await db.contextSources.where('ownerId').equals(value.ownerId).toArray(), sources = new Map(existing.filter(source => source.provider === value.provider).map(source => [source.externalId, source]))
     const result: ExternalImportResult = { sourceIds: [], created: 0, duplicates: 0, suppressed: 0, notice: '' }

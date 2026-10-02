@@ -16,6 +16,7 @@ import { validateRoutineAssistCandidate, validateRoutineAssistSelection, validat
 import { applyRoutineAssistConfigurationFromUI, prepareSourceRoutineConfiguration, type PreparedRoutineAssistance, type RoutineSourceGuard } from './routine-assist-save'
 import { verifiedRecurrenceTrigger } from './detection-recurrence-pattern'
 import { detectionProvenanceNotes, quoteDigest } from './task-source-evidence'
+import { assertSourceProcessingActive } from './source-processing-guard'
 
 export type DetectionSourceGuard = {sourceId:string;sourceRevision:number;snapshotRevision:number;permissionRevision:number;sha256:string}
 /** Calendar participation bindings and approved rules the owner ticked; revision-pinned so a revoked confirmation or changed rule expires the run. */
@@ -64,7 +65,7 @@ const vendor=(model:string)=>model.includes('/')?model.slice(0,model.indexOf('/'
 export function verifierIndependence(detector:string,verifier:string):VerifierIndependence{return detector===verifier?'same-model':vendor(detector)===vendor(verifier)?'different-model':'different-provider'}
 export const runSources=(run:Pick<DetectionRun,'source'|'sources'>)=>run.sources??[run.source]
 const runArtifactId=(runId:string,sourceId:string,primary:boolean)=>primary?`detection:${runId}`:`detection:${runId}:${sourceId}`
-const guardTables=()=>[db.settings,db.contextSources,db.contextSnapshots,db.calendarRules]
+const guardTables=()=>[db.settings,db.contextSources,db.contextSnapshots,db.calendarRules,db.datasetState]
 function validIdentity(options:DetectionIdentityOptions){
   if(!options||!Array.isArray(options.confirmedAliases)||options.confirmedAliases.length>20||options.confirmedAliases.some(alias=>typeof alias!=='string'||!alias.trim()||alias.length>100)||new Set(options.confirmedAliases).size!==options.confirmedAliases.length||typeof options.authorIsOwner!=='boolean'||!Array.isArray(options.existingTaskIds)||options.existingTaskIds.length>100||options.existingTaskIds.some(id=>typeof id!=='string'||!id||id.length>200)||new Set(options.existingTaskIds).size!==options.existingTaskIds.length)throw new Error('本人表記と照合する既存タスクを確認してください')
   for(const binding of options.participationBindings??[])if(!binding||typeof binding.id!=='string'||!binding.id||typeof binding.confirmed!=='boolean'||binding.description!==undefined&&typeof binding.description!=='string')throw new Error('資料本文から所属の確認を作れません')
@@ -88,6 +89,7 @@ function contextCurrent(state:CalendarRulesState|null|undefined,ownerId:string,d
 }
 type CurrentGuard=Pick<PreparedDetection,'ownerId'|'datasetId'|'policyEpoch'|'sourcePermissionRevision'|'source'|'expiresAt'>&{sources?:DetectionSourceGuard[];context?:DetectionContextGuard}
 async function assertCurrent(value:CurrentGuard,model:string,verifier:string=model):Promise<Settings>{
+  await assertSourceProcessingActive()
   const current=await settings(),policy=changePolicyFor(current)
   if(current.profileId!==value.ownerId||current.datasetId!==value.datasetId||!current.aiEnabled||current.aiModel!==model||detectionVerifierModel(current)!==verifier||policy.epoch!==value.policyEpoch||policy.sourcePermissionRevision!==value.sourcePermissionRevision||Date.parse(value.expiresAt)<=Date.now())throw new Error('本人・資料・利用許可・検証モデルまたは有効期限が変わりました。もう一度検出してください')
   for(const guard of runSources(value)){
@@ -110,6 +112,7 @@ export async function prepareDetectionFromUI(sourceId:string,expectedRevision:nu
 }
 /** Several imported messages of one conversation in one request, so later corrections and cancellations reach the detector (10.4). */
 export async function prepareThreadDetectionFromUI(selection:DetectionSourceSelection[],model:string,options:DetectionIdentityOptions,event:Event):Promise<PreparedDetection>{
+  await assertSourceProcessingActive()
   trustedClick(event);validIdentity(options)
   if(typeof model!=='string'||!/^[\w~./:-]{3,120}$/.test(model))throw new Error('モデルIDを確認してください')
   if(!Array.isArray(selection)||!selection.length||selection.length>20||new Set(selection.map(item=>item?.sourceId)).size!==selection.length||selection.some(item=>!item||typeof item.sourceId!=='string'||!Number.isSafeInteger(item.expectedRevision)))throw new Error('義務検出には1〜20件の資料を選んでください')
@@ -136,7 +139,7 @@ export async function prepareThreadDetectionFromUI(selection:DetectionSourceSele
     // Other imported messages of the same conversation that the owner did not include stay unseen and are named in the notice.
     const conversations=new Set(rows.filter(row=>row.source.conversation).map(row=>JSON.stringify([row.source.provider,row.source.conversation]))),chosen=new Set(guards.map(guard=>guard.sourceId))
     const omitted=conversations.size?(await db.contextSources.where('ownerId').equals(current.profileId).toArray()).filter(row=>!chosen.has(row.id)&&!row.deletedAt&&(!row.retentionUntil||Date.parse(row.retentionUntil)>Date.now())&&row.conversation&&conversations.has(JSON.stringify([row.provider,row.conversation]))).length:0
-    const coverageNotice=`選択して取り込んだ資料${rows.length}件の範囲だけを確認しました。${omitted?`同じ会話の他の発言 ${omitted}件は今回の検出に含めていません（他の発言は未包含）。後の訂正・取消を見落とす可能性があります。`:''}外部会話の全履歴、未取得の添付や期間は未確認です。0件でも義務がないとは確定しません。`
+    const coverageNotice=`選択して取り込んだ資料${rows.length}件の範囲だけを確認しました。${omitted?`同じ会話の他の発言 ${omitted}件は今回の検出に含めていません（他の発言は未包含）。後の訂正・取消を見落とす可能性があります。`:''}外部会話の全履歴、未取得の添付や期間は未確認です。0件でも義務がないとは確定しません。${rows.flatMap(row=>row.snapshot.document?.unread??[]).length ? "文書の未読箇所あり（画像・数式保存値など）。" : ""}`
     const request:DetectionRequest={trusted_context:{user_id:current.profileId,verified_actor_ids:[current.profileId],source_access:rows.map(row=>row.source.id),ai_egress_allowed:true,coverage:'incomplete',participation_bindings:[...structuredClone(options.participationBindings??[]),...bindings.map(item=>({id:item.id,confirmed:true,description:item.description}))],approved_rules:[...structuredClone(options.approvedRules??[]),...rules.map(item=>({id:item.id,active:true,description:item.description}))],existing_tasks:tasks.map(task=>({id:task!.id,revision:task!.revision,title:task!.title,dueDate:task!.dueDate,assignee_id:current.profileId})),verified_reference_aliases:Object.fromEntries(options.confirmedAliases.map(alias=>[alias,current.profileId])),alias_scope:'本人がこの検出操作で明示確認した表記だけ。本文の表示名やCCから本人を推測しない。'},sources:rows.map(({source,snapshot})=>({source_id:source.id,revision:snapshot.revision,author_id:options.authorIsOwner?current.profileId:'unverified-import-author',sent_at:source.date,timezone:source.timezone,kind:'manual-import',spans:snapshot.spans.map(span=>({span_id:span.id,text:span.text}))}))}
     return {id:uid(),ownerId:current.profileId,datasetId:current.datasetId,policyEpoch:policy.epoch,sourcePermissionRevision:policy.sourcePermissionRevision,model,verifierModel:verifier,createdAt:new Date().toISOString(),expiresAt:new Date(Date.now()+24*60*60*1000).toISOString(),source:primary,sources:guards,context:{bindings:bindings.map(({id,revision})=>({id,revision})),rules:rules.map(({id,revision})=>({id,revision}))},coverageNotice,request}
   })
@@ -294,7 +297,7 @@ export async function applyDetectionCreateFromUI(run:DetectionRun,prepared:Prepa
   if(digest!==await contentDigest(payload))throw new Error('確認した検出候補の内容が変わりました')
   const candidate=run.candidates.find(item=>item.id===prepared.candidateId)
   if(!candidate?.obligationKey)throw new Error('確認した検出候補の内容が変わりました')
-  const all=[db.tasks,db.assessments,db.commands,db.audits,db.containers,db.settings,db.labelGroups,db.labelDefinitions,db.contextSources,db.contextSnapshots,db.calendarRules,db.sourceArtifacts,db.taskSourceEvidence,...obligationTables()]
+  const all=[db.tasks,db.assessments,db.commands,db.audits,db.containers,db.settings,db.labelGroups,db.labelDefinitions,db.contextSources,db.contextSnapshots,db.calendarRules,db.sourceArtifacts,db.taskSourceEvidence,db.datasetState,...obligationTables()]
   return db.transaction('rw',all,async()=>{
     assertOperationAllowed(changePolicyFor(await assertCurrent(run,run.detectorModel,run.verifierModel)),'detection.register')
     if(!await runArtifactsPresent(run))throw new Error('候補が破棄されました。もう一度検出してください')

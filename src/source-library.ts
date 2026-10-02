@@ -10,6 +10,8 @@ import type { CoachMessage } from './chat-history'
 import { legacyReviewTasks, purgeTaskSourceEvidence, scrubLegacySourceCopies, type LegacyReviewTask } from './task-source-evidence'
 import { candidateExpired, defaultSourceRetention } from './retention-defaults'
 import { withdrawSourceObligations } from './detection-ledger'
+import { validateDocumentMetadata } from './document-metadata'
+import { assertSourceProcessingActive } from './source-processing-guard'
 
 export type SourceProvider = 'local' | 'slack' | 'line' | 'teams' | 'discord' | 'other'
 export type SourcePermissions = { acquire: boolean; retain: boolean; index: boolean; aiEgress: boolean; notify: boolean; externalWrite: boolean; disclose: boolean }
@@ -26,7 +28,7 @@ export type ContextSnapshot = { id: string; sourceId: string; ownerId: string; r
 export type SourceSummary = { id: string; ownerId: string; sourceId: string; sourceRevision: number; permissionRevision: number; policyEpoch: number; sourcePermissionRevision: number; model: string; provider: 'openrouter'; text: string; sha256: string; createdAt: string }
 export type SourceArtifact = { id: string; ownerId: string; sourceId: string; sourceRevision: number; permissionRevision: number; kind: 'cache' | 'embedding' | 'candidate'; payload: string; createdAt: string }
 /** retentionUntil omitted = design default (conversation exports 90 days, local documents none); null = owner chose no expiry. */
-export type SourceImport = Pick<ContextSource, 'title' | 'provider' | 'externalId' | 'conversation' | 'author' | 'sourceUrl' | 'date' | 'permissions' | 'allowedModels'> & { retentionUntil?: string | null; text: string; fromDate: string; toDate: string; timezone?: string }
+export type SourceImport = Pick<ContextSource, 'title' | 'provider' | 'externalId' | 'conversation' | 'author' | 'sourceUrl' | 'date' | 'permissions' | 'allowedModels'> & { retentionUntil?: string | null; text: string; fromDate: string; toDate: string; timezone?: string; document?: SnapshotDocument }
 export type SourceErasure = { original: number; summaries: number; caches: number; embeddings: number; candidates: number; memories: number; aiReplies: number; taskQuotes: number; legacyCopies: number }
 export type SourceDeletionReport = { sourceId: string; alreadyDeleted: boolean; erased: SourceErasure; reviewTaskIds: string[]; reviewTasks: LegacyReviewTask[]; sentModels: string[] }
 export type SourceSendRoute = 'source-summary' | 'source-detection' | 'coach-chat'
@@ -119,7 +121,9 @@ async function sentModels(source: ContextSource): Promise<string[]> {
 }
 
 export async function importLocalSource(input: SourceImport): Promise<string> {
+  await assertSourceProcessingActive()
   const text = normalizeSourceText(input.text)
+  if (input.document) validateDocumentMetadata(input.document, text.split('\n').length)
   const timezone = input.timezone ?? Intl.DateTimeFormat().resolvedOptions().timeZone
   try { if (typeof timezone !== 'string' || !timezone.trim() || timezone.length > 100) throw new Error(); new Intl.DateTimeFormat('en-US', { timeZone: timezone }).format() } catch { throw new Error('資料のタイムゾーンを確認してください') }
   if (typeof input.title !== 'string' || !input.title.trim() || input.title.length > 200 || !providerNames.includes(input.provider)) throw new Error('資料名と由来を確認してください')
@@ -133,18 +137,43 @@ export async function importLocalSource(input: SourceImport): Promise<string> {
   if (input.permissions.aiEgress && !input.allowedModels.length) throw new Error('AI送信を許可するモデルIDを指定してください')
   if (retentionUntil !== null && Date.parse(retentionUntil) <= Date.now()) throw new Error('保持期限は未来の日時にしてください')
   const digest = await Dexie.waitFor(hash(text)), id = uid(), snapshotId = `${id}:1`, spans = sourceSpans(snapshotId, text), at = new Date().toISOString()
-  return db.transaction('rw', [db.contextSources, db.contextSnapshots, db.settings], async () => {
+  return db.transaction('rw', [db.contextSources, db.contextSnapshots, db.settings, db.datasetState], async () => {
+    await assertSourceProcessingActive()
     const settings = await owner()
     const existing = await db.contextSources.where('ownerId').equals(settings.profileId).toArray()
     if (existing.length >= 10000) throw new Error('資料は10000件まで取り込めます')
     for (const source of existing.filter(source => live(source, settings.profileId) && source.provider === input.provider && source.externalId === input.externalId && source.title === input.title.trim())) {
       const snapshot = await db.contextSnapshots.get(`${source.id}:${source.latestRevision}`)
-      if (snapshot?.sha256 === digest) return source.id
+      if (snapshot?.sha256 === digest && snapshot.document?.fileSha256 === input.document?.fileSha256) return source.id
     }
     await bumpPolicy()
     await db.contextSources.add({ id, ownerId: settings.profileId, title: input.title.trim(), provider: input.provider, externalId: input.externalId, conversation: input.conversation, author: input.author, sourceUrl: input.sourceUrl, date: input.date, timezone, revision: 1, latestRevision: 1, permissionRevision: 1, permissions: { ...input.permissions }, aiProvider: 'openrouter', allowedModels: [...input.allowedModels], coverage: { fromDate: input.fromDate, toDate: input.toDate, complete: false, method: 'manual-import', lastCheckedAt: at }, retentionUntil, createdAt: at, updatedAt: at, deletedAt: null })
-    await db.contextSnapshots.add({ id: snapshotId, sourceId: id, ownerId: settings.profileId, revision: 1, originalText: input.text, text, sha256: digest, spans, createdAt: at })
+    await db.contextSnapshots.add({ id: snapshotId, sourceId: id, ownerId: settings.profileId, revision: 1, originalText: input.text, text, sha256: digest, spans, createdAt: at, ...(input.document ? { document: structuredClone(input.document) } : {}) })
     return id
+  })
+}
+
+/** Owner accepts a watched file's new revision; missing files never call this operation. */
+export async function addSourceRevision(id: string, expectedRevision: number, input: { text: string; document?: SnapshotDocument }) {
+  await assertSourceProcessingActive()
+  const text = normalizeSourceText(input.text)
+  if (input.document) validateDocumentMetadata(input.document, text.split('\n').length)
+  const digest = await hash(text)
+  return db.transaction('rw', [...purgeTables(), db.datasetState], async () => {
+    await assertSourceProcessingActive()
+    const settings = await owner(), source = await db.contextSources.get(id)
+    if (!source || !canRead(source, settings.profileId) || source.revision !== expectedRevision) throw new ConflictError()
+    const previous = await db.contextSnapshots.get(`${id}:${source.latestRevision}`)
+    if (previous?.sha256 === digest && previous.document?.fileSha256 === input.document?.fileSha256) return source.latestRevision
+    const revision = source.latestRevision + 1, snapshotId = `${id}:${revision}`, at = new Date().toISOString()
+    if (revision > 100000) throw new Error('資料の版数が上限に達しています')
+    // Previous original and citations are retained; candidates, vectors, and model replies expire.
+    await purgeDerived(source, at, false)
+    await withdrawSourceObligations(source.ownerId, id, at)
+    await bumpPolicy()
+    await db.contextSources.put({ ...source, latestRevision: revision, revision: source.revision + 1, updatedAt: at, coverage: { ...source.coverage, lastCheckedAt: at } })
+    await db.contextSnapshots.add({ id: snapshotId, sourceId: id, ownerId: settings.profileId, revision, originalText: input.text, text, sha256: digest, spans: sourceSpans(snapshotId, text), createdAt: at, ...(input.document ? { document: structuredClone(input.document) } : {}) })
+    return revision
   })
 }
 

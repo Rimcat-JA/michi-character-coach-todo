@@ -37,7 +37,11 @@ export function validateChatHistoryRecords(conversations: unknown, messages: unk
     byId.set(row.id, row as CoachConversation)
   }
   for (const raw of messageRows) {
-    const row = object(raw, ['id', 'conversationId', 'ownerId', 'sequence', 'role', 'origin', 'text', 'model', 'provider', 'replyTo', 'selectedSources', 'policyEpoch', 'sourcePermissionRevision', 'createdAt'])
+    const row = object(raw, ['id', 'conversationId', 'ownerId', 'sequence', 'role', 'origin', 'text', 'model', 'provider', 'replyTo', 'selectedSources', 'policyEpoch', 'sourcePermissionRevision', 'createdAt'], ['coverageCard'])
+    if (row.coverageCard !== undefined) {
+      const card = object(row.coverageCard, ['origin', 'text', 'warning'])
+      if (row.role !== 'assistant' || row.origin === 'notice' || card.origin !== 'template' || !string(card.text, 10000) || typeof card.warning !== 'boolean' || !(row.selectedSources as ChatSourceRef[]).some(ref => ref.kind === 'library')) fail()
+    }
     if (!string(row.id, 200) || messageById.has(row.id) || !string(row.conversationId, 200) || row.ownerId !== ownerId || !integer(row.sequence) || !string(row.text, 10000) || !['user', 'assistant'].includes(row.role as string) || !['human', 'live_ai', 'template', 'notice'].includes(row.origin as string)) fail()
     const parent = byId.get(row.conversationId)
     timestamp(row.createdAt)

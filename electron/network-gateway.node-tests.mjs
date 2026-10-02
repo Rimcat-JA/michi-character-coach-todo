@@ -12,7 +12,7 @@ function recorder(){const calls=[];const fetchImpl=async(url,init)=>{calls.push(
 
 test('offline_only makes zero underlying fetch calls for every purpose and returns NETWORK_POLICY_OFFLINE',async()=>{
  const {calls,fetchImpl}=recorder(),gateway=createNetworkGateway({getPolicy:async()=>({policy:'offline_only',source:'profile'}),fetchImpl})
- for(const [purpose,url] of [['openrouter','https://openrouter.ai/api/v1/chat/completions'],['github','https://api.github.com/user'],['webhook','https://hooks.example.invalid/x']]){
+ for(const [purpose,url] of [['openrouter','https://openrouter.ai/api/v1/chat/completions'],['github','https://api.github.com/user'],['webhook','https://hooks.example.invalid/x'],['embedding','http://127.0.0.1:8080/v1/embeddings']]){
   await assert.rejects(gateway.fetch(purpose,url,{method:'POST'}),error=>error.code==='NETWORK_POLICY_OFFLINE'&&/オフライン専用/.test(error.message))
   await assert.rejects(gateway.assertAllowed(purpose),error=>error.code==='NETWORK_POLICY_OFFLINE')
  }
@@ -42,7 +42,14 @@ test('explicit_online allows only the per-purpose host over https and forces red
  await assert.rejects(gateway.fetch('telemetry','https://openrouter.ai/'),error=>error.code==='NETWORK_PURPOSE_INVALID')
  assert.equal(calls.length,2)
  assert.ok(calls.every(call=>call.init.redirect==='error'))
- assert.deepEqual(gateway.status().counters,{openrouter:{attempts:1,blockedOffline:0,blockedHost:2,failed:0},github:{attempts:1,blockedOffline:0,blockedHost:5,failed:0},webhook:{attempts:0,blockedOffline:0,blockedHost:1,failed:0}})
+ assert.deepEqual(gateway.status().counters,{openrouter:{attempts:1,blockedOffline:0,blockedHost:2,failed:0},github:{attempts:1,blockedOffline:0,blockedHost:5,failed:0},webhook:{attempts:0,blockedOffline:0,blockedHost:1,failed:0},embedding:{attempts:0,blockedOffline:0,blockedHost:0,failed:0}})
+})
+
+test('embedding only reaches literal loopback HTTP endpoints with an explicit port',async()=>{
+ const {calls,fetchImpl}=recorder(),gateway=createNetworkGateway({getPolicy:async()=>({policy:'explicit_online'}),fetchImpl})
+ for(const url of ['http://127.0.0.1:9000/v1/embeddings','http://[::1]:9000/v1/embeddings'])await gateway.fetch('embedding',url)
+ for(const url of ['http://localhost:9000/v1/embeddings','http://example.test:9000/','http://127.0.0.1/','https://127.0.0.1:9000/'])await assert.rejects(gateway.fetch('embedding',url),error=>error.code==='NETWORK_HOST_NOT_ALLOWED')
+ assert.equal(calls.length,2)
 })
 
 test('failed underlying requests are counted separately from attempts',async()=>{

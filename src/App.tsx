@@ -55,7 +55,8 @@ import { purgeExpiredCSVOriginals } from './calendar-csv-retention'
 import { applyCalendarProposalFromUI, loadCalendarRulesState, prepareCalendarConfiguration, prepareCalendarGeneration, prepareCalendarScheduleImport } from './calendar-rules-save'
 import TripBundlesView from './TripBundlesView'
 import { applyTripBundle, removeTripBundle } from './trip-bundle-save'
-import { saveAIModel, updateAIConnection } from './ai-connection'
+import { saveAIModel, saveAIVerifierModel, updateAIConnection } from './ai-connection'
+import EmbeddingSettingsView from './EmbeddingSettingsView'
 import AIProcessingResume from './AIProcessingResume'
 import { assessmentProvenance, saveTaskWithScoreProvenance } from './score-assessment-save'
 import type { ScoreAcceptanceProvenance } from './score-assist'
@@ -573,6 +574,7 @@ function CoachView({ tasks, allTasks, goals, checkIns, settings, onEdit, onNew, 
   const [aiStatus, setAiStatus] = useState<AIStatus | null>(null)
   const [keyInput, setKeyInput] = useState('')
   const [modelInput, setModelInput] = useState(settings.aiModel || 'deepseek/deepseek-v4.1-flash')
+  const [verifierInput, setVerifierInput] = useState(settings.aiVerifierModel ?? '')
   const [changeTaskId, setChangeTaskId] = useState('')
   const [connectionError, setConnectionError] = useState('')
   const [connectionNotice, setConnectionNotice] = useState('')
@@ -640,6 +642,18 @@ function CoachView({ tasks, allTasks, goals, checkIns, settings, onEdit, onNew, 
     catch (error) { setConnectionError(error instanceof Error ? error.message : String(error)) }
   }
 
+  async function saveVerifier({ nativeEvent }: { nativeEvent: Event }) {
+    if (!nativeEvent.isTrusted || nativeEvent.type !== 'click') { setConnectionError('本人の保存ボタンから操作してください'); return }
+    setConnectionError(''); setConnectionNotice('')
+    try {
+      const value = verifierInput.trim();
+      await saveAIVerifierModel(value ? value : null)
+      setConnectionNotice(value ? `検証モデルを保存しました（検出とは別の呼び出しで照合します）。独立評価は未実施のため本人確認が必要です。` : '検証モデルを使わない設定にしました（検出と同じモデルの別呼び出しで照合します）。')
+    } catch (e) {
+      setConnectionError(e instanceof Error ? e.message : String(e))
+    }
+  }
+
   async function testConnection() {
     if (!bridge || testing || sending) return
     setTesting(true); setConnectionError(''); setConnectionNotice('')
@@ -667,6 +681,9 @@ function CoachView({ tasks, allTasks, goals, checkIns, settings, onEdit, onNew, 
           {bridge ? <>
             <p>APIキーはWindowsの暗号化保存を使用し、バックアップには含めません。</p>{!settings.aiEnabled && !aiStatus && <p className="muted">AIはOFFです。保存済みキーは読み込んでいません。モデルだけの保存はそのままできます。再開・キー削除のボタンは状態の確認後に表示します。<button className="text-button" onClick={checkStoredKey}>保存済みキーの状態を確認</button></p>}
             <label className="field">モデルID<input value={modelInput} onChange={e => setModelInput(e.target.value)} placeholder="例：提供元/モデル名" /></label>
+            <label className="field">検証用の別モデル（任意・検出とは別の呼び出しで照合）<input value={verifierInput} onChange={e => setVerifierInput(e.target.value)} placeholder="空欄は検出と同じモデル" /></label>
+            <button className="secondary-button full" onClick={saveVerifier}>検証モデルを保存</button>
+            <EmbeddingSettingsView settings={settings} />
             <label className="field">APIキー<input type="password" autoComplete="off" value={keyInput} onChange={e => setKeyInput(e.target.value)} placeholder={aiStatus?.configured ? '登録済み（変更時のみ入力）' : !aiStatus && !settings.aiEnabled ? '未確認（変更時のみ入力）' : 'OpenRouterのキー'} /></label>
             <button className="secondary-button full" disabled={aiStatus?.secureStorage === false} onClick={saveConnection}>接続を保存</button>
             {settings.aiEnabled && <button className="secondary-button full" onClick={pauseAI}>AIをOFFにする（キーを保持）</button>}
