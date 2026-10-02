@@ -39,7 +39,7 @@ export async function createGitHubEmulator({ empty = false, protectedBranch = fa
   if (!empty) await externalCommit({ 'unrelated.txt': 'Unrelated synthetic content\n', 'README.md': '# Synthetic repository\n' })
   const merge = number => { const pull = state.pulls.find(row => row.number === number); if (!pull || pull.state !== 'open') refuse(); const current = head(), branchSha = head(pull.head.ref), sha = commit(commitInfo(branchSha).tree.sha, [current], 'Synthetic squash merge'); update('main', sha, current); Object.assign(pull, { state: 'closed', merged: true, merge_commit_sha: sha }); return pull }
   const prefix = `/repos/${owner}/${name}`
-  const refObject = branch => { const sha = head(branch); if (!sha) refuse(empty ? 409 : 404); return { ref: 'refs/heads/' + branch, object: { type: 'commit', sha } } }
+  const refObject = branch => { const sha = head(branch); if (!sha) refuse(head() ? 404 : 409); return { ref: 'refs/heads/' + branch, object: { type: 'commit', sha } } }
   const server = http.createServer(async (request, response) => {
     try {
       if (request.headers.authorization !== 'Bearer ' + QA_GITHUB_TOKEN) refuse(401)

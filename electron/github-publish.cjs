@@ -117,9 +117,9 @@ function createGitHubPublisher({token,repository,readAttempt,writeAttempt,verify
     const sequence=manifest.publicationSequence??0,prior=await readAttempt(repository.repositoryId,completionId,sequence)
     if(prior){if(prior.approvalDigest!==approvalDigest||prior.manifest.exportId!==manifest.exportId)fail('COMPLETION_ALREADY_RESERVED');if(prior.state==='published')return {state:'published',receipt:structuredClone(prior.receipt)};fail('ATTEMPT_ALREADY_USED')}
     if(sequence){const previous=await readAttempt(repository.repositoryId,completionId,sequence-1);if(previous?.state!=='published'||previous.receipt?.commitSha!==manifest.previousCommitSha||previous.manifest.exportId!==manifest.exportId||previous.manifest.publicId!==manifest.publicId||previous.manifest.ownerId!==manifest.ownerId||previous.manifest.datasetId!==manifest.datasetId||previous.manifest.recordDate!==manifest.recordDate||manifest.previousFileBlobShas.some(file=>!previous.receipt.files.some(row=>row.path===file.path&&row.sha===file.sha)))fail('CORRECTION_RECEIPT_MISSING')}
-    let target=await currentTarget()
+    let target;try{target=await currentTarget()}catch(error){error.beforeReservation=true;throw error}
     if(target.protected)return prPublisher().publish(input,target)
-    await unusedRecords(manifest,target)
+    try{await unusedRecords(manifest,target)}catch(error){error.beforeReservation=true;throw error}
     let attempt={version:1,repositoryId:repository.repositoryId,completionId,attemptId,approvalDigest,manifest,state:'preparing',parentSha:null,treeSha:null,commitSha:null,receipt:null,startedAt:new Date(now()).toISOString(),phase:'reserved'}
     await writeAttempt(attempt,true)
     const save=async patch=>{attempt={...attempt,...patch};await writeAttempt(attempt,false)}

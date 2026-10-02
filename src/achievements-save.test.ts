@@ -5,7 +5,7 @@ import { db, ensureSettings } from './db'
 import { completeTask, correctCompletion, createTask, newTaskInput, undoCompletion } from './commands'
 import { emptyScore } from './domain'
 import { addTaskAttachment, addTaskNote } from './materials'
-import { achievementDB, approveAchievementFromUI, clearAchievementAuthority, createAchievementEvidenceFromUI, editAchievementPublicEvidenceFromUI, prepareAchievementExport, publishAchievementFromUI, reconcileAchievementExport, reconcileAchievementExports, saveAchievementDraftFromUI, saveAchievementPolicyFromUI } from './achievements-save'
+import { achievementDB, approveAchievementFromUI, checkAchievementContributionFromUI, clearAchievementAuthority, createAchievementEvidenceFromUI, editAchievementPublicEvidenceFromUI, prepareAchievementExport, publishAchievementFromUI, reconcileAchievementExport, reconcileAchievementExports, saveAchievementDraftFromUI, saveAchievementPolicyFromUI } from './achievements-save'
 import { achievementDraftFor, achievementTextHash, type AchievementEvidence, type AchievementExport } from './achievements'
 import { achievementTestGateway } from './achievements-test-fixtures'
 import { restoreAchievementExports, validateAchievementRecords, verifyAchievementDigests } from './achievements-validation'
@@ -13,6 +13,7 @@ import type { GitHubAchievementsGateway, GitHubGatewayStatus, GitHubPublishReque
 import { changePolicyFor } from './change-set'
 import { automationRulesFor, type OperationGroup, type OperationMode } from './automation-policy'
 import { captureSnapshot, restoreBackup } from './backup'
+import { githubContributionLabel } from './github-contribution'
 
 function nativeClick() { const event = new Event('click'); Object.defineProperty(event, 'isTrusted', { value: true }); return event }
 function fakeGateway() {
@@ -45,6 +46,25 @@ async function fixture(points: number | null = 40) {
 }
 beforeEach(async () => { clearAchievementAuthority(); await db.delete(); await db.open() })
 describe('実績の本人承認・保存・送信状態', () => {
+  it('条件の読取結果は承認receiptと別に保存し、不明な草反映状態と改変backupを拒否する', async () => {
+    const value=await fixture(100),id=await approveAchievementFromUI(await value.proposal(),nativeClick(),value.gateway.api)
+    await publishAchievementFromUI(id,nativeClick(),value.gateway.api)
+    value.gateway.api.contribution=async()=>({status:'conditions_met',reasons:['GRAPH_REFLECTION_NOT_INDEPENDENTLY_VERIFIED'],checkedAt:new Date().toISOString()})
+    const row=await checkAchievementContributionFromUI(id,nativeClick(),value.gateway.api)
+    expect(row.contribution).toBe('conditions_met');expect(row.publishedSummary?.points).toBe(100)
+    expect(githubContributionLabel(row.contribution)).toContain('反映は未確認')
+    const snapshot=await captureSnapshot(),bad=structuredClone(snapshot)
+    ;(bad.achievementExports![0] as unknown as {contribution:string}).contribution='reflected'
+    await expect(restoreBackup(bad)).rejects.toThrow('種別')
+    expect(()=>githubContributionLabel('reflected' as never)).toThrow('不正な集計状態')
+    expect(restoreAchievementExports([row])[0].contribution).toBe('unverified')
+  })
+  it('凍結したデータセットでは公開予約を保存せず、native送信も呼ばない', async () => {
+    const value=await fixture(),id=await approveAchievementFromUI(await value.proposal(),nativeClick(),value.gateway.api)
+    await db.datasetState.put({id:'main',mode:'frozen',moveId:'qa-move',updatedAt:new Date().toISOString()})
+    await expect(publishAchievementFromUI(id,nativeClick(),value.gateway.api)).rejects.toThrow('凍結中')
+    expect(value.gateway.publish).not.toHaveBeenCalled();expect((await achievementDB.achievementExports.get(id))?.state).toBe('approved')
+  })
   it('訂正は別承認を経て公開値を更新し、保留案とbackup復元が公開済み基準を変更しない', async () => {
     const value=await fixture(100),id=await approveAchievementFromUI(await value.proposal(),nativeClick(),value.gateway.api),initial=await publishAchievementFromUI(id,nativeClick(),value.gateway.api)
     await correctCompletion(value.taskId,60,'訂正');await reconcileAchievementExports()

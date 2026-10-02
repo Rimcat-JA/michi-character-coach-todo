@@ -111,3 +111,24 @@ test('contribution conditions are read only: email, unavailable permission, nore
   }finally{await remote.dispose()}
  }
 })
+
+test('initialized empty repository can create its protected PR; removing protection midway cannot bypass it',async()=>{
+ const remote=await createGitHubEmulator({empty:true})
+ try{
+  await fetch(remote.endpoint+'/repos/owner/repo/contents/README.md',{method:'PUT',headers:{authorization:'Bearer '+remote.token,'content-type':'application/json'},body:JSON.stringify({branch:'main',message:'Initialize',content:Buffer.from('# Initialization\n').toString('base64')})})
+  remote.state.protected=true
+  const fetchOriginal=remote.fetchImpl;remote.fetchImpl=async(url,options)=>{const result=await fetchOriginal(url,options);if(options.method==='POST'&&new URL(url).pathname.endsWith('/git/refs'))remote.state.protected=false;return result}
+  const {input,client,repository}=await publication(remote),result=await client.publish(input,{})
+  assert.equal(result.state,'pr_pending');assert.equal(remote.head(),repository.headSha);assert.equal(remote.state.pulls.length,1)
+  assert.equal(remote.state.requests.some(row=>row.method==='PATCH'&&row.path.endsWith('/heads/main')),false)
+ }finally{await remote.dispose()}
+})
+test('a dedicated-branch collision is preserved without journal or HTTP mutation',async()=>{
+ const remote=await createGitHubEmulator({protectedBranch:true})
+ try{const {input,client,repository,journal}=await publication(remote),branch='michi-achievements/'+input.manifest.publicId
+  await fetch(remote.endpoint+'/repos/owner/repo/git/refs',{method:'POST',headers:{authorization:'Bearer '+remote.token,'content-type':'application/json'},body:JSON.stringify({ref:'refs/heads/'+branch,sha:repository.headSha})})
+  const count=remote.state.requests.filter(row=>row.method!=='GET').length
+  await assert.rejects(client.publish(input,{}),/PUBLIC_BRANCH_ALREADY_EXISTS/)
+  assert.equal(journal.size,0);assert.equal(remote.head(branch),repository.headSha);assert.equal(remote.state.requests.filter(row=>row.method!=='GET').length,count)
+ }finally{await remote.dispose()}
+})

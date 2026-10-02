@@ -11,7 +11,7 @@ function createGitHubPRPublisher({request,repository,writeAttempt,currentTarget,
   if(!Array.isArray(matches)||matches.length!==1)return null
   const pull=matches[0]
   if(!Number.isSafeInteger(pull.number)||pull.number<1||pull.head?.ref!==branch||pull.head.sha!==attempt.branchCommitSha||pull.base?.ref!==repository.defaultBranch||!['open','closed'].includes(pull.state))fail('PR_MISMATCH')
-  if(pull.state==='closed'&&pull.merged!==true)return {publicationState:'failed',code:'PR_CLOSED_UNMERGED'}
+  if(pull.state==='closed'&&pull.merged!==true){await writeAttempt({...attempt,state:'failed',receipt:null,reason:'PR_CLOSED_UNMERGED'},false);return {publicationState:'failed',code:'PR_CLOSED_UNMERGED'}}
   let commitSha=attempt.branchCommitSha,publicationState='pr_pending'
   if(pull.merged===true){
    if(pull.state!=='closed'||!sha(pull.merge_commit_sha))fail('PR_MERGE_UNCONFIRMED')
@@ -29,8 +29,8 @@ function createGitHubPRPublisher({request,repository,writeAttempt,currentTarget,
  async function publish(input,target){
   const {manifest,completionId,attemptId,approvalDigest}=input,branch=`michi-achievements/${manifest.publicId}${manifest.publicationSequence?'-r'+manifest.publicationSequence:''}`
   // A colliding branch belongs to someone else; never update or force it.
-  try{await request('GET',`/git/ref/heads/${encodeURIComponent(branch)}`);fail('PUBLIC_BRANCH_ALREADY_EXISTS')}catch(error){if(error.status!==404)throw error}
-  await unusedRecords(manifest,target)
+  try{await request('GET',`/git/ref/heads/${encodeURIComponent(branch)}`);fail('PUBLIC_BRANCH_ALREADY_EXISTS')}catch(error){if(error.status!==404){error.beforeReservation=true;throw error}}
+  try{await unusedRecords(manifest,target)}catch(error){error.beforeReservation=true;throw error}
   let attempt={version:1,repositoryId:repository.repositoryId,completionId,attemptId,approvalDigest,manifest,state:'preparing',parentSha:target.headSha,treeSha:null,commitSha:null,receipt:null,startedAt:new Date(now()).toISOString(),phase:'reserved',pullRequestBranch:branch,branchCommitSha:null,pullRequestNumber:null}
   await writeAttempt(attempt,true)
   const save=async patch=>{attempt={...attempt,...patch};await writeAttempt(attempt,false)}
@@ -44,9 +44,11 @@ function createGitHubPRPublisher({request,repository,writeAttempt,currentTarget,
    const commit=await mutation('POST','/git/commits',{message:`Record achievement ${manifest.publicId}`,tree:tree.sha,parents:[target.headSha]});if(!sha(commit.sha)||commit.tree?.sha!==tree.sha||commit.parents?.length!==1||commit.parents[0].sha!==target.headSha)fail('COMMIT_MISMATCH');await save({commitSha:commit.sha,branchCommitSha:commit.sha,state:'committing'})
    const existing=await request('GET',`/git/ref/heads/${encodeURIComponent(branch)}`);if(existing.ref!==`refs/heads/${branch}`||existing.object?.sha!==target.headSha)fail('PUBLIC_BRANCH_CHANGED')
    const updated=await mutation('PATCH',`/git/refs/heads/${encodeURIComponent(branch)}`,{sha:commit.sha,force:false});if(updated.object?.sha!==commit.sha||updated.ref!==`refs/heads/${branch}`)fail('REF_MISMATCH')
-   const pull=await mutation('POST','/pulls',{title:`Achievement ${manifest.publicId}`,head:branch,base:repository.defaultBranch,body:'本人が承認した公開recordと正味ポイント。内部タスク・会話・証拠原本は含みません。'});if(!Number.isSafeInteger(pull.number)||pull.number<1)fail('PR_INVALID');await save({pullRequestNumber:pull.number,state:'pr_pending'})
+   let summary='本人が承認した公開recordと正味ポイント。内部タスク・会話・証拠原本は含みません。'
+   try{const record=JSON.parse(manifest.files.find(file=>file.kind==='record'&&file.path.endsWith('.json')).content);if(typeof record.title==='string'&&typeof record.summary==='string')summary+='\n\n'+(record.title+'\n\n'+record.summary).slice(0,3000).replace(/[<>&`*_[\]#\\]/g,char=>'\\'+char)}catch{/* Generic approval summary for older records. */}
+   const pull=await mutation('POST','/pulls',{title:`Achievement ${manifest.publicId}`,head:branch,base:repository.defaultBranch,body:summary});if(!Number.isSafeInteger(pull.number)||pull.number<1)fail('PR_INVALID');await save({pullRequestNumber:pull.number,state:'pr_pending'})
    const receipt=await reconcile(attempt);if(!receipt)fail('PR_UNCONFIRMED');return {state:receipt.publicationState,receipt}
-  }catch(error){await save({state:'unknown'}).catch(()=>{});return {state:'unknown',receipt:null,reason:typeof error.code==='string'&&/^[A-Z0-9_]{1,60}$/.test(error.code)?error.code:'PUBLICATION_UNKNOWN'}}
+  }catch(error){await save({state:'unknown'}).catch(()=>{});return {state:'unknown',receipt:null,reason:attempt.phase==='/pulls'&&error.status===403?'PR_WRITE_PERMISSION_REQUIRED':typeof error.code==='string'&&/^[A-Z0-9_]{1,60}$/.test(error.code)?error.code:'PUBLICATION_UNKNOWN'}}
  }
  return {publish,reconcile}
 }
