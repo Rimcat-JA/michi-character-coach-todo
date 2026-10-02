@@ -14,7 +14,8 @@ async function extractDocument(request) {
       const timer = setTimeout(() => { void worker.terminate(); reject(new Error('文書の読取が時間上限を超えました')) }, 20000)
       worker.once('message', value => { clearTimeout(timer); void worker.terminate(); if (value.error) reject(new Error(value.error)); else resolve(value.result) })
       worker.once('error', () => { clearTimeout(timer); reject(new Error('文書を読み取れませんでした。破損・サイズ・形式を確認してください')) })
-      worker.once('exit', code => { clearTimeout(timer); if (code !== 0) reject(new Error('文書の読取を安全に中止しました')) })
+      // A silent exit must also settle the promise; a previous message already resolved it.
+      worker.once('exit', () => { clearTimeout(timer); reject(new Error('文書の読取を安全に中止しました')) })
     })
   } finally { running = false }
 }

@@ -47,6 +47,9 @@ test('dry-run records plans with zero requests', async () => {
   const lines = readFileSync(out, 'utf8').trim().split('\n').map(line => JSON.parse(line));
   equal(lines.length, 3);
   ok(lines.every(line => line.status === 'dry-run' && line.rawOutput === null && /^[a-f0-9]{64}$/.test(line.promptSha256)));
+  equal(new Set(lines.map(line => line.promptSha256)).size, 3, 'hash identifies the actual messages, not just a version label');
+  const ipv6 = casesFile();
+  equal(run(['--cases', ipv6.file, '--endpoint', 'http://[::1]:1', '--model', 'fixture', '--out', ipv6.out]).status, 0);
 });
 
 test('loopback --execute records verbatim oracle/empty/overproduce outputs append-only', async () => {

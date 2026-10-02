@@ -8,7 +8,7 @@ import { createHash } from 'node:crypto';
 import { appendFileSync, readFileSync } from 'node:fs';
 
 const PROMPT_VERSION = 'detection-eval-prompt/v1';
-const promptSha256 = createHash('sha256').update(PROMPT_VERSION).digest('hex');
+const promptHash = item => createHash('sha256').update(JSON.stringify({ version: PROMPT_VERSION, messages: item.messages })).digest('hex');
 
 const args = Object.fromEntries(process.argv.slice(2).flatMap((arg, index, all) => {
   if (!arg.startsWith('--')) return [];
@@ -23,7 +23,7 @@ if (args.help) { process.stdout.write(`Usage: node scripts/detection-eval.mjs --
 const casesFile = args.cases, endpoint = args.endpoint, model = args.model, out = args.out;
 if (!casesFile || !endpoint || !model || !out) fail('missing --cases/--endpoint/--model/--out');
 const maxCases = args['max-cases'] === undefined ? Infinity : Number(args['max-cases']);
-if (!(maxCases === Infinity || (Number.isFinite(maxCases) && maxCases >= 1))) fail('bad --max-cases');
+if (!(maxCases === Infinity || (Number.isSafeInteger(maxCases) && maxCases >= 1))) fail('bad --max-cases');
 
 let cases;
 try { cases = JSON.parse(readFileSync(casesFile, 'utf8')); } catch { fail(`cannot read cases ${casesFile}`); }
@@ -37,11 +37,12 @@ for (const item of records) {
 
 let endpointUrl;
 try { endpointUrl = new URL(endpoint); } catch { fail(`bad endpoint ${endpoint}`); }
-const loopback = (endpointUrl.hostname === '127.0.0.1' || endpointUrl.hostname === '::1') && (endpointUrl.protocol === 'http:' || endpointUrl.protocol === 'https:');
+if (endpointUrl.username || endpointUrl.password) fail('endpoint credentials are refused');
+const loopback = (endpointUrl.hostname === '127.0.0.1' || endpointUrl.hostname === '[::1]') && (endpointUrl.protocol === 'http:' || endpointUrl.protocol === 'https:');
 const execute = args.execute === 'true' || args.execute === true;
 if (!execute && !loopback) fail('this endpoint needs --execute (dry-run is loopback-only; pass --execute with --key-env for real runs, or use dry-run against 127.0.0.1)');
 if (!execute) {
-  for (const item of records) appendFileSync(out, `${JSON.stringify({ promptSha256, model, caseId: item.caseId, origin: item.origin, status: 'dry-run', rawOutput: null, at: new Date().toISOString() })}\n`);
+  for (const item of records) appendFileSync(out, `${JSON.stringify({ promptVersion: PROMPT_VERSION, promptSha256: promptHash(item), model, caseId: item.caseId, origin: item.origin, status: 'dry-run', rawOutput: null, at: new Date().toISOString() })}\n`);
   process.stdout.write(`dry-run: ${records.length} cases planned, no network use\n`);
   process.exit(0);
 }
@@ -73,7 +74,7 @@ for (const item of records) {
   // No retry: one attempt per case, failures are recorded, not retried.
   let rawOutput = null, status = 'ok';
   try { rawOutput = await post(item); } catch (error) { status = `error:${String(error?.message ?? error).slice(0, 200)}`; }
-  appendFileSync(out, `${JSON.stringify({ promptSha256, model, caseId: item.caseId, origin: item.origin, status, rawOutput, at: new Date().toISOString() })}\n`);
+  appendFileSync(out, `${JSON.stringify({ promptVersion: PROMPT_VERSION, promptSha256: promptHash(item), model, caseId: item.caseId, origin: item.origin, status, rawOutput, at: new Date().toISOString() })}\n`);
   done++;
 }
 process.stdout.write(`executed: ${done} cases appended to ${out}\n`);

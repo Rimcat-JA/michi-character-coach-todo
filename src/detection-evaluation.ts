@@ -18,15 +18,15 @@ export function scoreCase(caseId: string, expected: EvalExpected, output: EvalOu
   const empty = changes.length === 0;
   const created = changes.some(change => change.action === 'create');
   const forbiddenGeneration = expected.mustNotCreate && created;
-  const fabricatedSource = changes.some(change => change.evidence.some(reference => {
+  const fabricatedSource = changes.some(change => !change.evidence.length || change.evidence.some(reference => {
     const span = spans.find(item => item.spanId === reference.spanId);
     if (!span) return true;
     const quote = reference.quote.trim();
-    return quote.length > 0 && !span.text.includes(quote);
+    return !quote.length || !span.text.includes(quote);
   }));
   // The dangerous combination: a forbidden task built on invented evidence.
   const criticalMisregistration = forbiddenGeneration && fabricatedSource;
-  const actionMatch = !empty && changes.every(change => expected.actions.includes(change.action));
+  const actionMatch = !empty && JSON.stringify(changes.map(change => change.action).sort()) === JSON.stringify([...expected.actions].sort());
   return { caseId, empty, created, forbiddenGeneration, fabricatedSource, criticalMisregistration, actionMatch };
 }
 
@@ -58,6 +58,10 @@ export function aggregate(items: { expected: EvalExpected; scored: EvalScored }[
   const precision = created.length ? matched.length / created.length : 1;
   const recall = shouldCreate.length ? recalled.length / shouldCreate.length : 0;
   const reasons: string[] = [];
+  const counts = new Map<string, number>();
+  for (const row of scored) counts.set(row.caseId, (counts.get(row.caseId) ?? 0) + 1);
+  if (![meta.iterations, meta.regressionCases, meta.holdoutCases, meta.holdoutNegative, meta.holdoutPositive].every(value => Number.isSafeInteger(value) && value >= 0) || meta.holdoutNegative + meta.holdoutPositive > meta.holdoutCases) reasons.push('評価件数の申告が不正です');
+  if (counts.size < meta.regressionCases + meta.holdoutCases || [...counts.values()].some(count => count < meta.iterations)) reasons.push('申告した例数・反復数に対応する採点記録がありません');
   if (!meta.independentVerifier) reasons.push('独立した検証モデルを使っていません');
   if (meta.iterations < 3) reasons.push('反復が3回未満です');
   if (scored.some(item => item.forbiddenGeneration)) reasons.push('回帰セットで禁止生成があります');

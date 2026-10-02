@@ -11,6 +11,13 @@ const meta = (over: Partial<Parameters<typeof aggregate>[1]> = {}) => ({
 const item = (scored: ReturnType<typeof scoreCase>, mustNotCreate = false) => ({ expected: { ...expected, mustNotCreate }, scored });
 
 describe('N04 evaluation gate (offline scoring, no model calls)', () => {
+  it('missing quotes, duplicate creates and inflated case/iteration declarations cannot pass', () => {
+    for (const evidence of [[], [{ spanId: 's:0', quote: ' ' }]]) expect(scoreCase('missing', expected, { changes: [{ action: 'create', evidence }] }, spans).fabricatedSource).toBe(true);
+    expect(scoreCase('duplicate', expected, { changes: [...good!.changes, ...good!.changes] }, spans).actionMatch).toBe(false);
+    const result = aggregate([item(scoreCase('one', expected, good, spans))], meta({ holdoutCases: 200 }));
+    expect(result.gate.pass).toBe(false);
+    expect(result.gate.reasons).toContain('申告した例数・反復数に対応する採点記録がありません');
+  });
   it('an oracle model meets the regression metrics but fails the gate without a blind holdout', () => {
     const scored = [scoreCase('DET-001', expected, good, spans)];
     expect(scored[0]).toMatchObject({ empty: false, forbiddenGeneration: false, fabricatedSource: false, actionMatch: true });
