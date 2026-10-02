@@ -71,11 +71,11 @@ function validReceipt(value:unknown):value is FileBridgeApplicationReceipt {
   return Object.keys(item).length===keys.length&&keys.every(key=>Object.hasOwn(item,key))&&item.version===1&&uuid(item.commandId)&&typeof item.ownerId==='string'&&Boolean(item.ownerId.trim())&&item.ownerId.length<=200&&uuid(item.datasetId)&&uuid(item.clientId)&&fileBridgeDigest(item.fileDigest)&&fileBridgeDigest(item.applicationDigest)&&['policyEpoch','sourcePermissionRevision','registrationRevision','grantEpoch'].every(key=>Number.isSafeInteger(item[key])&&Number(item[key])>=(['registrationRevision','grantEpoch'].includes(key)?1:0))&&Array.isArray(item.taskIds)&&item.taskIds.length===1&&uuid(item.taskIds[0])&&fileBridgeTimestamp(item.appliedAt)
 }
 /** Main's designated renderer queries this persisted fact. It cannot create an approval. */
-export async function readFileBridgeApplicationReceipt(commandId:string):Promise<FileBridgeApplicationReceipt|null> {
+export async function readFileBridgeApplicationReceipt(commandId:string,clientId?:string):Promise<FileBridgeApplicationReceipt|null> {
   if(!/^[a-f0-9-]{36}$/i.test(commandId))return null
-  const stored=await db.commands.get(fileBridgeReceiptKey(commandId))
+  const stored=await db.commands.get(fileBridgeReceiptKey(commandId,clientId)) ?? await db.commands.get(fileBridgeReceiptKey(commandId))
   if(!stored)return null
-  try{const receipt:unknown=JSON.parse(stored.resultId),current=await settings();if(!validReceipt(receipt)||receipt.commandId!==commandId||stored.hash!==receipt.applicationDigest||stored.at!==receipt.appliedAt||receipt.ownerId!==current.profileId||receipt.datasetId!==current.datasetId)return null;return receipt}catch{return null}
+  try{const receipt:unknown=JSON.parse(stored.resultId),current=await settings();if(!validReceipt(receipt)||receipt.commandId!==commandId||clientId!==undefined&&receipt.clientId!==clientId||stored.hash!==receipt.applicationDigest||stored.at!==receipt.appliedAt||receipt.ownerId!==current.profileId||receipt.datasetId!==current.datasetId)return null;return receipt}catch{return null}
 }
 
 const applicationTables=()=>[db.tasks,db.assessments,db.commands,db.audits,db.containers,db.settings,db.labelGroups,db.labelDefinitions,db.tripBundles,db.completions,db.checklistItems,db.calendarRules,db.calendarEvents,db.sessions,db.contextSources,db.contextSnapshots,db.sourceArtifacts]
@@ -85,7 +85,7 @@ export function createFileBridgeController(gateway:FileBridgeGateway) {
   let currentStatus:FileBridgeStatus|null=null,lastEgress:{withheldQuotes:number;notesWithheld:number}|null=null
   /** Dropped reviews cancel their unapproved bus commands so S21 never lists them; applied commands are already settled. */
   async function dropPrepared(){const dropped=[...preparedRegistry.values()];preparedRegistry.clear();for(const value of dropped)if(isPendingCommand(value.command))await cancelCommand(value.command)}
-  function clear(){void dropPrepared();entries.clear();leases.clear();noteReceivedCommands('external',[])}
+  function clear(){void dropPrepared();entries.clear();leases.clear();noteReceivedCommands('external',[],currentStatus?.registration?.client.id)}
   async function adoptStatus(raw:FileBridgeStatus):Promise<FileBridgeStatus> {
     assertFileBridgeStatus(raw)
     const status=freeze(structuredClone(raw)),current=await settings(),registration=status.registration
@@ -96,7 +96,7 @@ export function createFileBridgeController(gateway:FileBridgeGateway) {
     await db.transaction('rw',db.settings,db.commands,async()=>{
       const value=await settings()
       if(value.profileId!==current.profileId||value.datasetId!==current.datasetId)rejectFileBridge('OWNER_CHANGED')
-      const key=fileBridgeScopeKey(value.profileId,value.datasetId),previous=await db.commands.get(key)
+      const key=fileBridgeScopeKey(value.profileId,value.datasetId,registration?.client.id??currentStatus?.registration?.client.id),previous=await db.commands.get(key)
       if(previous&&registration){try{const old=JSON.parse(previous.resultId).registration as FileBridgeRegistration|null;if(old?.client.id===registration.client.id&&(old.client.revision>registration.client.revision||old.client.grant_epoch>registration.client.grant_epoch))rejectFileBridge('REGISTRATION_ROLLBACK')}catch(error){if(error instanceof Error&&'code'in error)throw error}}
       const external=externalAIFor(value), clients=external.clients.filter(client=>client.registration.client.id!==registration?.client.id).map(client=>!registration&&client.registration.client.id===currentStatus?.registration?.client.id?{...client,status:'revoked' as const}:client)
       if(registration)clients.push({registration:structuredClone(registration),status:'active',capabilityChecks:external.clients.find(client=>client.registration.client.id===registration.client.id)?.capabilityChecks??[],shippingState:'implemented'})
@@ -109,7 +109,7 @@ export function createFileBridgeController(gateway:FileBridgeGateway) {
   }
   async function assertCurrent(prepared:PreparedFileBridgeApplication) {
     assertSettings(prepared.registration,await settings())
-    const scope=await db.commands.get(fileBridgeScopeKey(prepared.registration.owner_id,prepared.registration.dataset_id))
+    const scope=await db.commands.get(fileBridgeScopeKey(prepared.registration.owner_id,prepared.registration.dataset_id,prepared.registration.client.id))
     if(!scope||scope.hash!==await Dexie.waitFor(contentDigest({version:1,registration:prepared.registration})))rejectFileBridge('AUTHORITY_CHANGED')
     if(Date.parse(prepared.entry.prepared.expiresAt)<=Date.now())rejectFileBridge('EXPIRED')
     if(preparedRegistry.get(prepared.id)!==prepared)rejectFileBridge('UNVERIFIED_COMMAND')
@@ -151,7 +151,7 @@ export function createFileBridgeController(gateway:FileBridgeGateway) {
   }
   async function notify(prepared:PreparedFileBridgeApplication,receipt:FileBridgeApplicationReceipt,lease:FileBridgeLease):Promise<FileBridgeApplicationOutcome> {
     try{
-      const persisted=await readFileBridgeApplicationReceipt(receipt.commandId)
+      const persisted=await readFileBridgeApplicationReceipt(receipt.commandId,prepared.registration.client.id)
       if(!persisted||canonicalJSON(persisted)!==canonicalJSON(receipt))rejectFileBridge('RECEIPT_MISSING')
       const result=await gateway.recordApplied({leaseId:lease.leaseId,reference:prepared.reference,receipt})
       assertFileBridgeResult(result)
@@ -160,7 +160,7 @@ export function createFileBridgeController(gateway:FileBridgeGateway) {
     }catch{return {receipt,result:null,resultPending:true}}
   }
   async function priorOutcome(prepared:PreparedFileBridgeApplication):Promise<FileBridgeApplicationOutcome|null> {
-    const prior=await readFileBridgeApplicationReceipt(prepared.entry.prepared.command.command_id)
+    const prior=await readFileBridgeApplicationReceipt(prepared.entry.prepared.command.command_id,prepared.registration.client.id)
     if(!prior)return null
     if(prior.applicationDigest!==prepared.digest)rejectFileBridge('IDEMPOTENCY_MISMATCH')
     const existingLease=leases.get(prepared.id)
@@ -179,7 +179,7 @@ export function createFileBridgeController(gateway:FileBridgeGateway) {
       receipt=await db.transaction('rw',applicationTables(),async()=>{
         await verifyPrepared(prepared);await assertCurrent(prepared)
         if(Date.parse(lease.expiresAt)<=Date.now())rejectFileBridge('EXPIRED')
-        const command=prepared.entry.prepared.command,key=fileBridgeReceiptKey(command.command_id),existing=await db.commands.get(key)
+        const command=prepared.entry.prepared.command,key=fileBridgeReceiptKey(command.command_id,prepared.registration.client.id),existing=await db.commands.get(key)
         if(existing){const previous=JSON.parse(existing.resultId) as FileBridgeApplicationReceipt;if(!validReceipt(previous)||existing.hash!==prepared.digest||previous.applicationDigest!==prepared.digest||previous.fileDigest!==prepared.entry.prepared.digest)rejectFileBridge('IDEMPOTENCY_MISMATCH');return previous}
         const today=new Date().toISOString().slice(0,10),receipts=await db.commands.toArray()
         const count=receipts.filter(item=>item.key.startsWith('filebridge:applied:')&&item.at.slice(0,10)===today).reduce((sum,item)=>{try{const stored=JSON.parse(item.resultId);return sum+(validReceipt(stored)&&stored.clientId===reg.client.id&&stored.ownerId===reg.owner_id&&stored.datasetId===reg.dataset_id?1:0)}catch{return sum}},0)
@@ -208,6 +208,7 @@ export function createFileBridgeController(gateway:FileBridgeGateway) {
     clearAuthority:clear,
     lastEgress:()=>lastEgress,
     refresh:async()=>adoptStatus(await gateway.status()),
+    selectClient:async(clientId:string)=>{if(!gateway.selectClient)rejectFileBridge('UNSUPPORTED_OPERATION');return adoptStatus(await gateway.selectClient({clientId}))},
     async configure(request:Pick<FileBridgeConfigure,'intendedHost'|'taskIds'|'fields'|'lifetimeHours'|'allowSplit'|'ruleIds'>&{automation?:FileBridgeConfigure['automation']},event:Event) {
       trustedClick(event)
       const current=await settings(),policy=changePolicyFor(current)
@@ -251,7 +252,7 @@ export function createFileBridgeController(gateway:FileBridgeGateway) {
         if(value.command.type==='routine.change'&&!reg.rule_ids?.includes(value.command.target_id!))rejectFileBridge('TASK_SCOPE')
         entries.set(entry.reference,entry)
       }}
-      noteReceivedCommands('external',[...entries.values()].map(entry=>{const command=entry.prepared.command;return {commandId:command.command_id,entrance:entranceOf(command),type:command.type,targetId:command.target_id,expectedRevision:command.expected_revision,principalId:entry.prepared.principal.id,host:status.registration?.client.intended_host??null,fields:Object.keys(command.payload),expiresAt:command.expires_at}}))
+      noteReceivedCommands('external',[...entries.values()].map(entry=>{const command=entry.prepared.command;return {commandId:command.command_id,entrance:entranceOf(command),type:command.type,targetId:command.target_id,expectedRevision:command.expected_revision,principalId:entry.prepared.principal.id,host:status.registration?.client.intended_host??null,fields:Object.keys(command.payload),expiresAt:command.expires_at}}),status.registration?.client.id)
       return {status,entries:freeze(structuredClone(scanned.entries))}
     },
     async prepare(reference:string):Promise<PreparedFileBridgeApplication> {
@@ -318,7 +319,7 @@ export function createFileBridgeController(gateway:FileBridgeGateway) {
     },
     async retryResultFromUI(prepared:PreparedFileBridgeApplication,event:Event):Promise<FileBridgeApplicationOutcome> {
       trustedClick(event);await verifyPrepared(prepared)
-      const receipt=await readFileBridgeApplicationReceipt(prepared.entry.prepared.command.command_id),lease=leases.get(prepared.id)
+      const receipt=await readFileBridgeApplicationReceipt(prepared.entry.prepared.command.command_id,prepared.registration.client.id),lease=leases.get(prepared.id)
       if(!receipt||!lease||receipt.applicationDigest!==prepared.digest)rejectFileBridge('RECEIPT_MISSING')
       return notify(prepared,receipt,lease)
     }

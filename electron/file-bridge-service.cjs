@@ -8,7 +8,7 @@ const digest = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value
 const exact = (value, keys) => value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key))
 function fail(code) { const error = new Error(code); error.code = code; throw error }
 const policy = settings => settings.changePolicy ?? { epoch: 0, sourcePermissionRevision: 0, aiChangesEnabled: true }
-const receiptKey = id => `filebridge:applied:${id}`
+const receiptKey = (id,clientId) => `filebridge:applied:${clientId}:${id}`
 function redactedNotes(stored, wanted) {
   if (typeof stored !== 'string' || typeof wanted !== 'string' || wanted.length > stored.length) return null
   if (wanted === stored || wanted === '') return wanted
@@ -36,8 +36,9 @@ async function createFileBridgeService({ agentDirectory, journalDirectory, signi
     const settings = await getSettings(), current = policy(settings)
     return { ownerId: settings.profileId, datasetId: settings.datasetId, clientId: registration.client.id, policyEpoch: current.epoch, sourcePermissionRevision: current.sourcePermissionRevision, registrationRevision: registration.client.revision, grantEpoch: registration.client.grant_epoch, enabled: Boolean(connection?.registration.client.id === registration.client.id && settings.externalAI?.version === 1 && settings.externalAI.enabled === true && current.aiChangesEnabled) }
   }
+  async function lookupReceipt(id,clientId) { return await getReceipt(receiptKey(id,clientId)) ?? await getReceipt(`filebridge:applied:${id}`) }
   function receiptFor(lease, stored) {
-    if (!stored || stored.key !== receiptKey(lease.prepared.command.command_id) || stored.hash !== lease.binding.applicationDigest || typeof stored.resultId !== 'string') return null
+    if (!stored || (stored.key !== receiptKey(lease.prepared.command.command_id,lease.registration.client.id) && stored.key !== `filebridge:applied:${lease.prepared.command.command_id}`) || stored.hash !== lease.binding.applicationDigest || typeof stored.resultId !== 'string') return null
     let value; try { value = JSON.parse(stored.resultId) } catch { return null }
     const keys = ['version', 'commandId', 'fileDigest', 'applicationDigest', 'ownerId', 'datasetId', 'clientId', 'policyEpoch', 'sourcePermissionRevision', 'registrationRevision', 'grantEpoch', 'taskIds', 'appliedAt']
     const reg = lease.registration, prepared = lease.prepared
@@ -45,7 +46,7 @@ async function createFileBridgeService({ agentDirectory, journalDirectory, signi
     return { application: value, file: { commandId: value.commandId, digest: value.fileDigest, taskIds: value.taskIds, appliedAt: value.appliedAt } }
   }
   async function recover(registration, prepared) {
-    const stored = await getReceipt(receiptKey(prepared.command.command_id))
+    const stored = await lookupReceipt(prepared.command.command_id,registration.client.id)
     if (!stored || typeof stored.resultId !== 'string') return null
     let value; try { value = JSON.parse(stored.resultId) } catch { return null }
     return receiptFor({ registration, prepared, binding: { applicationDigest: value.applicationDigest } }, stored)?.file ?? null
@@ -157,7 +158,7 @@ async function createFileBridgeService({ agentDirectory, journalDirectory, signi
       if (shift > grant.automation.max_schedule_shift_days) fail('AUTO_SCHEDULE_BOUND')
     }
     const settings = await getSettings(), p = policy(settings)
-    if (!settings.aiEnabled || !p.aiChangesEnabled || p.epoch !== entry.registration.policy_epoch || !n09Automatic(p, fields, shift)) fail('AUTOMATION_NOT_GRANTED')
+    if (settings.externalAI?.version !== 1 || !settings.externalAI.enabled || !p.aiChangesEnabled || p.epoch !== entry.registration.policy_epoch || !n09Automatic(p, fields, shift)) fail('AUTOMATION_NOT_GRANTED')
     return issueLease(binding, true)
   }
   async function issueLease(binding, automatic) {
@@ -182,7 +183,7 @@ async function createFileBridgeService({ agentDirectory, journalDirectory, signi
     if (!exact(request, ['leaseId', 'reference', 'receipt'])) fail('LEASE_INVALID')
     const lease = leases.get(request.leaseId)
     if (!lease || lease.binding.reference !== request.reference) fail('LEASE_INVALID')
-    const actual = receiptFor(lease, await getReceipt(receiptKey(lease.prepared.command.command_id)))
+    const actual = receiptFor(lease, await lookupReceipt(lease.prepared.command.command_id,lease.registration.client.id))
     if (!actual || canonicalFileJSON(actual.application) !== canonicalFileJSON(request.receipt)) fail('RECEIPT_INVALID')
     lease.committed.resolve(actual.file)
     return lease.work
@@ -190,7 +191,7 @@ async function createFileBridgeService({ agentDirectory, journalDirectory, signi
   async function cancelApplication(request) {
     if (!(exact(request, ['leaseId', 'reference']) || exact(request, ['leaseId', 'reference', 'outcome']) && rejection(request.outcome))) fail('LEASE_INVALID')
     const lease = leases.get(request.leaseId); if (!lease || lease.binding.reference !== request.reference) fail('LEASE_INVALID')
-    const actual = receiptFor(lease, await getReceipt(receiptKey(lease.prepared.command.command_id)))
+    const actual = receiptFor(lease, await lookupReceipt(lease.prepared.command.command_id,lease.registration.client.id))
     // A stated rejection is signed only while the DB holds no receipt for this command.
     if (actual) lease.committed.resolve(actual.file); else lease.committed.reject(Object.assign(new Error('APPLICATION_CANCELLED'), request.outcome ? { outcome: { ...request.outcome } } : {}))
     return lease.work
@@ -210,7 +211,7 @@ async function createFileBridgeService({ agentDirectory, journalDirectory, signi
     active?.bridge.clearAuthorities(); entries.clear()
     for (const lease of leases.values()) if (!lease.settled) {
       try {
-        const actual = receiptFor(lease, await getReceipt(receiptKey(lease.prepared.command.command_id)))
+        const actual = receiptFor(lease, await lookupReceipt(lease.prepared.command.command_id,lease.registration.client.id))
         if (actual) lease.committed.resolve(actual.file); else lease.committed.reject(new Error('AUTHORITY_CHANGED'))
       } catch (error) { lease.committed.reject(new Error('RECEIPT_UNAVAILABLE')); errors.push(error) }
     }

@@ -26,7 +26,7 @@ async function fixture(type:'task.update'|'task.create'='task.update',options:{a
   let digest=await contentDigest({command,owner_id:registration.owner_id,dataset_id:registration.dataset_id,client_id:registration.client.id,policy_epoch:policy.epoch,source_permission_revision:policy.sourcePermissionRevision,registration_revision:1,grant_epoch:1})
   const reference=crypto.randomUUID(),entry:Extract<FileBridgeInboxEntry,{state:'awaiting_approval'}>={state:'awaiting_approval',filename:`${command.command_id}.ready.json`,reference,prepared:{state:'awaiting_approval',command,digest,principal:{id:registration.client.id,kind:'external-agent'},ownerId:registration.owner_id,datasetId:registration.dataset_id,policyEpoch:policy.epoch,sourcePermissionRevision:policy.sourcePermissionRevision,snapshotId:command.snapshot_id,expectedRevision:command.expected_revision,expiresAt:command.expires_at}}
   const gateway:FileBridgeGateway={status:vi.fn(async()=>structuredClone(status)),configure:vi.fn(async()=>structuredClone(status)),disconnect:vi.fn(async()=>({...structuredClone(status),connected:false,root:null,registration:null,snapshot:null})),exportSnapshot:vi.fn(async()=>structuredClone(status)),scanInbox:vi.fn(async()=>({status:structuredClone(status),entries:[structuredClone(entry)]})),authorizeApplication:vi.fn(async(request:FileBridgeApplicationBinding):Promise<FileBridgeLease>=>({...request,version:1,leaseId:crypto.randomUUID(),clientId:registration.client.id,registrationRevision:1,grantEpoch:1,expiresAt:future(60000),automatic:false})),authorizeAutomaticApplication:vi.fn(async(request:FileBridgeApplicationBinding):Promise<FileBridgeLease>=>({...request,version:1,leaseId:crypto.randomUUID(),clientId:registration.client.id,registrationRevision:1,grantEpoch:1,expiresAt:future(60000),automatic:true})),recordApplied:vi.fn(async({receipt}:Parameters<FileBridgeGateway['recordApplied']>[0]):Promise<FileBridgeResult>=>{
-    const stored=await readFileBridgeApplicationReceipt(receipt.commandId);if(!stored||JSON.stringify(stored)!==JSON.stringify(receipt))throw new Error('unpersisted receipt')
+    const stored=await readFileBridgeApplicationReceipt(receipt.commandId,receipt.clientId);if(!stored||JSON.stringify(stored)!==JSON.stringify(receipt))throw new Error('unpersisted receipt')
     return {schema_version:'1',command_id:receipt.commandId,digest:receipt.fileDigest,owner_id:receipt.ownerId,dataset_id:receipt.datasetId,client_id:receipt.clientId,state:'applied',receipt:{commandId:receipt.commandId,digest:receipt.fileDigest,taskIds:receipt.taskIds,appliedAt:receipt.appliedAt},finished_at:new Date().toISOString()}
   }),cancelApplication:vi.fn(async()=>{}),invalidate:vi.fn(async()=>{})}
   const controller=createFileBridgeController(gateway)
@@ -43,7 +43,7 @@ describe('registered external file commands require native owner approval',()=>{
     expect(result.resultPending).toBe(false);expect(result.result?.state).toBe('applied')
     expect(await db.tasks.get(f.taskId)).toMatchObject({notes:'外部から提案されたメモ',scheduledDate:'2026-10-02',dueDate:'2026-10-09',score:{mode:'manual',manualPoints:25},effectivePoints:25,revision:2,status:'open'})
     expect(await db.assessments.count()).toBe(1);expect(await db.ledger.count()).toBe(0)
-    expect(await readFileBridgeApplicationReceipt(f.command.command_id)).toEqual(result.receipt)
+    expect(await readFileBridgeApplicationReceipt(f.command.command_id,f.registration.client.id)).toEqual(result.receipt)
     expect((await db.audits.toArray()).filter(item=>item.operation==='filebridge.approved')).toHaveLength(1)
     expect((await f.controller.applyFromUI(prepared,click())).receipt).toEqual(result.receipt)
     expect((await db.tasks.get(f.taskId))?.revision).toBe(2)
@@ -56,7 +56,7 @@ describe('registered external file commands require native owner approval',()=>{
     const second=await f.controller.prepare(f.reference)
     expect((await f.controller.applyFromUI(second,click())).result?.state).toBe('applied')
     expect(pendingCommands().filter(item=>item.envelope.command_id===f.command.command_id)).toHaveLength(0)
-    expect((await db.tasks.get(f.taskId))?.revision).toBe(2);expect(await readFileBridgeApplicationReceipt(f.command.command_id)).not.toBeNull()
+    expect((await db.tasks.get(f.taskId))?.revision).toBe(2);expect(await readFileBridgeApplicationReceipt(f.command.command_id,f.registration.client.id)).not.toBeNull()
   })
   it('creates through N02 with unknown score and deadline, without interpreting title or note points',async()=>{
     const f=await fixture('task.create'),prepared=await f.controller.prepare(f.reference)
@@ -93,11 +93,11 @@ describe('registered external file commands require native owner approval',()=>{
     f.gateway.authorizeApplication=vi.fn(async input=>{const lease=await authorize(input);await db.settings.update('main',{externalAI:{version:1,enabled:false,epoch:1,clients:[]}});return lease})
     await expect(f.controller.applyFromUI(prepared,click())).rejects.toMatchObject({code:'AUTHORITY_CHANGED'})
     expect(f.gateway.cancelApplication).toHaveBeenCalledOnce();expect(f.gateway.recordApplied).not.toHaveBeenCalled()
-    expect((await db.tasks.get(f.taskId))?.revision).toBe(1);expect(await db.commands.get(fileBridgeReceiptKey(f.command.command_id))).toBeUndefined()
+    expect((await db.tasks.get(f.taskId))?.revision).toBe(1);expect(await db.commands.get(fileBridgeReceiptKey(f.command.command_id,f.registration.client.id))).toBeUndefined()
   })
   it('rolls back task and nested ChangeSet receipts when the outer file receipt cannot be saved',async()=>{
     const f=await fixture(),prepared=await f.controller.prepare(f.reference),add=db.commands.add.bind(db.commands)
-    vi.spyOn(db.commands,'add').mockImplementation((item,...args)=>item.key===fileBridgeReceiptKey(f.command.command_id)?Dexie.Promise.reject(new Error('synthetic outer receipt failure')):add(item,...args))
+    vi.spyOn(db.commands,'add').mockImplementation((item,...args)=>item.key===fileBridgeReceiptKey(f.command.command_id,f.registration.client.id)?Dexie.Promise.reject(new Error('synthetic outer receipt failure')):add(item,...args))
     await expect(f.controller.applyFromUI(prepared,click())).rejects.toThrow('synthetic outer receipt failure')
     expect(await db.tasks.get(f.taskId)).toMatchObject({notes:'元のメモ',revision:1,score:{manualPoints:25}})
     expect((await db.commands.toArray()).filter(item=>item.key.startsWith('changeset:')||item.key.startsWith('filebridge:applied:'))).toHaveLength(0)
@@ -106,7 +106,7 @@ describe('registered external file commands require native owner approval',()=>{
   })
   it('rolls back N02 task and assessment when the file receipt fails',async()=>{
     const f=await fixture('task.create'),prepared=await f.controller.prepare(f.reference),add=db.commands.add.bind(db.commands)
-    vi.spyOn(db.commands,'add').mockImplementation((item,...args)=>item.key===fileBridgeReceiptKey(f.command.command_id)?Dexie.Promise.reject(new Error('synthetic create receipt failure')):add(item,...args))
+    vi.spyOn(db.commands,'add').mockImplementation((item,...args)=>item.key===fileBridgeReceiptKey(f.command.command_id,f.registration.client.id)?Dexie.Promise.reject(new Error('synthetic create receipt failure')):add(item,...args))
     await expect(f.controller.applyFromUI(prepared,click())).rejects.toThrow('synthetic create receipt failure')
     expect(await db.tasks.count()).toBe(1);expect(await db.assessments.count()).toBe(1)
     expect((await db.commands.toArray()).some(item=>item.key.startsWith('assist:'))).toBe(false)
@@ -116,7 +116,7 @@ describe('registered external file commands require native owner approval',()=>{
     const f=await fixture(),prepared=await f.controller.prepare(f.reference),record=f.gateway.recordApplied
     f.gateway.recordApplied=vi.fn(async()=>{throw new Error('synthetic result file unavailable')})
     const first=await f.controller.applyFromUI(prepared,click())
-    expect(first.resultPending).toBe(true);expect(await readFileBridgeApplicationReceipt(f.command.command_id)).toEqual(first.receipt)
+    expect(first.resultPending).toBe(true);expect(await readFileBridgeApplicationReceipt(f.command.command_id,f.registration.client.id)).toEqual(first.receipt)
     f.gateway.recordApplied=record
     const retried=await f.controller.retryResultFromUI(prepared,click())
     expect(retried.resultPending).toBe(false);expect((await db.tasks.get(f.taskId))?.revision).toBe(2)
@@ -144,14 +144,14 @@ describe('registered external file commands require native owner approval',()=>{
   it('atomically enforces a daily DB quota and invalidates an old proposal on trusted scope revocation',async()=>{
     const f=await fixture('task.create');f.registration.client.grant.max_operations_per_day=1;await f.rescan();const prepared=await f.controller.prepare(f.reference)
     const fakeId=crypto.randomUUID(),fakeReceipt={version:1,commandId:fakeId,fileDigest:'b'.repeat(64),applicationDigest:'c'.repeat(64),ownerId:f.settings.profileId,datasetId:f.settings.datasetId,clientId:f.registration.client.id,policyEpoch:0,sourcePermissionRevision:0,registrationRevision:1,grantEpoch:1,taskIds:[f.taskId],appliedAt:new Date().toISOString()}
-    await db.commands.add({key:fileBridgeReceiptKey(fakeId),hash:fakeReceipt.applicationDigest,resultId:JSON.stringify(fakeReceipt),at:fakeReceipt.appliedAt})
+    await db.commands.add({key:fileBridgeReceiptKey(fakeId,f.registration.client.id),hash:fakeReceipt.applicationDigest,resultId:JSON.stringify(fakeReceipt),at:fakeReceipt.appliedAt})
     await expect(f.controller.applyFromUI(prepared,click())).rejects.toMatchObject({code:'DAILY_BOUND'})
     expect(await db.tasks.count()).toBe(1);expect(f.gateway.cancelApplication).toHaveBeenCalledOnce()
     // K12: the denial is signed as a terminal result, so the same proposal cannot be retried.
     expect(f.gateway.cancelApplication).toHaveBeenCalledWith(expect.objectContaining({outcome:{state:'denied',code:'DAILY_BOUND'}}))
     await expect(f.controller.applyFromUI(prepared,click())).rejects.toMatchObject({code:'UNVERIFIED_COMMAND'})
     const g=await fixture('task.create'),next=await g.controller.prepare(g.reference)
-    await db.commands.delete(fileBridgeScopeKey(g.settings.profileId,g.settings.datasetId))
+    await db.commands.delete(fileBridgeScopeKey(g.settings.profileId,g.settings.datasetId,g.registration.client.id))
     await expect(g.controller.applyFromUI(next,click())).rejects.toMatchObject({code:'AUTHORITY_CHANGED'})
   })
   it('does not export score, deadlines, ledger or unrelated tasks into the IPC snapshot input',async()=>{
@@ -169,8 +169,8 @@ describe('registered external file commands require native owner approval',()=>{
     f.registration.client.revision=1;f.registration.client.grant_epoch=1;f.status.snapshot!.registration_revision=1;f.status.snapshot!.grant_epoch=1;f.status.snapshot!.registration_sha256=await contentDigest(f.registration)
     await expect(f.controller.refresh()).rejects.toMatchObject({code:'REGISTRATION_ROLLBACK'})
     expect((await db.tasks.get(f.taskId))?.revision).toBe(1)
-    await db.commands.put({key:fileBridgeReceiptKey(f.command.command_id),hash:'a'.repeat(64),resultId:JSON.stringify({approved:true,commandId:f.command.command_id}),at:new Date().toISOString()})
-    expect(await readFileBridgeApplicationReceipt(f.command.command_id)).toBeNull()
+    await db.commands.put({key:fileBridgeReceiptKey(f.command.command_id,f.registration.client.id),hash:'a'.repeat(64),resultId:JSON.stringify({approved:true,commandId:f.command.command_id}),at:new Date().toISOString()})
+    expect(await readFileBridgeApplicationReceipt(f.command.command_id,f.registration.client.id)).toBeNull()
   })
   it('rejects self approval/protected JSON and stale or mismatched status values strictly',async()=>{
     const f=await fixture()

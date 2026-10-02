@@ -14,7 +14,7 @@ import { createFileBridgeController, type FileBridgeController } from './file-br
 import type { FileBridgeField, FileBridgeGateway, FileBridgeStatus } from './file-bridge-types'
 
 const require = createRequire(import.meta.url)
-const { createFileBridgeService } = require('../electron/file-bridge-service.cjs') as { createFileBridgeService: (options: Record<string, unknown>) => Promise<Record<string, (...args: unknown[]) => Promise<unknown>>> }
+const { createFileBridgeHub } = require('../electron/file-bridge-hub.cjs') as { createFileBridgeHub: (options: Record<string, unknown>) => Promise<Record<string, (...args: unknown[]) => Promise<unknown>>> }
 const { createMCPFileClient, createMCPRouter } = require('../electron/mcp-file-client.cjs') as { createMCPFileClient: (root: string) => Promise<unknown>; createMCPRouter: (client: unknown) => (message: unknown) => Promise<{ result?: { isError?: boolean; content: { text: string }[]; structuredContent?: Record<string, unknown> } } | null> }
 
 /** Node has no trusted events; this stands in for the preload-verified native click. */
@@ -32,7 +32,7 @@ export async function bridgeHarness(options: { taskIds: string[]; fields: FileBr
   const root = await mkdtemp(join(await realpath(tmpdir()), 'michi-k12-'))
   const nonces = new Map<string, { kind: string; reference: string }>(); let configuration: unknown = null
   const proof = (kind: string, reference = '') => { const nonce = randomUUID(); nonces.set(nonce, { kind, reference }); return nonce }
-  const service = await createFileBridgeService({
+  const service = await createFileBridgeHub({
     agentDirectory: join(root, 'agents'), journalDirectory: join(root, 'private'), signingKey: randomBytes(32),
     getSettings: async () => clone(await db.settings.get('main')), getTasks: async (ids: string[]) => clone((await db.tasks.bulkGet(ids)).filter(Boolean)), getReceipt: async (key: string) => clone(await db.commands.get(key)),
     getRules: async (ids: string[]) => ((await db.calendarRules.get('main'))?.rules ?? []).filter(rule => ids.includes(rule.id)).map(rule => ({ id: rule.id, revision: rule.revision })),
@@ -41,7 +41,7 @@ export async function bridgeHarness(options: { taskIds: string[]; fields: FileBr
   })
   const call = async <T>(method: string, ...args: unknown[]) => clone(await service[method](...args.map(clone))) as T
   const gateway: FileBridgeGateway = {
-    status: () => call('status'), configure: request => call('configure', request, proof('configure')), disconnect: request => call('disconnect', request, proof('disconnect', request.clientId)),
+    status: () => call('status'), selectClient: request => call('selectClient',request), listConnections:()=>call('listConnections'), configure: request => call('configure', request, proof('configure')), disconnect: request => call('disconnect', request, proof('disconnect', request.clientId)),
     exportSnapshot: request => call('exportSnapshot', request), scanInbox: () => call('scanInbox'),
     authorizeApplication: binding => call('authorizeApplication', binding, proof('approve', binding.reference)), authorizeAutomaticApplication: binding => call('authorizeAutomaticApplication', binding),
     recordApplied: request => call('recordApplied', request), cancelApplication: request => call('cancelApplication', request), recordRejected: request => call('recordRejected', request), invalidate: () => call('invalidate'),

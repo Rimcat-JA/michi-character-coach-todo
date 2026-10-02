@@ -240,12 +240,12 @@ function verifyPrepared(prepared: PreparedCommand) {
 /** Scanned-but-unopened external commands, listed in S21 as received. */
 export type ReceivedCommand = Readonly<{ commandId: string; entrance: CommandEntrance; type: string; targetId: string | null; expectedRevision: number | null; principalId: string; host: string | null; fields: string[]; expiresAt: string }>
 const received = new Map<string, ReceivedCommand>()
-export function noteReceivedCommands(entrance: 'file' | 'mcp' | 'api' | 'external', values: ReceivedCommand[]) {
-  for (const [key, value] of received) if (entrance === 'external' ? value.entrance === 'file' || value.entrance === 'mcp' : value.entrance === entrance) received.delete(key)
-  for (const value of values) received.set(value.commandId, freeze(structuredClone(value)))
+export function noteReceivedCommands(entrance: 'file' | 'mcp' | 'api' | 'external', values: ReceivedCommand[], clientId?: string) {
+  for (const [key, value] of received) if ((!clientId || value.principalId===clientId) && (entrance === 'external' ? value.entrance === 'file' || value.entrance === 'mcp' : value.entrance === entrance)) received.delete(key)
+  for (const value of values) received.set(`${value.principalId}:${value.commandId}`, freeze(structuredClone(value)))
   changed()
 }
-export function receivedCommands(): ReceivedCommand[] { return [...received.values()].filter(value => Date.parse(value.expiresAt) > Date.now() && ![...pending.values()].some(item => item.envelope.command_id === value.commandId)) }
+export function receivedCommands(): ReceivedCommand[] { return [...received.values()].filter(value => Date.parse(value.expiresAt) > Date.now() && ![...pending.values()].some(item => item.envelope.command_id === value.commandId && item.actor.principal.id === value.principalId)) }
 
 export async function prepareCommand(raw: CommandEnvelope, actor: ActorContext, options: { instruction?: unknown; reason?: string } = {}): Promise<CommandPreparation> {
   const commandId = record(raw) && id(raw.command_id) ? raw.command_id as string : null

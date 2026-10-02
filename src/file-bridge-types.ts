@@ -1,3 +1,4 @@
+import type { CapabilityCheck } from './external-authority'
 /** App-owned IPC values. Inbox JSON may describe a command, never authority or approval. */
 /** due_date and manual_points are owner-value fields: every request waits for the owner's in-app value confirmation. */
 export type FileBridgeField = 'title' | 'notes' | 'scheduled_date' | 'due_date' | 'manual_points'
@@ -62,6 +63,9 @@ export type FileBridgeSnapshotTask = { id: string; revision: number; title: stri
 export type FileBridgeSnapshotRule = { id: string; revision: number; title: string; trigger: FileBridgeTrigger }
 export interface FileBridgeGateway {
   mcpConfiguration?(): Promise<{mcpServers:{michi:{command:string;args:string[];env:{ELECTRON_RUN_AS_NODE:'1'}}}}>
+  selftest?(request:{clientId:string;mode:'read'|'revoke'}):Promise<{clientId:string;check:CapabilityCheck;code:string|null}>
+  selectClient?(request: {clientId:string}): Promise<FileBridgeStatus>
+  listConnections?(): Promise<FileBridgeStatus[]>
   status(): Promise<FileBridgeStatus>
   configure(request: FileBridgeConfigure): Promise<FileBridgeStatus>
   disconnect(request: { clientId: string }): Promise<FileBridgeStatus>
@@ -81,5 +85,5 @@ export interface FileBridgeGateway {
   invalidate(): Promise<void>
 }
 export type FileBridgeWindow = Window & { michiFileBridge?: FileBridgeGateway }
-export const fileBridgeReceiptKey = (commandId: string) => `filebridge:applied:${commandId}`
-export const fileBridgeScopeKey = (ownerId: string, datasetId: string) => `filebridge:scope:${ownerId}:${datasetId}`
+export const fileBridgeReceiptKey = (commandId: string, clientId?: string) => `filebridge:applied:${clientId?clientId+':':''}${commandId}`
+export const fileBridgeScopeKey = (ownerId: string, datasetId: string, clientId?: string) => `filebridge:scope:${ownerId}:${datasetId}${clientId?':'+clientId:''}`

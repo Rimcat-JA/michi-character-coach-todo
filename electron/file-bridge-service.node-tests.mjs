@@ -30,7 +30,7 @@ async function fixture(t, { getReceiptOverride, auto = null } = {}) {
   }
   function persist(value, binding, lease) {
     const receipt = { version: 1, commandId: value.command_id, fileDigest: binding.fileDigest, applicationDigest: binding.applicationDigest, ownerId: settings.profileId, datasetId: settings.datasetId, clientId: lease.clientId, policyEpoch: 1, sourcePermissionRevision: 1, registrationRevision: lease.registrationRevision, grantEpoch: lease.grantEpoch, taskIds: [task.id], appliedAt: new Date().toISOString() }
-    const key = `filebridge:applied:${value.command_id}`
+    const key = `filebridge:applied:${lease.clientId}:${value.command_id}`
     receipts.set(key, { key, hash: binding.applicationDigest, resultId: JSON.stringify(receipt), at: receipt.appliedAt }); return receipt
   }
   return { root, service, settings, task, status, config, native, command, persist, receipts, configuration: () => configuration }
@@ -116,6 +116,7 @@ test('receipt read failure still revokes the external copy and disables the save
 })
 test('an automatic lease needs main\'s own signed auto grant inside its bounds and quota', async t => {
   const f = await fixture(t, { auto: { maxScheduleShiftDays: 2, maxOperationsPerDay: 1 } })
+  f.settings.aiEnabled = false // BYOK is independent of external delegation.
   assert.equal(f.status.registration.client.grant.mutation_mode, 'auto_within_bounds')
   assert.deepEqual(f.status.registration.client.grant.automation, { max_schedule_shift_days: 2, max_operations_per_day: 1 })
   const far = await f.command({ scheduled_date: '2026-10-05' })
