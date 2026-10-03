@@ -1,4 +1,9 @@
 const { contextBridge, ipcRenderer } = require('electron')
+contextBridge.exposeInMainWorld('michiAppMCP', {
+  configuration: request => ipcRenderer.invoke('michi:app-mcp-configuration',request),
+  onRequest: callback => {const listener=(_event,value)=>callback(value);ipcRenderer.on('michi:app-mcp-request',listener);return ()=>ipcRenderer.removeListener('michi:app-mcp-request',listener)},
+  respond: value => ipcRenderer.send('michi:app-mcp-response',value)
+})
 let nativeWebhookProof = null
 window.addEventListener('click', event => {
   if (!event.isTrusted || !(event.target instanceof Element)) return
@@ -55,9 +60,9 @@ contextBridge.exposeInMainWorld('michiLocalAPI', {
 let nativeFileBridgeProof = null
 window.addEventListener('click', event => {
   if (!event.isTrusted || !(event.target instanceof Element)) return
-  const button = event.target.closest('button[data-file-bridge-configure],button[data-file-bridge-approve],button[data-file-bridge-disconnect]')
+  const button = event.target.closest('button[data-file-bridge-configure],button[data-file-bridge-approve],button[data-file-bridge-disconnect],button[data-file-bridge-revise]')
   if (!button || button.disabled) return
-  const kind = button.hasAttribute('data-file-bridge-configure') ? 'configure' : button.hasAttribute('data-file-bridge-approve') ? 'approve' : 'disconnect'
+  const kind = button.hasAttribute('data-file-bridge-configure') ? 'configure' : button.hasAttribute('data-file-bridge-approve') ? 'approve' : button.hasAttribute('data-file-bridge-revise')?'revise':'disconnect'
   const reference = kind === 'configure' ? '' : button.getAttribute(`data-file-bridge-${kind}`) ?? ''
   const proof = { nonce: crypto.randomUUID(), kind, reference }
   nativeFileBridgeProof = { ...proof, at: Date.now() }
@@ -71,8 +76,15 @@ function fileBridgeNativeCall(method, kind, reference, request) {
 contextBridge.exposeInMainWorld('michiFileBridge', {
   mcpConfiguration: () => ipcRenderer.invoke('michi:filebridge-mcpConfiguration'),
   status: () => ipcRenderer.invoke('michi:filebridge-status'),
+  clientStatus: request => ipcRenderer.invoke('michi:filebridge-clientStatus',request),
+  scanClientInbox: request => ipcRenderer.invoke('michi:filebridge-scanClientInbox',request),
+  listConnections: () => ipcRenderer.invoke('michi:filebridge-listConnections'),
+  selftest: request => ipcRenderer.invoke('michi:filebridge-selftest',request),
+  selectClient: request => ipcRenderer.invoke('michi:filebridge-selectClient',request),
   configure: request => fileBridgeNativeCall('configure', 'configure', '', request),
   disconnect: request => fileBridgeNativeCall('disconnect', 'disconnect', request?.clientId, request),
+  revise: request => {const proof=nativeFileBridgeProof;nativeFileBridgeProof=null;return ipcRenderer.invoke('michi:filebridge-revise',{request,proofNonce:proof?.kind==='revise'&&proof.reference===request?.clientId&&Date.now()-proof.at<=5000?proof.nonce:null})},
+  invalidateClient: request => ipcRenderer.invoke('michi:filebridge-invalidateClient',request),
   exportSnapshot: request => ipcRenderer.invoke('michi:filebridge-exportSnapshot', request),
   scanInbox: () => ipcRenderer.invoke('michi:filebridge-scanInbox'),
   authorizeApplication: request => fileBridgeNativeCall('authorizeApplication', 'approve', request?.reference, request),
@@ -82,6 +94,35 @@ contextBridge.exposeInMainWorld('michiFileBridge', {
   cancelApplication: request => ipcRenderer.invoke('michi:filebridge-cancelApplication', request),
   recordRejected: request => ipcRenderer.invoke('michi:filebridge-recordRejected', request),
   invalidate: () => ipcRenderer.invoke('michi:filebridge-invalidate')
+})
+
+let nativeOAuthProof = null
+window.addEventListener('click', event => {
+  if (!event.isTrusted || !(event.target instanceof Element)) return
+  const button = event.target.closest('button[data-oauth-enable],button[data-oauth-register],button[data-oauth-allow],button[data-oauth-deny]')
+  if (!button || button.disabled) return
+  const kind = button.hasAttribute('data-oauth-enable') ? 'oauth-enable' : button.hasAttribute('data-oauth-register') ? 'oauth-register' : 'oauth-consent'
+  const reference = button.hasAttribute('data-oauth-enable') ? '' : button.getAttribute('data-oauth-register') ?? button.getAttribute('data-oauth-allow') ?? button.getAttribute('data-oauth-deny') ?? ''
+  const proof = { nonce: crypto.randomUUID(), kind, reference }
+  nativeOAuthProof = { ...proof, at: Date.now() }
+  ipcRenderer.send('michi:oauth-native-proof', proof)
+}, true)
+function oauthNativeCall(method, kind, reference, request) {
+  const proof = nativeOAuthProof; nativeOAuthProof = null
+  if (!proof || proof.kind !== kind || proof.reference !== reference || Date.now() - proof.at > 5000) return Promise.reject(new Error('本人の確認ボタンから操作してください'))
+  return ipcRenderer.invoke(`michi:oauth-${method}`, { request, proofNonce: proof.nonce })
+}
+contextBridge.exposeInMainWorld('michiOAuth', {
+  status: () => ipcRenderer.invoke('michi:oauth-status'),
+  setEnabled: enabled => oauthNativeCall('enable', 'oauth-enable', '', { enabled }),
+  register: request => oauthNativeCall('register', 'oauth-register', request?.clientId, request),
+  unregister: request => oauthNativeCall('unregister', 'oauth-register', request?.clientId, request),
+  consent: request => oauthNativeCall('consent', 'oauth-consent', request?.pendingId, request),
+  onConsentRequested: callback => {
+    const listener = (_event, value) => callback(value)
+    ipcRenderer.on('michi:oauth-consent-requested', listener)
+    return () => ipcRenderer.removeListener('michi:oauth-consent-requested', listener)
+  },
 })
 
 let nativeLocalActionProof = null

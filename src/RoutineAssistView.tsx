@@ -52,7 +52,7 @@ export default function RoutineAssistView({ state, settings, initialMessage = ''
   const sequence = useRef(0)
   const [proofSignatures, setProofSignatures] = useState({ candidate: '', prepared: '', generation: '' })
   const policy = changePolicyFor(settings), context = state.contexts.find(item => item.id === contextId), target = state.rules.find(item => item.id === targetRuleId)
-  const signature = JSON.stringify([state.revision, settings.aiEnabled, settings.aiModel, settings.profileId, settings.datasetId, policy.epoch, policy.sourcePermissionRevision])
+  const signature = JSON.stringify([state.revision, settings.aiEnabled,settings.aiConnectionEpoch, settings.aiModel, settings.profileId, settings.datasetId, policy.epoch, policy.sourcePermissionRevision])
   const candidate = proofSignatures.candidate === signature ? savedCandidate : null
   const prepared = proofSignatures.prepared === signature ? savedPrepared : null
   const generationProposal = proofSignatures.generation === signature ? savedGenerationProposal : null
@@ -68,7 +68,7 @@ export default function RoutineAssistView({ state, settings, initialMessage = ''
     // External authority changes permanently invalidate earlier drafts, including when AI is later re-enabled.
     // oxlint-disable-next-line react/set-state-in-effect
     setProofSignatures({ candidate: '', prepared: '', generation: '' })
-  }, [settings.aiEnabled, settings.aiModel, settings.profileId, settings.datasetId, policy.epoch, policy.sourcePermissionRevision, state.revision])
+  }, [settings.aiEnabled,settings.aiConnectionEpoch, settings.aiModel, settings.profileId, settings.datasetId, policy.epoch, policy.sourcePermissionRevision, state.revision])
   useEffect(() => () => { if (savedPrepared) cancelRoutineAssistance(savedPrepared) }, [savedPrepared, signature])
   function changed(action: () => void) { sequence.current++; action(); setCandidate(null); setCandidateModel(null); setPrepared(null); setGenerationProposal(null); setChecked(false); setGenerationChecked(false); setNotice('') }
   function scope(): CalendarChangeScope {

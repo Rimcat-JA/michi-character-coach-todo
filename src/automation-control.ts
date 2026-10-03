@@ -1,3 +1,4 @@
+import { revokedExternalAI } from './external-authority'
 import { db } from './db'
 import { contentDigest } from './canonical'
 import { uid, type Settings } from './domain'
@@ -51,7 +52,7 @@ export async function setAutomationPolicyFromUI(context: ChangeContext, event: E
     if (increases.length && (!previewToken || policyPreviews.get(previewToken) !== expected || current.epoch !== previous.epoch)) fail('PREVIEW_REQUIRED', '権限を増やす設定は、保存前に過去7日の試算を確認してください')
     const saved = { ...next, epoch: current.epoch + 1 }, preset = matchingPreset(saved.operations!), stopAI = input.preset === 'A0' && preset === 'A0'
     validateChangePolicy(saved)
-    await db.settings.put({ ...settings, automation: preset, changePolicy: saved, ...(stopAI ? { aiEnabled: false } : {}) })
+    await db.settings.put({ ...settings, automation: preset, changePolicy: saved, ...(stopAI ? { aiEnabled: false, externalAI: revokedExternalAI(settings) } : {}) })
     await db.audits.add({ id: uid(), taskId: null, operation: 'automation.policy', at, detail: JSON.stringify({ preset, epoch: saved.epoch, increases, modes: Object.fromEntries(saved.operations!.map(rule => [rule.operation, rule.mode])), allowedHours: saved.allowedHours, stopAI }) })
     return { saved, stopAI }
   })
@@ -69,7 +70,7 @@ export async function reduceAuthority(scope: StopScope | 'all', origin: 'button'
     const next: ChangePolicy = { ...policy, aiChangesEnabled: policy.aiChangesEnabled && !(all || scope === 'aiChanges'), stops: { notifications: Boolean(policy.stops?.notifications) || all || scope === 'notifications', routines: Boolean(policy.stops?.routines) || all || scope === 'routines' }, epoch: policy.epoch + (authority ? 1 : 0) }
     validateChangePolicy(next)
     const cancel = (all || scope === 'notifications') && current.notificationState
-    const saved: Settings = { ...current, aiEnabled: current.aiEnabled && !(all || scope === 'aiProcessing'), changePolicy: next, ...(cancel ? { notificationState: cancelPendingCoachNotifications(coachNotificationStateFor(current), all ? '緊急停止で取り消しました' : '通知を停止しました', at) } : {}) }
+    const saved: Settings = { ...current, aiEnabled: current.aiEnabled && !(all || scope === 'aiProcessing'), ...((all || scope === 'aiProcessing') ? { externalAI: revokedExternalAI(current) } : {}), changePolicy: next, ...(cancel ? { notificationState: cancelPendingCoachNotifications(coachNotificationStateFor(current), all ? '緊急停止で取り消しました' : '通知を停止しました', at) } : {}) }
     await db.settings.put(saved)
     await db.audits.add({ id: uid(), taskId: null, operation: 'automation.stop', at, detail: JSON.stringify({ scope, origin, epoch: next.epoch }) })
     return saved
@@ -85,7 +86,7 @@ export async function reduceAuthority(scope: StopScope | 'all', origin: 'button'
 }
 export const emergencyStop = (origin: 'button' | 'coach-command' = 'button') => reduceAuthority('all', origin)
 const RESUME_EFFECTS: Record<StopScope, string[]> = {
-  aiProcessing: ['選択したモデルへの新しいAI呼び出しを再開します（モデル未設定ならAIは呼ばず、ファイル接続/MCP・PC操作の利用だけを再開します）。', 'ファイル接続・PC操作・GitHubの接続は再設定が必要です。', '停止前に作った変更案は再作成が必要です。'],
+  aiProcessing: ['選択したモデルへの新しいAI呼び出しを再開します（モデル未設定ならAIは呼びません）。', '外部AIは接続画面で別に許可し、PC操作・GitHubの接続は再設定が必要です。', '停止前に作った変更案は再作成が必要です。'],
   aiChanges: ['AIの変更案の受付を再開します。操作別の設定（S20）に従って承認または範囲内自動になります。', '停止前の変更案・承認は使えません。'],
   notifications: ['通知の送信を再開します。停止中に取り消した通知は再送しません。'],
   routines: ['ルーティン・繰り返しの発生回の作成を再開します。停止中の分は次回の展開で作成されます。'],

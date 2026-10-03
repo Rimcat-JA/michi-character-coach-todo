@@ -1,4 +1,5 @@
 import Dexie, { type EntityTable } from 'dexie'
+import type { ExternalHandoff, ContextSharePackage } from './external-handoffs'
 import type { ReviewRecord } from './review-coach'
 import type { TripBundle } from './trip-bundles'
 import type { CoachMemory, MemoryTombstone } from './coach-memory'
@@ -78,6 +79,8 @@ export const db = new Dexie('character-coach-v1') as Dexie & {
   shareProposals: EntityTable<ShareProposal, 'id'>
   detectedObligations: EntityTable<DetectedObligation, 'id'>
   obligationObservations: EntityTable<ObligationObservation, 'id'>
+  externalHandoffs: EntityTable<ExternalHandoff, 'id'>
+  contextSharePackages: EntityTable<ContextSharePackage, 'id'>
 }
 db.version(1).stores({
   tasks: 'id, &generationKey, status, scheduledDate, dueDate, project, routineId, deletedAt, updatedAt',
@@ -221,6 +224,9 @@ db.version(26).stores({ detectedObligations: 'id, ownerId, &[ownerId+canonicalKe
 db.version(27).stores({}).upgrade(async transaction => { await transaction.table('calendarEvents').toCollection().modify(event => { event.revision ??= 1; event.updatedAt ??= event.createdAt }) })
 db.version(28).stores({ scheduleRefreshInbox: 'id, ownerId, datasetId, sourceId, subscriptionId, fetchedAt, state' })
 db.version(29).stores({ integrationOutbox: 'id, at, state', integrationSettings: 'id' })
+// S25 external handoff drafts and recipient-bound share packages. Never exported in a
+// .coachbundle; a restore clears them so no share authority survives (see backup.ts).
+db.version(30).stores({ externalHandoffs: 'id, agentClientId, state', contextSharePackages: 'id, recipientClientId' })
 db.use(webhookOutboxMiddleware)
 
 export async function ensureSettings() {

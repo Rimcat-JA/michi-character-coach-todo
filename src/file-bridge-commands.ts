@@ -1,3 +1,8 @@
+import { externalAIFor } from './external-authority'
+import { clearExternalInstructionAuthority } from './external-instructions'
+import { clearChangeSetAuthority } from './change-set'
+import { clearCommandAuthority } from './command-bus'
+import type { FileBridgeRevise } from './file-bridge-types'
 import './external-task-create'
 import Dexie from 'dexie'
 import { db } from './db'
@@ -6,7 +11,7 @@ import { uid, type Settings } from './domain'
 import { ChangeSetError, autoChangeCountsToday, changePolicyFor, decideChangePolicy, type ChangePolicy, type PreparedChangeSet, type TaskChangeField } from './change-set'
 import { operationMode, ruleFor } from './automation-policy'
 import { type PreparedAssistedTasks } from './task-assist'
-import { agentChangesStopped, commandOutcomeFacts, recordCommandOutcomeAudit, applyCommand, issueExternalApplyCapability, approveCommandFromUI, cancelCommand, commandDecision, commandFields, commandOutcome, confirmCommandValuesFromUI, externalAgentActor, isPendingCommand, noteReceivedCommands, prepareCommand, refineCommandOutcome, settleCommand, terminalCommandState, type CommandEnvelope, type CommandField, type CommandGrant, type CommandOutcome, type CommandPreparation, type PreparedCommand } from './command-bus'
+import { agentChangesStopped, commandOutcomeFacts, recordCommandOutcomeAudit, applyCommand, issueExternalApplyCapability, approveCommandFromUI, cancelCommand, commandDecision, commandFields, commandOutcome, confirmCommandValuesFromUI, externalAgentActor, forgetReceivedCommand, isPendingCommand, noteReceivedCommands, prepareCommand, refineCommandOutcome, settleCommand, terminalCommandState, type CommandEnvelope, type CommandField, type CommandGrant, type CommandOutcome, type CommandPreparation, type PreparedCommand } from './command-bus'
 import { confirmSplitCommandFromUI, type SplitChildDraft } from './task-split-change'
 import { confirmRoutineCommandFromUI, triggerForCommand } from './routine-external-change'
 import { loadCalendarRulesState } from './calendar-rules-save'
@@ -33,13 +38,14 @@ function assertSettings(registration:FileBridgeRegistration,value:Settings) {
   const policy=changePolicyFor(value)
   if(value.profileId!==registration.owner_id||value.datasetId!==registration.dataset_id)rejectFileBridge('OWNER_CHANGED')
   // The shared reason is named so S06, file and MCP report the same code.
-  if(agentChangesStopped(value,fileBridgeCommandGrant(registration)))rejectFileBridge('AUTHORITY_CHANGED','AIによる変更は停止しています。接続を確認してください。','CHANGES_STOPPED')
+  if(agentChangesStopped(value,fileBridgeCommandGrant(registration),{kind:'external-agent',id:registration.client.id}))rejectFileBridge('AUTHORITY_CHANGED','AIによる変更は停止しています。接続を確認してください。','CHANGES_STOPPED')
   if(policy.epoch!==registration.policy_epoch||policy.sourcePermissionRevision!==registration.source_permission_revision)rejectFileBridge('AUTHORITY_CHANGED','本人・AI設定または利用許可が変わりました。接続を確認してください。','POLICY_CHANGED')
   if(Date.parse(registration.client.grant.expires_at)<=Date.now())rejectFileBridge('EXPIRED')
 }
 /** Renderer-side mirror of main's check: the N09 table itself must allow automatic notes/schedule changes in these bounds. */
 export function fileBridgeAutomationAllowed(policy:ChangePolicy,fields:string[],maxScheduleShiftDays:number){
-  if(!fields.length||fields.some(field=>!['notes','scheduled_date'].includes(field)))return false
+  fields=fields.filter(field=>['notes','scheduled_date'].includes(field))
+  if(!fields.length)return false
   if(fields.includes('notes')&&operationMode(policy,'task.text')!=='auto_within_bounds')return false
   if(!fields.includes('scheduled_date'))return true
   const limit=ruleFor(policy,'task.schedule').max_schedule_days_delta??policy.bounds.maxScheduledDayShift
@@ -70,11 +76,11 @@ function validReceipt(value:unknown):value is FileBridgeApplicationReceipt {
   return Object.keys(item).length===keys.length&&keys.every(key=>Object.hasOwn(item,key))&&item.version===1&&uuid(item.commandId)&&typeof item.ownerId==='string'&&Boolean(item.ownerId.trim())&&item.ownerId.length<=200&&uuid(item.datasetId)&&uuid(item.clientId)&&fileBridgeDigest(item.fileDigest)&&fileBridgeDigest(item.applicationDigest)&&['policyEpoch','sourcePermissionRevision','registrationRevision','grantEpoch'].every(key=>Number.isSafeInteger(item[key])&&Number(item[key])>=(['registrationRevision','grantEpoch'].includes(key)?1:0))&&Array.isArray(item.taskIds)&&item.taskIds.length===1&&uuid(item.taskIds[0])&&fileBridgeTimestamp(item.appliedAt)
 }
 /** Main's designated renderer queries this persisted fact. It cannot create an approval. */
-export async function readFileBridgeApplicationReceipt(commandId:string):Promise<FileBridgeApplicationReceipt|null> {
+export async function readFileBridgeApplicationReceipt(commandId:string,clientId?:string):Promise<FileBridgeApplicationReceipt|null> {
   if(!/^[a-f0-9-]{36}$/i.test(commandId))return null
-  const stored=await db.commands.get(fileBridgeReceiptKey(commandId))
+  const stored=await db.commands.get(fileBridgeReceiptKey(commandId,clientId)) ?? await db.commands.get(fileBridgeReceiptKey(commandId))
   if(!stored)return null
-  try{const receipt:unknown=JSON.parse(stored.resultId),current=await settings();if(!validReceipt(receipt)||receipt.commandId!==commandId||stored.hash!==receipt.applicationDigest||stored.at!==receipt.appliedAt||receipt.ownerId!==current.profileId||receipt.datasetId!==current.datasetId)return null;return receipt}catch{return null}
+  try{const receipt:unknown=JSON.parse(stored.resultId),current=await settings();if(!validReceipt(receipt)||receipt.commandId!==commandId||clientId!==undefined&&receipt.clientId!==clientId||stored.hash!==receipt.applicationDigest||stored.at!==receipt.appliedAt||receipt.ownerId!==current.profileId||receipt.datasetId!==current.datasetId)return null;return receipt}catch{return null}
 }
 
 const applicationTables=()=>[db.tasks,db.assessments,db.commands,db.audits,db.containers,db.settings,db.labelGroups,db.labelDefinitions,db.tripBundles,db.completions,db.checklistItems,db.calendarRules,db.calendarEvents,db.sessions,db.contextSources,db.contextSnapshots,db.sourceArtifacts]
@@ -84,7 +90,7 @@ export function createFileBridgeController(gateway:FileBridgeGateway) {
   let currentStatus:FileBridgeStatus|null=null,lastEgress:{withheldQuotes:number;notesWithheld:number}|null=null
   /** Dropped reviews cancel their unapproved bus commands so S21 never lists them; applied commands are already settled. */
   async function dropPrepared(){const dropped=[...preparedRegistry.values()];preparedRegistry.clear();for(const value of dropped)if(isPendingCommand(value.command))await cancelCommand(value.command)}
-  function clear(){void dropPrepared();entries.clear();leases.clear();noteReceivedCommands('external',[])}
+  function clear(){void dropPrepared();entries.clear();leases.clear();noteReceivedCommands('external',[],currentStatus?.registration?.client.id)}
   async function adoptStatus(raw:FileBridgeStatus):Promise<FileBridgeStatus> {
     assertFileBridgeStatus(raw)
     const status=freeze(structuredClone(raw)),current=await settings(),registration=status.registration
@@ -95,8 +101,11 @@ export function createFileBridgeController(gateway:FileBridgeGateway) {
     await db.transaction('rw',db.settings,db.commands,async()=>{
       const value=await settings()
       if(value.profileId!==current.profileId||value.datasetId!==current.datasetId)rejectFileBridge('OWNER_CHANGED')
-      const key=fileBridgeScopeKey(value.profileId,value.datasetId),previous=await db.commands.get(key)
+      const key=fileBridgeScopeKey(value.profileId,value.datasetId,registration?.client.id??currentStatus?.registration?.client.id),previous=await db.commands.get(key)
       if(previous&&registration){try{const old=JSON.parse(previous.resultId).registration as FileBridgeRegistration|null;if(old?.client.id===registration.client.id&&(old.client.revision>registration.client.revision||old.client.grant_epoch>registration.client.grant_epoch))rejectFileBridge('REGISTRATION_ROLLBACK')}catch(error){if(error instanceof Error&&'code'in error)throw error}}
+      const external=externalAIFor(value), clients=external.clients.filter(client=>client.registration.client.id!==registration?.client.id).map(client=>!registration&&client.registration.client.id===currentStatus?.registration?.client.id?{...client,status:'revoked' as const}:client)
+      if(registration){const previous=external.clients.find(client=>client.registration.client.id===registration.client.id);clients.push({registration:structuredClone(registration),status:'active',capabilityChecks:previous?.registration.client.revision===registration.client.revision&&previous?.registration.client.grant_epoch===registration.client.grant_epoch?previous.capabilityChecks:[],shippingState:'implemented'})}
+      await db.settings.put({...value,externalAI:{...external,clients:clients.slice(-50)}})
       await db.commands.put({key,hash:await Dexie.waitFor(contentDigest(payload)),resultId:JSON.stringify(payload),at:new Date().toISOString()})
     })
     if(currentStatus&&canonicalJSON({registration:currentStatus.registration,snapshot:currentStatus.snapshot})!==canonicalJSON({registration:status.registration,snapshot:status.snapshot}))clear()
@@ -105,7 +114,7 @@ export function createFileBridgeController(gateway:FileBridgeGateway) {
   }
   async function assertCurrent(prepared:PreparedFileBridgeApplication) {
     assertSettings(prepared.registration,await settings())
-    const scope=await db.commands.get(fileBridgeScopeKey(prepared.registration.owner_id,prepared.registration.dataset_id))
+    const scope=await db.commands.get(fileBridgeScopeKey(prepared.registration.owner_id,prepared.registration.dataset_id,prepared.registration.client.id))
     if(!scope||scope.hash!==await Dexie.waitFor(contentDigest({version:1,registration:prepared.registration})))rejectFileBridge('AUTHORITY_CHANGED')
     if(Date.parse(prepared.entry.prepared.expiresAt)<=Date.now())rejectFileBridge('EXPIRED')
     if(preparedRegistry.get(prepared.id)!==prepared)rejectFileBridge('UNVERIFIED_COMMAND')
@@ -147,7 +156,7 @@ export function createFileBridgeController(gateway:FileBridgeGateway) {
   }
   async function notify(prepared:PreparedFileBridgeApplication,receipt:FileBridgeApplicationReceipt,lease:FileBridgeLease):Promise<FileBridgeApplicationOutcome> {
     try{
-      const persisted=await readFileBridgeApplicationReceipt(receipt.commandId)
+      const persisted=await readFileBridgeApplicationReceipt(receipt.commandId,prepared.registration.client.id)
       if(!persisted||canonicalJSON(persisted)!==canonicalJSON(receipt))rejectFileBridge('RECEIPT_MISSING')
       const result=await gateway.recordApplied({leaseId:lease.leaseId,reference:prepared.reference,receipt})
       assertFileBridgeResult(result)
@@ -156,7 +165,7 @@ export function createFileBridgeController(gateway:FileBridgeGateway) {
     }catch{return {receipt,result:null,resultPending:true}}
   }
   async function priorOutcome(prepared:PreparedFileBridgeApplication):Promise<FileBridgeApplicationOutcome|null> {
-    const prior=await readFileBridgeApplicationReceipt(prepared.entry.prepared.command.command_id)
+    const prior=await readFileBridgeApplicationReceipt(prepared.entry.prepared.command.command_id,prepared.registration.client.id)
     if(!prior)return null
     if(prior.applicationDigest!==prepared.digest)rejectFileBridge('IDEMPOTENCY_MISMATCH')
     const existingLease=leases.get(prepared.id)
@@ -175,7 +184,7 @@ export function createFileBridgeController(gateway:FileBridgeGateway) {
       receipt=await db.transaction('rw',applicationTables(),async()=>{
         await verifyPrepared(prepared);await assertCurrent(prepared)
         if(Date.parse(lease.expiresAt)<=Date.now())rejectFileBridge('EXPIRED')
-        const command=prepared.entry.prepared.command,key=fileBridgeReceiptKey(command.command_id),existing=await db.commands.get(key)
+        const command=prepared.entry.prepared.command,key=fileBridgeReceiptKey(command.command_id,prepared.registration.client.id),existing=await db.commands.get(key)
         if(existing){const previous=JSON.parse(existing.resultId) as FileBridgeApplicationReceipt;if(!validReceipt(previous)||existing.hash!==prepared.digest||previous.applicationDigest!==prepared.digest||previous.fileDigest!==prepared.entry.prepared.digest)rejectFileBridge('IDEMPOTENCY_MISMATCH');return previous}
         const today=new Date().toISOString().slice(0,10),receipts=await db.commands.toArray()
         const count=receipts.filter(item=>item.key.startsWith('filebridge:applied:')&&item.at.slice(0,10)===today).reduce((sum,item)=>{try{const stored=JSON.parse(item.resultId);return sum+(validReceipt(stored)&&stored.clientId===reg.client.id&&stored.ownerId===reg.owner_id&&stored.datasetId===reg.dataset_id?1:0)}catch{return sum}},0)
@@ -198,20 +207,48 @@ export function createFileBridgeController(gateway:FileBridgeGateway) {
       throw error
     }
     settleCommand(prepared.command)
+    forgetReceivedCommand(reg.client.id,prepared.entry.prepared.command.command_id)
     return notify(prepared,receipt,lease)
   }
   return {
     clearAuthority:clear,
+    releaseReviewAuthority:async()=>{await dropPrepared();entries.clear();leases.clear()},
     lastEgress:()=>lastEgress,
     refresh:async()=>adoptStatus(await gateway.status()),
-    async configure(request:Pick<FileBridgeConfigure,'intendedHost'|'taskIds'|'fields'|'lifetimeHours'|'allowSplit'|'ruleIds'>&{automation?:FileBridgeConfigure['automation']},event:Event) {
+    selectClient:async(clientId:string)=>{if(!gateway.selectClient)rejectFileBridge('UNSUPPORTED_OPERATION');return adoptStatus(await gateway.selectClient({clientId}))},
+    async configure(request:Pick<FileBridgeConfigure,'intendedHost'|'taskIds'|'fields'|'lifetimeHours'|'allowSplit'|'ruleIds'|'allowHistory'|'allowRoutinePreview'|'allowContextRead'|'allowExternalContext'|'allowDetection'|'allowHandoffPrepare'|'allowHandoffs'|'allowRoutineChange'>&{automation?:FileBridgeConfigure['automation']},event:Event) {
       trustedClick(event)
       const current=await settings(),policy=changePolicyFor(current)
-      if(!current.aiEnabled||!policy.aiChangesEnabled)rejectFileBridge('AUTHORITY_CHANGED')
+      if(!externalAIFor(current).enabled||!policy.aiChangesEnabled)rejectFileBridge('AUTHORITY_CHANGED')
       if(request.automation&&!fileBridgeAutomationAllowed(policy,request.fields,request.automation.maxScheduleShiftDays))rejectFileBridge('AUTOMATION_NOT_GRANTED','自動化設定（S20）でメモ・予定日の範囲内自動を許可してから、同じかより狭い範囲で委任してください。')
-      const {allowSplit,ruleIds,...basic}=structuredClone(request),extended=allowSplit||ruleIds?.length?{allowSplit:Boolean(allowSplit),ruleIds:ruleIds??[]}:{}
+      const {allowSplit,ruleIds,allowHistory,allowRoutinePreview,allowContextRead,allowExternalContext,allowDetection,allowHandoffPrepare,allowHandoffs,allowRoutineChange,...basic}=structuredClone(request)
+      const extended={...(allowSplit||ruleIds?.length?{allowSplit:Boolean(allowSplit),ruleIds:ruleIds??[]}:{}),...(allowHistory||allowRoutinePreview||allowContextRead||allowExternalContext||allowDetection||allowHandoffPrepare||allowHandoffs||allowRoutineChange?{allowHistory:Boolean(allowHistory),allowRoutinePreview:Boolean(allowRoutinePreview),allowContextRead:Boolean(allowContextRead),allowExternalContext:Boolean(allowExternalContext),allowDetection:Boolean(allowDetection),allowHandoffPrepare:Boolean(allowHandoffPrepare),allowHandoffs:Boolean(allowHandoffs),allowRoutineChange:Boolean(allowRoutineChange)}:{})}
       const value={...basic,automation:request.automation??null,...extended,ownerId:current.profileId,datasetId:current.datasetId,policyEpoch:policy.epoch,sourcePermissionRevision:policy.sourcePermissionRevision}
       return adoptStatus(await gateway.configure(value))
+    },
+    async revise(request:FileBridgeRevise,event?:Event){
+      if(event)trustedClick(event)
+      if(!gateway.revise||!gateway.invalidateClient)rejectFileBridge('FEATURE_NOT_IMPLEMENTED')
+      request=structuredClone(request)
+      const reg=currentStatus?.registration
+      if(!reg||request.clientId!==reg.client.id||request.expectedRevision!==reg.client.revision)rejectFileBridge('REVISION_CONFLICT')
+      await db.transaction('rw',db.settings,db.commands,db.datasetState,async()=>{
+        const current=await settings(),external=externalAIFor(current),client=external.clients.find(value=>value.registration.client.id===reg.client.id)
+        if(!external.enabled||!client||client.status!=='active'||canonicalJSON(client.registration)!==canonicalJSON(reg))rejectFileBridge('AUTHORITY_CHANGED')
+        if((await db.datasetState.get('main'))?.mode&&((await db.datasetState.get('main'))!.mode!=='active')||(current.datasetMode??'active')!=='active')rejectFileBridge('DATASET_FROZEN')
+        await db.settings.put({...current,externalAI:{...external,clients:external.clients.map(value=>value===client?{...value,status:'needs_reauth' as const}:value)}})
+        const payload={version:1,registration:null}
+        await db.commands.put({key:fileBridgeScopeKey(reg.owner_id,reg.dataset_id,reg.client.id),hash:await Dexie.waitFor(contentDigest(payload)),resultId:JSON.stringify(payload),at:new Date().toISOString()})
+      })
+      // This transaction serializes with old applies; no old capability survives the scope latch.
+      clearCommandAuthority({clientId:reg.client.id});clearChangeSetAuthority({clientId:reg.client.id});clearExternalInstructionAuthority(reg.client.id)
+      await dropPrepared();entries.clear();leases.clear();noteReceivedCommands('external',[],reg.client.id)
+      try{return await adoptStatus(await gateway.revise(request))}
+      catch(error){
+        await gateway.invalidateClient({clientId:reg.client.id}).catch(()=>{})
+        await db.transaction('rw',db.settings,async()=>{const current=await settings(),external=externalAIFor(current);await db.settings.put({...current,externalAI:{...external,clients:external.clients.map(value=>value.registration.client.id===reg.client.id?{...value,status:'revoked' as const}:value)}})})
+        throw error
+      }
     },
     async disconnect(event:Event) {
       trustedClick(event)
@@ -247,7 +284,7 @@ export function createFileBridgeController(gateway:FileBridgeGateway) {
         if(value.command.type==='routine.change'&&!reg.rule_ids?.includes(value.command.target_id!))rejectFileBridge('TASK_SCOPE')
         entries.set(entry.reference,entry)
       }}
-      noteReceivedCommands('external',[...entries.values()].map(entry=>{const command=entry.prepared.command;return {commandId:command.command_id,entrance:entranceOf(command),type:command.type,targetId:command.target_id,expectedRevision:command.expected_revision,principalId:entry.prepared.principal.id,host:status.registration?.client.intended_host??null,fields:Object.keys(command.payload),expiresAt:command.expires_at}}))
+      noteReceivedCommands('external',[...entries.values()].map(entry=>{const command=entry.prepared.command;return {commandId:command.command_id,entrance:entranceOf(command),type:command.type,targetId:command.target_id,expectedRevision:command.expected_revision,principalId:entry.prepared.principal.id,host:status.registration?.client.intended_host??null,fields:Object.keys(command.payload),expiresAt:command.expires_at}}),status.registration?.client.id)
       return {status,entries:freeze(structuredClone(scanned.entries))}
     },
     async prepare(reference:string):Promise<PreparedFileBridgeApplication> {
@@ -286,7 +323,7 @@ export function createFileBridgeController(gateway:FileBridgeGateway) {
      *  CHANGES_STOPPED only when AI changes are off or every operation this grant carries is denied (N09 ∩ grant); otherwise POLICY_CHANGED. */
     async closePending(requested:'CHANGES_STOPPED'|'POLICY_CHANGED'='CHANGES_STOPPED') {
       const reg=currentStatus?.registration,current=await db.settings.get('main')
-      const code=requested==='CHANGES_STOPPED'&&current&&agentChangesStopped(current,reg?fileBridgeCommandGrant(reg):null)?'CHANGES_STOPPED' as const:'POLICY_CHANGED' as const
+      const code=requested==='CHANGES_STOPPED'&&current&&agentChangesStopped(current,reg?fileBridgeCommandGrant(reg):null,{kind:'external-agent',id:reg?.client.id??'external'})?'CHANGES_STOPPED' as const:'POLICY_CHANGED' as const
       const state=code==='CHANGES_STOPPED'?'denied' as const:'expired' as const
       for(const reference of [...entries.keys()]){const outcome={commandId:null,entrance:null,state,code,message:code==='CHANGES_STOPPED'?'AIによる変更の停止で待機中のコマンドを閉じました':'設定・権限の変更で待機中のコマンドを閉じました',receipt:null};const prepared=[...preparedRegistry.values()].find(value=>value.reference===reference)??null;await noteOutcome(reference,prepared,outcome);await reportOutcome(reference,outcome)}
     },
@@ -314,7 +351,7 @@ export function createFileBridgeController(gateway:FileBridgeGateway) {
     },
     async retryResultFromUI(prepared:PreparedFileBridgeApplication,event:Event):Promise<FileBridgeApplicationOutcome> {
       trustedClick(event);await verifyPrepared(prepared)
-      const receipt=await readFileBridgeApplicationReceipt(prepared.entry.prepared.command.command_id),lease=leases.get(prepared.id)
+      const receipt=await readFileBridgeApplicationReceipt(prepared.entry.prepared.command.command_id,prepared.registration.client.id),lease=leases.get(prepared.id)
       if(!receipt||!lease||receipt.applicationDigest!==prepared.digest)rejectFileBridge('RECEIPT_MISSING')
       return notify(prepared,receipt,lease)
     }

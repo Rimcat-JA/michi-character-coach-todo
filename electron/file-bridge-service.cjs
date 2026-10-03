@@ -2,13 +2,14 @@ const fs = require('node:fs/promises')
 const path = require('node:path')
 const crypto = require('node:crypto')
 const { createLocalFileBridge, canonicalFileJSON, validateFileBridgeRegistration, FILE_BRIDGE_REJECTED_STATES } = require('./local-file-bridge.cjs')
+const { grantExpands, revisedRegistration } = require('./external-grant-revision.cjs')
 
 const uuid = value => typeof value === 'string' && /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i.test(value)
 const digest = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value)
 const exact = (value, keys) => value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key))
 function fail(code) { const error = new Error(code); error.code = code; throw error }
 const policy = settings => settings.changePolicy ?? { epoch: 0, sourcePermissionRevision: 0, aiChangesEnabled: true }
-const receiptKey = id => `filebridge:applied:${id}`
+const receiptKey = (id,clientId) => `filebridge:applied:${clientId}:${id}`
 function redactedNotes(stored, wanted) {
   if (typeof stored !== 'string' || typeof wanted !== 'string' || wanted.length > stored.length) return null
   if (wanted === stored || wanted === '') return wanted
@@ -34,10 +35,11 @@ async function createFileBridgeService({ agentDirectory, journalDirectory, signi
   await fs.mkdir(agentDirectory, { recursive: true }); await fs.mkdir(journalDirectory, { recursive: true })
   async function currentContext(registration) {
     const settings = await getSettings(), current = policy(settings)
-    return { ownerId: settings.profileId, datasetId: settings.datasetId, clientId: registration.client.id, policyEpoch: current.epoch, sourcePermissionRevision: current.sourcePermissionRevision, registrationRevision: registration.client.revision, grantEpoch: registration.client.grant_epoch, enabled: Boolean(connection?.registration.client.id === registration.client.id && settings.aiEnabled && current.aiChangesEnabled) }
+    return { ownerId: settings.profileId, datasetId: settings.datasetId, clientId: registration.client.id, policyEpoch: current.epoch, sourcePermissionRevision: current.sourcePermissionRevision, registrationRevision: connection?.registration.client.revision??0, grantEpoch: connection?.registration.client.grant_epoch??0, enabled: Boolean(connection?.registration.client.id === registration.client.id && settings.externalAI?.version === 1 && settings.externalAI.enabled === true && current.aiChangesEnabled) }
   }
+  async function lookupReceipt(id,clientId) { return await getReceipt(receiptKey(id,clientId)) ?? await getReceipt(`filebridge:applied:${id}`) }
   function receiptFor(lease, stored) {
-    if (!stored || stored.key !== receiptKey(lease.prepared.command.command_id) || stored.hash !== lease.binding.applicationDigest || typeof stored.resultId !== 'string') return null
+    if (!stored || (stored.key !== receiptKey(lease.prepared.command.command_id,lease.registration.client.id) && stored.key !== `filebridge:applied:${lease.prepared.command.command_id}`) || stored.hash !== lease.binding.applicationDigest || typeof stored.resultId !== 'string') return null
     let value; try { value = JSON.parse(stored.resultId) } catch { return null }
     const keys = ['version', 'commandId', 'fileDigest', 'applicationDigest', 'ownerId', 'datasetId', 'clientId', 'policyEpoch', 'sourcePermissionRevision', 'registrationRevision', 'grantEpoch', 'taskIds', 'appliedAt']
     const reg = lease.registration, prepared = lease.prepared
@@ -45,7 +47,7 @@ async function createFileBridgeService({ agentDirectory, journalDirectory, signi
     return { application: value, file: { commandId: value.commandId, digest: value.fileDigest, taskIds: value.taskIds, appliedAt: value.appliedAt } }
   }
   async function recover(registration, prepared) {
-    const stored = await getReceipt(receiptKey(prepared.command.command_id))
+    const stored = await lookupReceipt(prepared.command.command_id,registration.client.id)
     if (!stored || typeof stored.resultId !== 'string') return null
     let value; try { value = JSON.parse(stored.resultId) } catch { return null }
     return receiptFor({ registration, prepared, binding: { applicationDigest: value.applicationDigest } }, stored)?.file ?? null
@@ -64,7 +66,7 @@ async function createFileBridgeService({ agentDirectory, journalDirectory, signi
         lease.ready.resolve(lease.public)
         return lease.committed.promise
       } })
-      if (typeof next.bridge.readSnapshot === 'function') next.snapshot = await next.bridge.readSnapshot().catch(error => { if (error.code === 'ENOENT') return null; throw error })
+      if (typeof next.bridge.readSnapshot === 'function') next.snapshot = await next.bridge.readSnapshot({allowStaleRegistration:true}).catch(error => { if (error.code === 'ENOENT') return null; throw error })
       return next
     } catch (error) { connection = null; throw error }
   }
@@ -85,21 +87,29 @@ async function createFileBridgeService({ agentDirectory, journalDirectory, signi
   async function configure(request, nativeProof) {
     if (!await verifyNativeProof('configure', '', nativeProof)) fail('HUMAN_APPROVAL_REQUIRED')
     const configKeys = ['ownerId', 'datasetId', 'policyEpoch', 'sourcePermissionRevision', 'intendedHost', 'taskIds', 'fields', 'lifetimeHours']
-    if (!request || typeof request !== 'object' || Array.isArray(request) || configKeys.some(key => !Object.hasOwn(request, key)) || Object.keys(request).some(key => !configKeys.includes(key) && !['automation', 'allowSplit', 'ruleIds'].includes(key)) || !Number.isInteger(request.lifetimeHours) || request.lifetimeHours < 1 || request.lifetimeHours > 168) fail('CONFIG_INVALID')
+    if (!request || typeof request !== 'object' || Array.isArray(request) || configKeys.some(key => !Object.hasOwn(request, key)) || Object.keys(request).some(key => !configKeys.includes(key) && !['automation', 'allowSplit', 'ruleIds', 'allowHistory', 'allowRoutinePreview', 'allowContextRead', 'allowExternalContext', 'allowDetection', 'allowHandoffPrepare', 'allowHandoffs', 'allowRoutineChange'].includes(key)) || !Number.isInteger(request.lifetimeHours) || request.lifetimeHours < 1 || request.lifetimeHours > 168) fail('CONFIG_INVALID')
     const automation = request.automation ?? null
-    if (automation !== null && (!exact(automation, ['maxScheduleShiftDays', 'maxOperationsPerDay']) || !Number.isInteger(automation.maxScheduleShiftDays) || automation.maxScheduleShiftDays < 0 || automation.maxScheduleShiftDays > 7 || !Number.isInteger(automation.maxOperationsPerDay) || automation.maxOperationsPerDay < 1 || automation.maxOperationsPerDay > 20 || !Array.isArray(request.fields) || !request.fields.length || request.fields.some(field => !['notes', 'scheduled_date'].includes(field)))) fail('AUTOMATION_SCOPE')
+    if (automation !== null && (!exact(automation, ['maxScheduleShiftDays', 'maxOperationsPerDay']) || !Number.isInteger(automation.maxScheduleShiftDays) || automation.maxScheduleShiftDays < 0 || automation.maxScheduleShiftDays > 7 || !Number.isInteger(automation.maxOperationsPerDay) || automation.maxOperationsPerDay < 1 || automation.maxOperationsPerDay > 20 || !Array.isArray(request.fields) || !request.fields.some(field => ['notes', 'scheduled_date'].includes(field)))) fail('AUTOMATION_SCOPE')
     const allowSplit = request.allowSplit === true, ruleIds = request.ruleIds ?? []
     if (Object.hasOwn(request, 'allowSplit') && typeof request.allowSplit !== 'boolean' || !Array.isArray(ruleIds) || ruleIds.length > 50 || ruleIds.some(id => !uuid(id)) || new Set(ruleIds).size !== ruleIds.length) fail('CONFIG_INVALID')
+    // Extra read/share scopes are opt-in and default off; each is an explicit native-consent checkbox in the UI.
+    // configure itself already consumes a one-use native proof, so checked scopes are consented here.
+    const extraScopes = ['allowHistory', 'allowRoutinePreview', 'allowContextRead', 'allowExternalContext', 'allowDetection', 'allowHandoffPrepare', 'allowHandoffs', 'allowRoutineChange']
+    for (const key of extraScopes) if (Object.hasOwn(request, key) && typeof request[key] !== 'boolean') fail('CONFIG_INVALID')
+    const allowHistory = request.allowHistory === true, allowRoutinePreview = request.allowRoutinePreview === true, allowContextRead = request.allowContextRead === true
+    const allowExternalContext = request.allowExternalContext === true, allowDetection = request.allowDetection === true
+    const allowHandoffPrepare = request.allowHandoffPrepare === true, allowHandoffs = request.allowHandoffs === true
+    const allowRoutineChange = request.allowRoutineChange === true
     await ensure()
     const settings = await getSettings(), current = policy(settings)
-    if (request.ownerId !== settings.profileId || request.datasetId !== settings.datasetId || request.policyEpoch !== current.epoch || request.sourcePermissionRevision !== current.sourcePermissionRevision || !settings.aiEnabled || !current.aiChangesEnabled) fail('AUTHORITY_CHANGED')
-    if (automation !== null && !n09Automatic(current, request.fields, automation.maxScheduleShiftDays)) fail('AUTOMATION_NOT_GRANTED')
+    if (request.ownerId !== settings.profileId || request.datasetId !== settings.datasetId || request.policyEpoch !== current.epoch || request.sourcePermissionRevision !== current.sourcePermissionRevision || !settings.externalAI?.enabled || settings.externalAI.version !== 1 || !current.aiChangesEnabled) fail('AUTHORITY_CHANGED')
+    if (automation !== null && !n09Automatic(current, request.fields.filter(field=>['notes','scheduled_date'].includes(field)), automation.maxScheduleShiftDays)) fail('AUTOMATION_NOT_GRANTED')
     if (!Array.isArray(request.taskIds) || request.taskIds.length > 100 || request.taskIds.some(id => !uuid(id)) || new Set(request.taskIds).size !== request.taskIds.length) fail('TASK_SCOPE')
     const tasks = await getTasks(request.taskIds)
     if (tasks.length !== request.taskIds.length || tasks.some(task => task.deletedAt)) fail('TASK_SCOPE')
     if (ruleIds.length && (await getRules(ruleIds)).length !== ruleIds.length) fail('RULE_SCOPE')
-    const keys = ['tasks:read', 'tasks:prepare', 'changes:submit', 'commands:read', ...(allowSplit ? ['tasks:split'] : []), ...(ruleIds.length ? ['routines:prepare'] : [])]
-    const id = crypto.randomUUID(), registration = { schema_version: '1', owner_id: request.ownerId, dataset_id: request.datasetId, policy_epoch: current.epoch, source_permission_revision: current.sourcePermissionRevision, task_ids: [...request.taskIds], ...(ruleIds.length ? { rule_ids: [...ruleIds] } : {}), client: { id, dataset_id: request.datasetId, intended_host: request.intendedHost, transport: 'stdio', status: 'active', revision: 1, grant_epoch: 1, grant: { keys, project_ids: [], fields: [...request.fields], mutation_mode: automation ? 'auto_within_bounds' : 'require_approval', max_operations_per_day: 20, max_schedule_shift_days: 7, max_point_delta: 0, allow_external_context: false, allow_handoffs: false, expires_at: new Date(Date.now() + request.lifetimeHours * 3600000).toISOString(), ...(automation ? { automation: { max_schedule_shift_days: automation.maxScheduleShiftDays, max_operations_per_day: automation.maxOperationsPerDay } } : {}) } } }
+    const keys = ['tasks:read', 'tasks:prepare', 'changes:submit', 'commands:read', ...(allowSplit ? ['tasks:split'] : []), ...((ruleIds.length || allowRoutineChange) ? ['routines:prepare'] : []), ...(allowHistory ? ['history:read'] : []), ...(allowRoutinePreview ? ['routines:read'] : []), ...(allowContextRead ? ['context:read'] : []), ...(allowDetection ? ['detection:request', 'detection:read'] : []), ...(allowHandoffPrepare ? ['handoff:prepare'] : [])]
+    const id = crypto.randomUUID(), registration = { schema_version: '1', owner_id: request.ownerId, dataset_id: request.datasetId, policy_epoch: current.epoch, source_permission_revision: current.sourcePermissionRevision, task_ids: [...request.taskIds], ...(ruleIds.length ? { rule_ids: [...ruleIds] } : {}), client: { id, dataset_id: request.datasetId, intended_host: request.intendedHost, transport: 'stdio', status: 'active', revision: 1, grant_epoch: 1, grant: { keys, project_ids: [], fields: [...request.fields], mutation_mode: automation ? 'auto_within_bounds' : 'require_approval', max_operations_per_day: 20, max_schedule_shift_days: 7, max_point_delta: 0, allow_external_context: allowExternalContext, allow_handoffs: allowHandoffs, expires_at: new Date(Date.now() + request.lifetimeHours * 3600000).toISOString(), ...(automation ? { automation: { max_schedule_shift_days: automation.maxScheduleShiftDays, max_operations_per_day: automation.maxOperationsPerDay } } : {}) } } }
     validateFileBridgeRegistration(registration)
     await invalidate()
     const configuration = { root: path.join(agentDirectory, id), registration }
@@ -157,7 +167,7 @@ async function createFileBridgeService({ agentDirectory, journalDirectory, signi
       if (shift > grant.automation.max_schedule_shift_days) fail('AUTO_SCHEDULE_BOUND')
     }
     const settings = await getSettings(), p = policy(settings)
-    if (!settings.aiEnabled || !p.aiChangesEnabled || p.epoch !== entry.registration.policy_epoch || !n09Automatic(p, fields, shift)) fail('AUTOMATION_NOT_GRANTED')
+    if (settings.externalAI?.version !== 1 || !settings.externalAI.enabled || !p.aiChangesEnabled || p.epoch !== entry.registration.policy_epoch || !n09Automatic(p, fields, shift)) fail('AUTOMATION_NOT_GRANTED')
     return issueLease(binding, true)
   }
   async function issueLease(binding, automatic) {
@@ -182,7 +192,7 @@ async function createFileBridgeService({ agentDirectory, journalDirectory, signi
     if (!exact(request, ['leaseId', 'reference', 'receipt'])) fail('LEASE_INVALID')
     const lease = leases.get(request.leaseId)
     if (!lease || lease.binding.reference !== request.reference) fail('LEASE_INVALID')
-    const actual = receiptFor(lease, await getReceipt(receiptKey(lease.prepared.command.command_id)))
+    const actual = receiptFor(lease, await lookupReceipt(lease.prepared.command.command_id,lease.registration.client.id))
     if (!actual || canonicalFileJSON(actual.application) !== canonicalFileJSON(request.receipt)) fail('RECEIPT_INVALID')
     lease.committed.resolve(actual.file)
     return lease.work
@@ -190,7 +200,7 @@ async function createFileBridgeService({ agentDirectory, journalDirectory, signi
   async function cancelApplication(request) {
     if (!(exact(request, ['leaseId', 'reference']) || exact(request, ['leaseId', 'reference', 'outcome']) && rejection(request.outcome))) fail('LEASE_INVALID')
     const lease = leases.get(request.leaseId); if (!lease || lease.binding.reference !== request.reference) fail('LEASE_INVALID')
-    const actual = receiptFor(lease, await getReceipt(receiptKey(lease.prepared.command.command_id)))
+    const actual = receiptFor(lease, await lookupReceipt(lease.prepared.command.command_id,lease.registration.client.id))
     // A stated rejection is signed only while the DB holds no receipt for this command.
     if (actual) lease.committed.resolve(actual.file); else lease.committed.reject(Object.assign(new Error('APPLICATION_CANCELLED'), request.outcome ? { outcome: { ...request.outcome } } : {}))
     return lease.work
@@ -210,7 +220,7 @@ async function createFileBridgeService({ agentDirectory, journalDirectory, signi
     active?.bridge.clearAuthorities(); entries.clear()
     for (const lease of leases.values()) if (!lease.settled) {
       try {
-        const actual = receiptFor(lease, await getReceipt(receiptKey(lease.prepared.command.command_id)))
+        const actual = receiptFor(lease, await lookupReceipt(lease.prepared.command.command_id,lease.registration.client.id))
         if (actual) lease.committed.resolve(actual.file); else lease.committed.reject(new Error('AUTHORITY_CHANGED'))
       } catch (error) { lease.committed.reject(new Error('RECEIPT_UNAVAILABLE')); errors.push(error) }
     }
@@ -223,7 +233,39 @@ async function createFileBridgeService({ agentDirectory, journalDirectory, signi
     if (connection && request.clientId !== connection.registration.client.id) fail('AUTHORITY_CHANGED')
     await invalidate(); return status()
   }
-  return Object.freeze({ status, configure, disconnect, exportSnapshot, scanInbox, authorizeApplication, authorizeAutomaticApplication, recordApplied, cancelApplication, recordRejected, invalidate })
+  async function commandResult(commandId) {
+    if (!uuid(commandId)) fail('COMMAND_ID_INVALID')
+    const current = await ensure(), statusValue = await status()
+    if (!current || !statusValue.connected) fail('NOT_CONNECTED')
+    try { return await current.bridge.readResult(commandId) }
+    catch (error) { if (error.code === 'ENOENT') return null; throw error }
+  }
+  let revisionQueue=Promise.resolve(),revisionCount=0
+  async function revise(request,nativeProof){
+    if(revisionCount>=10)fail('REVISION_BUSY');revisionCount++
+    const previous=revisionQueue;let release;revisionQueue=new Promise(resolve=>{release=resolve});await previous
+    try{return await reviseOnce(structuredClone(request),nativeProof)}finally{revisionCount--;release()}
+  }
+  async function reviseOnce(request,nativeProof){
+    const active=await ensure();if(!active)fail('NOT_CONNECTED')
+    const registration=revisedRegistration(active.registration,request),before=await getSettings()
+    const proofValid=nativeProof?await verifyNativeProof('revise',registration.client.id,nativeProof):false
+    if(grantExpands(active.registration,registration)&&!proofValid)fail('HUMAN_APPROVAL_REQUIRED')
+    if(registration.client.grant.automation&&!n09Automatic(policy(before),registration.client.grant.fields.filter(field=>['notes','scheduled_date'].includes(field)),registration.client.grant.automation.max_schedule_shift_days))fail('AUTOMATION_NOT_GRANTED')
+    const tasks=await getTasks(registration.task_ids),rules=await getRules(registration.rule_ids??[])
+    if(tasks.length!==registration.task_ids.length||tasks.some(task=>task.deletedAt)||rules.length!==(registration.rule_ids?.length??0))fail('TASK_SCOPE')
+    const latest=await getSettings(),current=policy(latest)
+    if(connection!==active||latest.profileId!==registration.owner_id||latest.datasetId!==registration.dataset_id||latest.externalAI?.enabled!==true||latest.externalAI?.epoch!==before.externalAI?.epoch||current.epoch!==registration.policy_epoch||current.sourcePermissionRevision!==registration.source_permission_revision||!current.aiChangesEnabled)fail('AUTHORITY_CHANGED')
+    // Renderer first latches this client needs_reauth and cancels its bus authority in a DB transaction.
+    // Here the main coordinator stops old leases before publishing a replacement signed registration.
+    connection=null;active.bridge.clearAuthorities();entries.clear()
+    const config={root:active.root,registration}
+    try{
+      for(const [id,lease]of leases){if(!lease.settled){const actual=receiptFor(lease,await lookupReceipt(lease.prepared.command.command_id,lease.registration.client.id));if(actual)lease.committed.resolve(actual.file);else lease.committed.reject(new Error('REGISTRATION_CHANGED'))}leases.delete(id)}
+      await saveConfiguration(config);await activate(config);return await status()
+    }catch(error){await active.bridge.revoke().catch(()=>{});await invalidate().catch(()=>{});throw error}
+  }
+  return Object.freeze({ status, configure, revise, disconnect, exportSnapshot, scanInbox, authorizeApplication, authorizeAutomaticApplication, recordApplied, cancelApplication, recordRejected, commandResult, invalidate })
 }
 
 module.exports = { createFileBridgeService }

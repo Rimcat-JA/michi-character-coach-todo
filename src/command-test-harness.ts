@@ -14,25 +14,25 @@ import { createFileBridgeController, type FileBridgeController } from './file-br
 import type { FileBridgeField, FileBridgeGateway, FileBridgeStatus } from './file-bridge-types'
 
 const require = createRequire(import.meta.url)
-const { createFileBridgeService } = require('../electron/file-bridge-service.cjs') as { createFileBridgeService: (options: Record<string, unknown>) => Promise<Record<string, (...args: unknown[]) => Promise<unknown>>> }
+const { createFileBridgeHub } = require('../electron/file-bridge-hub.cjs') as { createFileBridgeHub: (options: Record<string, unknown>) => Promise<Record<string, (...args: unknown[]) => Promise<unknown>>> }
 const { createMCPFileClient, createMCPRouter } = require('../electron/mcp-file-client.cjs') as { createMCPFileClient: (root: string) => Promise<unknown>; createMCPRouter: (client: unknown) => (message: unknown) => Promise<{ result?: { isError?: boolean; content: { text: string }[]; structuredContent?: Record<string, unknown> } } | null> }
 
 /** Node has no trusted events; this stands in for the preload-verified native click. */
 export function click(type = 'click') { const event = new Event(type); Object.defineProperty(event, 'isTrusted', { value: true }); return event }
 export async function resetApp(model = 'synthetic/coach-a') {
   clearChangeSetAuthority(); clearCommandAuthority(); clearTaskSplitAuthority()
-  await db.delete(); await db.open(); await ensureSettings(); await db.settings.update('main', { aiEnabled: true, aiModel: model })
+  await db.delete(); await db.open(); await ensureSettings(); await db.settings.update('main', { externalAI: {version:1,enabled:true,epoch:0,clients:[]}, aiEnabled: true, aiModel: model })
   return (await db.settings.get('main'))!
 }
 const clone = <T>(value: T): T => value === undefined ? value : structuredClone(value)
 const meta = { 'io.modelcontextprotocol/protocolVersion': '2026-07-28', 'io.modelcontextprotocol/clientCapabilities': {} }
 export type BridgeHarness = Awaited<ReturnType<typeof bridgeHarness>>
 /** Connects a file/MCP entrance exactly as the Windows app does, minus Electron IPC and the OS click. */
-export async function bridgeHarness(options: { taskIds: string[]; fields: FileBridgeField[]; allowSplit?: boolean; ruleIds?: string[]; automation?: { maxScheduleShiftDays: number; maxOperationsPerDay: number } | null }) {
+export async function bridgeHarness(options: { taskIds: string[]; fields: FileBridgeField[]; allowSplit?: boolean; ruleIds?: string[]; automation?: { maxScheduleShiftDays: number; maxOperationsPerDay: number } | null; allowHistory?: boolean; allowRoutinePreview?: boolean; allowContextRead?: boolean; allowExternalContext?: boolean; allowDetection?: boolean; allowHandoffPrepare?: boolean; allowHandoffs?: boolean; allowRoutineChange?: boolean }) {
   const root = await mkdtemp(join(await realpath(tmpdir()), 'michi-k12-'))
   const nonces = new Map<string, { kind: string; reference: string }>(); let configuration: unknown = null
   const proof = (kind: string, reference = '') => { const nonce = randomUUID(); nonces.set(nonce, { kind, reference }); return nonce }
-  const service = await createFileBridgeService({
+  const service = await createFileBridgeHub({
     agentDirectory: join(root, 'agents'), journalDirectory: join(root, 'private'), signingKey: randomBytes(32),
     getSettings: async () => clone(await db.settings.get('main')), getTasks: async (ids: string[]) => clone((await db.tasks.bulkGet(ids)).filter(Boolean)), getReceipt: async (key: string) => clone(await db.commands.get(key)),
     getRules: async (ids: string[]) => ((await db.calendarRules.get('main'))?.rules ?? []).filter(rule => ids.includes(rule.id)).map(rule => ({ id: rule.id, revision: rule.revision })),
@@ -41,13 +41,14 @@ export async function bridgeHarness(options: { taskIds: string[]; fields: FileBr
   })
   const call = async <T>(method: string, ...args: unknown[]) => clone(await service[method](...args.map(clone))) as T
   const gateway: FileBridgeGateway = {
-    status: () => call('status'), configure: request => call('configure', request, proof('configure')), disconnect: request => call('disconnect', request, proof('disconnect', request.clientId)),
+    status: () => call('status'),clientStatus:request=>call('clientStatus',request),scanClientInbox:request=>call('scanClientInbox',request), selectClient: request => call('selectClient',request), listConnections:()=>call('listConnections'), configure: request => call('configure', request, proof('configure')), disconnect: request => call('disconnect', request, proof('disconnect', request.clientId)),
+    revise:request=>call('revise',request,proof('revise',request.clientId)),invalidateClient:request=>call('invalidateClient',request),
     exportSnapshot: request => call('exportSnapshot', request), scanInbox: () => call('scanInbox'),
     authorizeApplication: binding => call('authorizeApplication', binding, proof('approve', binding.reference)), authorizeAutomaticApplication: binding => call('authorizeAutomaticApplication', binding),
     recordApplied: request => call('recordApplied', request), cancelApplication: request => call('cancelApplication', request), recordRejected: request => call('recordRejected', request), invalidate: () => call('invalidate'),
   }
   const controller: FileBridgeController = createFileBridgeController(gateway)
-  await controller.configure({ intendedHost: 'codex', taskIds: options.taskIds, fields: options.fields, lifetimeHours: 24, ...(options.allowSplit ? { allowSplit: true } : {}), ...(options.ruleIds?.length ? { ruleIds: options.ruleIds } : {}), automation: options.automation ?? null }, click())
+  await controller.configure({ intendedHost: 'codex', taskIds: options.taskIds, fields: options.fields, lifetimeHours: 24, ...(options.allowSplit ? { allowSplit: true } : {}), ...(options.ruleIds?.length ? { ruleIds: options.ruleIds } : {}), ...(options.allowHistory ? { allowHistory: true } : {}), ...(options.allowRoutinePreview ? { allowRoutinePreview: true } : {}), ...(options.allowContextRead ? { allowContextRead: true } : {}), ...(options.allowExternalContext ? { allowExternalContext: true } : {}), ...(options.allowDetection ? { allowDetection: true } : {}), ...(options.allowHandoffPrepare ? { allowHandoffPrepare: true } : {}), ...(options.allowHandoffs ? { allowHandoffs: true } : {}), ...(options.allowRoutineChange ? { allowRoutineChange: true } : {}), automation: options.automation ?? null }, click())
   let status: FileBridgeStatus = await controller.exportSnapshot(click())
   let rpcId = 0, mcp: ((message: unknown) => Promise<unknown>) | null = null
   async function router() { mcp ??= createMCPRouter(await createMCPFileClient(status.root!)) as (message: unknown) => Promise<unknown>; return mcp }

@@ -1,14 +1,15 @@
 import {createRequire} from 'node:module'
 import {once} from 'node:events'
 const {createMCPFileClient,createMCPRouter,cancellationRequestId,MCP_LINE_LIMIT}=createRequire(import.meta.url)('../electron/mcp-file-client.cjs')
+const {createMCPAppClient}=createRequire(import.meta.url)('../electron/mcp-app-client.cjs')
 // Notifications bypass the bounded work queue so queued calls can be cancelled.
 const MAX_QUEUED_REQUESTS=64,MAX_QUEUED_BYTES=2*1024*1024
 try {
-  const args=process.argv.slice(2);if(args.length!==2||args[0]!=='--bridge'){const error=Error('Use --bridge with the directory selected in michi settings');error.code='MCP_USAGE';throw error}
-  const route=createMCPRouter(await createMCPFileClient(args[1]))
+  const args=process.argv.slice(2);if(args.length!==2||!['--bridge','--connect'].includes(args[0])){const error=Error('Use the configuration selected in michi settings');error.code='MCP_USAGE';throw error}
+  const route=args[0]==='--bridge'?createMCPRouter(await createMCPFileClient(args[1])):await createMCPAppClient(args[1],process.env.MICHI_MCP_ENDPOINT,process.env.MICHI_MCP_CREDENTIAL)
   let buffer=Buffer.alloc(0),queue=[],queueBytes=0,pumping=false,closed=false,ended=false
   const pending=new Map()
-  const fatal=reason=>{if(closed)return;closed=true;process.exitCode=1;process.stderr.write(reason+'\n');for(const entry of pending.values())entry.controller.abort();pending.clear();queue=[];queueBytes=0;buffer=Buffer.alloc(0);process.stdin.destroy()}
+  const fatal=reason=>{if(closed)return;closed=true;route.close?.();process.exitCode=1;process.stderr.write(reason+'\n');for(const entry of pending.values())entry.controller.abort();pending.clear();queue=[];queueBytes=0;buffer=Buffer.alloc(0);process.stdin.destroy()}
   const send=async value=>{
     if(!value||closed)return
     if(!process.stdout.write(JSON.stringify(value)+'\n')){
@@ -25,7 +26,7 @@ try {
         catch{if(!entry.controller.signal.aborted)await send({jsonrpc:'2.0',...(entry.id!==undefined?{id:entry.id}:{}),error:{code:-32603,message:'Request failed'}})}
         finally{if(pending.get(entry.id)===entry)pending.delete(entry.id)}
       }
-    }finally{pumping=false;if(ended&&!queue.length&&!closed)closed=true}
+    }finally{pumping=false;if(ended&&!queue.length&&!closed){closed=true;route.close?.()}}
   }
   function line(bytes){
     if(bytes.length>MCP_LINE_LIMIT){fatal('MCP line exceeds limit');return}

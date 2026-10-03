@@ -150,19 +150,19 @@ describe('バックアップの復元前検証', () => {
     const receipt: FileBridgeApplicationReceipt = { version: 1, commandId: crypto.randomUUID(), fileDigest: 'a'.repeat(64), applicationDigest: 'b'.repeat(64), ownerId: settings.profileId, datasetId: settings.datasetId, clientId: registration.client.id, policyEpoch: policy.epoch, sourcePermissionRevision: policy.sourcePermissionRevision, registrationRevision: 1, grantEpoch: 1, taskIds: [taskId], appliedAt: at }
     await db.commands.add({ key: scopeKey, hash: await contentDigest(scope), resultId: JSON.stringify(scope), at })
     await db.commands.add({ key: fileBridgeReceiptKey(receipt.commandId), hash: receipt.applicationDigest, resultId: JSON.stringify(receipt), at })
-    const saved = await captureSnapshot(), invalidate = vi.fn(async () => undefined)
+    const legacyScope = await db.commands.get(scopeKey), saved = await captureSnapshot(), invalidate = vi.fn(async () => undefined)
     vi.stubGlobal('window', { michiFileBridge: { invalidate } })
-    expect(saved.commands.some(item => item.key === scopeKey)).toBe(true)
+    expect(saved.commands.some(item => item.key === scopeKey)).toBe(false)
     expect(await readFileBridgeApplicationReceipt(receipt.commandId)).toEqual(receipt)
     await db.commands.clear()
-    await restoreBackup(saved)
+    await restoreBackup({...saved,commands:[...saved.commands,legacyScope!]})
     expect(invalidate).toHaveBeenCalledOnce()
     expect(await db.commands.get(scopeKey)).toBeUndefined()
     expect(await readFileBridgeApplicationReceipt(receipt.commandId)).toEqual(receipt)
     expect(await db.tasks.toArray()).toEqual(saved.tasks); expect(await db.ledger.toArray()).toEqual(saved.ledger)
     expect((await db.tasks.get(taskId))!.score.manualPoints).toBe(25)
     expect((await captureSnapshot()).commands.every(item => !item.key.startsWith('filebridge:scope:'))).toBe(true)
-    expect(saved.commands.some(item => item.key === scopeKey)).toBe(true)
+    expect(saved.commands.some(item => item.key === scopeKey)).toBe(false)
   })
 
   it('共通カレンダーと完了実績を復元し、古い承認案と対応先の欠落を拒否する', async () => {

@@ -13,6 +13,7 @@ Copy-Item -LiteralPath (Join-Path $project 'dist') -Destination (Join-Path $appF
 Copy-Item -LiteralPath (Join-Path $project 'electron') -Destination (Join-Path $appFolder 'electron') -Recurse
 New-Item -ItemType Directory -Path (Join-Path $appFolder 'scripts') -Force | Out-Null
 Copy-Item -LiteralPath (Join-Path $project 'scripts\michi-mcp.mjs') -Destination (Join-Path $appFolder 'scripts\michi-mcp.mjs')
+Copy-Item -LiteralPath (Join-Path $project 'scripts\michi-cli.mjs') -Destination (Join-Path $appFolder 'scripts\michi-cli.mjs')
 Copy-Item -LiteralPath (Join-Path $project 'package.json') -Destination (Join-Path $appFolder 'package.json')
 Copy-Item -LiteralPath (Join-Path $project 'package-lock.json') -Destination (Join-Path $appFolder 'package-lock.json')
 Push-Location $appFolder

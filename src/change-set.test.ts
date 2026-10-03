@@ -16,7 +16,7 @@ let owner:ChangeContext,coach:ChangeContext,taskId:string
 beforeEach(async()=>{
   await db.delete();await db.open()
   const settings=await ensureSettings()
-  await db.settings.update('main',{aiEnabled:true})
+  await db.settings.update('main',{aiEnabled:true,externalAI:{version:1,enabled:true,epoch:0,clients:[]}})
   const shared={ownerId:settings.profileId,datasetId:settings.datasetId,allowedFields:['notes','scheduledDate'] as ChangeContext['allowedFields'],sourceRevisions:[]}
   owner={...shared,principal:{id:settings.profileId,kind:'human'}}
   coach={...shared,principal:{id:'local-coach',kind:'coach',model:'model/A'}}

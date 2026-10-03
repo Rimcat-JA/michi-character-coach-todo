@@ -6,7 +6,6 @@ import { clearCalendarRulesAuthority } from './calendar-rules-save'
 import { clearRoutineAssistanceAuthority } from './routine-assist-save'
 import { clearCompletionReconfirmationAuthority } from './completion-reconfirmation'
 import { clearCalendarCSVImportAuthority } from './calendar-csv-import-save'
-import { invalidateExternalConnection } from './external-connection'
 import { clearCommandAuthority } from './command-bus'
 import { clearTaskSplitAuthority } from './task-split-change'
 import { validateEmbeddingSettings } from './embedding-settings'
@@ -31,14 +30,21 @@ async function writeAIConnection(enabled: (current: boolean) => boolean, model?:
   await db.transaction('rw', db.settings, async () => {
     const settings = await db.settings.get('main')
     if (!settings) throw new Error('本人の設定がありません')
-    const previous = changePolicyFor(settings)
-    const policy = { ...previous, epoch: previous.epoch + 1 }
-    validateChangePolicy(policy)
-    await db.settings.put({ ...settings, aiEnabled: enabled(settings.aiEnabled), ...(model === undefined ? {} : { aiModel: model }), changePolicy: policy })
+    const aiConnectionEpoch = (settings.aiConnectionEpoch ?? 0) + 1
+    if (!Number.isSafeInteger(aiConnectionEpoch)) throw new Error('AI接続の版が上限に達しています')
+    await db.settings.put({ ...settings, aiEnabled: enabled(settings.aiEnabled), aiConnectionEpoch, ...(model === undefined ? {} : { aiModel: model }) })
   })
-  clearVolatileAuthorities()
-  await invalidateExternalConnection()
+  // BYOK settings do not change the shared policy epoch or external client authority.
+  clearChangeSetAuthority({ coachOnly: true })
+  clearCommandAuthority({ coachOnly: true })
+  clearTaskSplitAuthority({ coachOnly: true })
+  clearDetectionAuthority()
+  clearCoachTurnAuthority()
+  clearRoutineAssistanceAuthority({ coachOnly: true })
+  clearCompletionReconfirmationAuthority()
+  clearCalendarCSVImportAuthority()
 }
+
 /** Optional second model for detection verification. Changing it moves the policy epoch, so prepared runs and candidates expire. */
 export async function saveAIVerifierModel(model: string | null) {
   if (model !== null && !/^[\w~./:-]{3,120}$/.test(model)) throw new Error('検証用のモデルIDを確認してください')

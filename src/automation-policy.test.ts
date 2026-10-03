@@ -13,7 +13,7 @@ function humanClick() { const event = new Event('click'); Object.defineProperty(
 let owner: ChangeContext, coach: ChangeContext
 beforeEach(async () => {
   clearChangeSetAuthority(); await db.delete(); await db.open()
-  const settings = await ensureSettings(); await db.settings.update('main', { aiEnabled: true })
+  const settings = await ensureSettings(); await db.settings.update('main', { externalAI: {version:1,enabled:true,epoch:0,clients:[]}, aiEnabled: true })
   const shared = { ownerId: settings.profileId, datasetId: settings.datasetId, allowedFields: ['notes', 'scheduledDate'] as TaskChangeField[], sourceRevisions: [] }
   owner = { ...shared, principal: { id: settings.profileId, kind: 'human' } }; coach = { ...shared, principal: { id: 'app-coach', kind: 'coach', model: 'model/A' } }
 })

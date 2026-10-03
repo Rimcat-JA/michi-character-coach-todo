@@ -6,13 +6,14 @@ import path from 'node:path'
 import crypto from 'node:crypto'
 import { createRequire } from 'node:module'
 const { createFileBridgeService } = createRequire(import.meta.url)('./file-bridge-service.cjs')
+const { createMCPFileClient } = createRequire(import.meta.url)('./mcp-file-client.cjs')
 
 async function fixture(t, { getReceiptOverride, auto = null } = {}) {
   const root = await fs.mkdtemp(path.join(await fs.realpath(os.tmpdir()), 'michi-filebridge-service-'))
   t.after(async () => { const resolved = path.resolve(root); assert.equal(path.dirname(resolved), path.resolve(await fs.realpath(os.tmpdir()))); assert.ok(path.basename(resolved).startsWith('michi-filebridge-service-')); await fs.rm(resolved, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }) })
   // N09 operation table as main reads it from the app DB; only operation/mode/shift matter here.
   const operations = [{ operation: 'task.text', mode: 'auto_within_bounds', max_schedule_days_delta: null }, { operation: 'task.schedule', mode: 'auto_within_bounds', max_schedule_days_delta: 3 }]
-  const settings = { profileId: 'owner', datasetId: crypto.randomUUID(), aiEnabled: true, changePolicy: { epoch: 1, sourcePermissionRevision: 1, aiChangesEnabled: true, ...(auto ? { operations } : {}) } }
+  const settings = { profileId: 'owner', datasetId: crypto.randomUUID(), aiEnabled: true, externalAI: {version:1,enabled:true,epoch:0,clients:[]}, changePolicy: { epoch: 1, sourcePermissionRevision: 1, aiChangesEnabled: true, ...(auto ? { operations } : {}) } }
   const task = { id: crypto.randomUUID(), revision: 1, title: '正式タスク', notes: '本人のメモ', scheduledDate: '2026-10-01', containerId: null, deletedAt: null }
   const receipts = new Map(), proofs = new Map(); let configuration = null
   const native = (kind, reference = '') => { const nonce = crypto.randomUUID(); proofs.set(nonce, { kind, reference }); return nonce }
@@ -30,7 +31,7 @@ async function fixture(t, { getReceiptOverride, auto = null } = {}) {
   }
   function persist(value, binding, lease) {
     const receipt = { version: 1, commandId: value.command_id, fileDigest: binding.fileDigest, applicationDigest: binding.applicationDigest, ownerId: settings.profileId, datasetId: settings.datasetId, clientId: lease.clientId, policyEpoch: 1, sourcePermissionRevision: 1, registrationRevision: lease.registrationRevision, grantEpoch: lease.grantEpoch, taskIds: [task.id], appliedAt: new Date().toISOString() }
-    const key = `filebridge:applied:${value.command_id}`
+    const key = `filebridge:applied:${lease.clientId}:${value.command_id}`
     receipts.set(key, { key, hash: binding.applicationDigest, resultId: JSON.stringify(receipt), at: receipt.appliedAt }); return receipt
   }
   return { root, service, settings, task, status, config, native, command, persist, receipts, configuration: () => configuration }
@@ -96,7 +97,7 @@ test('revocation acknowledges a DB commit already made and revokes remaining aut
 })
 test('AI OFF after a lease cancels an uncommitted attempt and disables the client', async t => {
   const f = await fixture(t), { binding } = await f.command(), lease = await f.service.authorizeApplication(binding, f.native('approve', binding.reference))
-  f.settings.aiEnabled = false
+  f.settings.externalAI.enabled = false
   assert.equal((await f.service.status()).connected, false)
   const result = await f.service.cancelApplication({ leaseId: lease.leaseId, reference: binding.reference })
   assert.equal(result.state, 'unknown'); assert.equal(f.receipts.size, 0)
@@ -116,6 +117,7 @@ test('receipt read failure still revokes the external copy and disables the save
 })
 test('an automatic lease needs main\'s own signed auto grant inside its bounds and quota', async t => {
   const f = await fixture(t, { auto: { maxScheduleShiftDays: 2, maxOperationsPerDay: 1 } })
+  f.settings.aiEnabled = false // BYOK is independent of external delegation.
   assert.equal(f.status.registration.client.grant.mutation_mode, 'auto_within_bounds')
   assert.deepEqual(f.status.registration.client.grant.automation, { max_schedule_shift_days: 2, max_operations_per_day: 1 })
   const far = await f.command({ scheduled_date: '2026-10-05' })
@@ -138,7 +140,7 @@ test('without a delegated grant, with a changed N09 table or after a stop, autom
   const manual = await fixture(t), entry = await manual.command({ notes: '自動にしたい' })
   await assert.rejects(manual.service.authorizeAutomaticApplication(entry.binding), /AUTOMATION_NOT_GRANTED/)
   await assert.rejects(manual.service.configure({ ...manual.config, fields: ['notes'], automation: { maxScheduleShiftDays: 1, maxOperationsPerDay: 1 } }, manual.native('configure')), /AUTOMATION_NOT_GRANTED/)
-  await assert.rejects(manual.service.configure({ ...manual.config, automation: { maxScheduleShiftDays: 1, maxOperationsPerDay: 1 } }, manual.native('configure')), /AUTOMATION_SCOPE/)
+  await assert.rejects(manual.service.configure({ ...manual.config, fields:['title'], automation: { maxScheduleShiftDays: 1, maxOperationsPerDay: 1 } }, manual.native('configure')), /AUTOMATION_SCOPE/)
   const f = await fixture(t, { auto: { maxScheduleShiftDays: 2, maxOperationsPerDay: 5 } }), queued = await f.command({ scheduled_date: '2026-10-02' })
   f.settings.changePolicy.operations = f.settings.changePolicy.operations.map(rule => rule.operation === 'task.schedule' ? { ...rule, mode: 'require_approval' } : rule)
   await assert.rejects(f.service.authorizeAutomaticApplication(queued.binding), /AUTOMATION_NOT_GRANTED/)
@@ -169,7 +171,7 @@ test('file bridge invalidate leaves the PC-operation and GitHub private stores u
   const listing = async () => Object.fromEntries(await Promise.all(others.map(async name => [name, (await fs.readdir(path.join(root, name), { recursive: true })).sort()])))
   const contents = () => Promise.all(others.map(name => fs.readFile(path.join(root, name, 'connection.bin'), 'utf8')))
   for (const name of others) { await fs.mkdir(path.join(root, name, 'journal'), { recursive: true }); await fs.writeFile(path.join(root, name, 'connection.bin'), `${name}-sentinel`); await fs.writeFile(path.join(root, name, 'journal', 'entry.json'), '{}') }
-  const settings = { profileId: 'owner', datasetId: crypto.randomUUID(), aiEnabled: true, changePolicy: { epoch: 1, sourcePermissionRevision: 1, aiChangesEnabled: true } }
+  const settings = { profileId: 'owner', datasetId: crypto.randomUUID(), aiEnabled: true, externalAI: {version:1,enabled:true,epoch:0,clients:[]}, changePolicy: { epoch: 1, sourcePermissionRevision: 1, aiChangesEnabled: true } }
   const task = { id: crypto.randomUUID(), revision: 1, title: '正式タスク', notes: '', scheduledDate: '2026-10-01', containerId: null, deletedAt: null }
   let configuration = null
   const proofs = new Set(['configure-proof'])
@@ -216,4 +218,58 @@ test('K12/N03: split and series grants are written only from the owner configura
   await assert.rejects(f.service.configure({ ...f.config, approved: true }, f.native('configure')), /CONFIG_INVALID/)
   const status = await f.service.configure({ ...f.config, allowSplit: true, ruleIds: [] }, f.native('configure'))
   assert.ok(status.registration.client.grant.keys.includes('tasks:split')); assert.ok(!status.registration.client.grant.keys.includes('routines:prepare')); assert.equal(Object.hasOwn(status.registration, 'rule_ids'), false)
+})
+const revisionOf=registration=>({clientId:registration.client.id,expectedRevision:registration.client.revision,taskIds:registration.task_ids,fields:['notes'],expiresAt:registration.client.grant.expires_at,automation:null,maxScheduleShiftDays:3,maxOperationsPerDay:5,allowSplit:false,ruleIds:[],allowHistory:false,allowRoutinePreview:false,allowContextRead:false,allowExternalContext:false,allowDetection:false,allowHandoffPrepare:false,allowHandoffs:false,allowRoutineChange:false})
+test('same-client grant reduction invalidates old snapshot, increments both revisions and preserves the durable quota journal',async t=>{
+ const f=await fixture(t),old=f.status,client=await createMCPFileClient(old.root),pending=await f.command(),lease=await f.service.authorizeApplication(pending.binding,f.native('approve',pending.binding.reference))
+ const next=await f.service.revise(revisionOf(old.registration),null)
+ assert.equal(next.registration.client.id,old.registration.client.id);assert.equal(next.registration.client.revision,2);assert.equal(next.registration.client.grant_epoch,2);assert.equal(next.snapshot,null)
+ await assert.rejects(client.snapshot(),error=>error.code==='SNAPSHOT_INVALID')
+ await assert.rejects(f.service.recordApplied({leaseId:lease.leaseId,reference:pending.binding.reference,receipt:f.persist(pending.value,pending.binding,lease)}))
+ const fresh=await f.service.exportSnapshot({tasks:[{id:f.task.id}]});assert.equal(fresh.snapshot.registration_revision,2);assert.deepEqual((await client.snapshot()).tasks.map(task=>Object.keys(task)),[['id','notes','revision']])
+ assert.equal((await fs.readdir(path.join(f.root,'private',old.registration.client.id))).filter(name=>name.endsWith('.claim.json')).length,1)
+})
+test('grant expansion and quota/time increase consume one native proof; stale revision never overwrites the winner',async t=>{
+ const f=await fixture(t),reduced=await f.service.revise(revisionOf(f.status.registration),null),request={...revisionOf(reduced.registration),fields:['notes','title'],maxOperationsPerDay:6}
+ await assert.rejects(f.service.revise(request,null),error=>error.code==='HUMAN_APPROVAL_REQUIRED')
+ const proof=f.native('revise',request.clientId),next=await f.service.revise(request,proof);assert.equal(next.registration.client.revision,3)
+ await assert.rejects(f.service.revise({...request,expectedRevision:3,maxOperationsPerDay:7},proof),error=>error.code==='HUMAN_APPROVAL_REQUIRED')
+ await assert.rejects(f.service.revise(request,f.native('revise',request.clientId)),error=>error.code==='REVISION_CONFLICT')
+ assert.equal((await f.service.status()).registration.client.grant.max_operations_per_day,6)
+})
+test('concurrent revisions with the same expected version have exactly one winner',async t=>{
+ const f=await fixture(t),request=revisionOf(f.status.registration),results=await Promise.allSettled([f.service.revise(request,null),f.service.revise({...request,fields:['scheduled_date']},null)])
+ assert.equal(results.filter(result=>result.status==='fulfilled').length,1);assert.equal(results.find(result=>result.status==='rejected').reason.code,'REVISION_CONFLICT');assert.equal((await f.service.status()).registration.client.revision,2)
+})
+test('grant revision acknowledges a DB commit already made; receipt read failure still revokes the old copy',async t=>{
+ const f=await fixture(t),pending=await f.command(),lease=await f.service.authorizeApplication(pending.binding,f.native('approve',pending.binding.reference))
+ f.persist(pending.value,pending.binding,lease);await f.service.revise(revisionOf(f.status.registration),null)
+ const result=await f.service.commandResult(pending.value.command_id);assert.equal(result.state,'applied');assert.equal(result.receipt.commandId,pending.value.command_id)
+ let failed=false
+ const g=await fixture(t,{getReceiptOverride:(key,receipts)=>{if(failed)throw Error('synthetic receipt failure');return receipts.get(key)}}),q=await g.command()
+ await g.service.authorizeApplication(q.binding,g.native('approve',q.binding.reference));failed=true
+ await assert.rejects(g.service.revise(revisionOf(g.status.registration),null),/synthetic receipt failure/)
+ await assert.rejects(async()=>{const client=await createMCPFileClient(g.status.root);return client.snapshot()},error=>error.code==='CONNECTION_REVOKED')
+ assert.equal(g.configuration(),null)
+})
+test('extra read/share scopes are opt-in with explicit native consent and stay off by default',async t=>{
+ const f=await fixture(t),extra={allowHistory:true,allowRoutinePreview:true,allowContextRead:true,allowExternalContext:true,allowDetection:true,allowHandoffPrepare:true,allowHandoffs:true}
+ const status=await f.service.configure({...f.config,...extra},f.native('configure')),grant=status.registration.client.grant
+ for(const key of ['history:read','routines:read','context:read','detection:request','detection:read','handoff:prepare'])assert.ok(grant.keys.includes(key),key)
+ assert.equal(grant.allow_external_context,true);assert.equal(grant.allow_handoffs,true)
+ const plain=await f.service.configure({...f.config},f.native('configure')),bare=plain.registration.client.grant
+ for(const key of ['history:read','routines:read','context:read','detection:request','detection:read','handoff:prepare'])assert.ok(!bare.keys.includes(key),key)
+ assert.equal(bare.allow_external_context,false);assert.equal(bare.allow_handoffs,false)
+ await assert.rejects(f.service.configure({...f.config,allowHistory:'yes'},f.native('configure')),error=>error.code==='CONFIG_INVALID')
+})
+test('enabling disclosure flags or extra scopes on revise consumes a native proof; reductions do not',async t=>{
+ const f=await fixture(t),request={...revisionOf(f.status.registration),allowHistory:true,allowExternalContext:true,allowHandoffs:true}
+ await assert.rejects(f.service.revise(request,null),error=>error.code==='HUMAN_APPROVAL_REQUIRED')
+ const next=await f.service.revise(request,f.native('revise',request.clientId))
+ assert.ok(next.registration.client.grant.keys.includes('history:read'))
+ assert.equal(next.registration.client.grant.allow_external_context,true);assert.equal(next.registration.client.grant.allow_handoffs,true)
+ const reduced={...revisionOf(next.registration)}
+ const done=await f.service.revise(reduced,null)
+ assert.ok(!done.registration.client.grant.keys.includes('history:read'))
+ assert.equal(done.registration.client.grant.allow_external_context,false);assert.equal(done.registration.client.grant.allow_handoffs,false)
 })

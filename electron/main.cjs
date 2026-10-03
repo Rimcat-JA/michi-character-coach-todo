@@ -11,6 +11,7 @@ const { extractDocument, extractScheduleDocument } = require('./document-extract
 const { installFolderWatchIPC } = require('./folder-watch-ipc.cjs')
 const { assertModelId, validateTaskSplitRequest } = require('./ai-request-validation.cjs')
 const { installFileBridgeIPC } = require('./file-bridge-ipc.cjs')
+const { installOAuthLocalIPC } = require('./oauth-local-ipc.cjs')
 const { installLocalActionIPC } = require('./local-action-ipc.cjs')
 const { installGitHubPublishIPC } = require('./github-publish-ipc.cjs')
 const { readAppDatabase, readNotificationContext } = require('./app-db-reader.cjs')
@@ -24,6 +25,7 @@ const { installMediaPermissionPolicy } = require('./media-permission.cjs')
 const { githubQAFetch } = require('./github-qa.cjs')
 const { createOSNotificationGuard, notificationTextAllowed } = require('./notification-delivery.cjs')
 const { createTrayMode } = require('./tray-mode.cjs')
+const { createAIProcessingGuard } = require('./ai-processing.cjs')
 const { createAILocks } = require('./ai-locks.cjs')
 
 const hasInstanceLock = app.requestSingleInstanceLock()
@@ -41,6 +43,7 @@ let sessionKey = null
 const aiLocks = createAILocks()
 let aiBudget = null
 let networkGateway = null
+let aiProcessing = null
 const usageBudget = () => aiBudget ??= createAIBudget({ filePath: path.join(app.getPath('userData'), 'openrouter-usage.json') })
 
 function assertAppFrame(event) {
@@ -70,11 +73,14 @@ const legacyOnlineConfigured = async () => await exists(keyPath()) || await exis
 async function openRouterCompletion(kind, request, options = {}) {
   try { await egress().assertAllowed('openrouter') }
   catch (error) { throw new Error(error?.code === 'NETWORK_POLICY_OFFLINE' ? 'AIはオフラインのため利用できません（オフライン専用の設定）。入力と下書きは残ります' : error.message) }
+  if (!aiProcessing) throw new Error('AI処理を準備中です')
+  const authority = await aiProcessing.begin()
   const key = await loadKey()
   if (!key) throw new Error('OpenRouterのAPIキーを設定してください')
   const reservation = await usageBudget().reserve({ kind, reservedTokens: estimateReservationTokens(request.messages, request.max_tokens), ...(options.automatic ? { automatic: true } : {}) })
   let response
   try {
+    await aiProcessing.assertCurrent(authority)
     response = await egress().fetch('openrouter', 'https://openrouter.ai/api/v1/chat/completions', {
       method: 'POST',
       headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json', 'X-OpenRouter-Title': 'michi Character Coach ToDo' },
@@ -96,6 +102,7 @@ async function openRouterCompletion(kind, request, options = {}) {
   }
   const total = body?.usage?.total_tokens
   await usageBudget().settle(reservation.id, { outcome: 'success', actualTokens: Number.isSafeInteger(total) && total >= 0 && total <= 10000000 ? total : null })
+  await aiProcessing.assertCurrent(authority)
   return body
 }
 
@@ -355,7 +362,7 @@ if (hasInstanceLock) app.whenReady().then(() => {
   session.defaultSession.setSpellCheckerEnabled(false)
 
   const win = new BrowserWindow({
-    show: !(!app.isPackaged && process.env.MICHI_QA_HIDDEN === '1' && /[\\/]qa-reminders-profile[\\/]local-integrations$/i.test(app.getPath('userData'))),
+    show: !(!app.isPackaged && process.env.MICHI_QA_HIDDEN === '1' && /[\\/]qa-reminders-profile[\\/](?:local-integrations|external-ai)$/i.test(app.getPath('userData'))),
     width: 1280, height: 830, minWidth: 380, minHeight: 550,
     backgroundColor: '#f7f7fb', title: 'michi — キャラクターコーチToDo',
     autoHideMenuBar: true,
@@ -365,6 +372,7 @@ if (hasInstanceLock) app.whenReady().then(() => {
   win.webContents.on('will-navigate', (event, url) => { if (!url.startsWith('michi://app/')) event.preventDefault() })
   const qaGitHub = githubQAFetch({ app })
   const qaSchedule = scheduleQAFixtureMode(app)
+  aiProcessing = createAIProcessingGuard(() => readAppDatabase(win, 'settings', 'main'))
   networkGateway = createNetworkGateway({ fetchImpl: qaGitHub.fetchImpl, scheduleTransport: createScheduleTransport({ qaLoopback: qaSchedule }), qaScheduleLoopback: qaSchedule, webhookTransport: createScheduleTransport({ qaLoopback: true }), getPolicy: async () => policyFromSettings(await readAppDatabase(win, 'settings', 'main'), await legacyOnlineConfigured()) })
   const refreshScheduler = installScheduleRefreshIPC({ ipcMain, dialog, win, app, safeStorage, gateway: networkGateway, assertFrame: assertAppFrame, readDatabase: readAppDatabase, qaLoopback: qaSchedule })
   installCalDAVIPC({ ipcMain, dialog, win, app, safeStorage, gateway: networkGateway, assertFrame: assertAppFrame, readDatabase: readAppDatabase, refreshScheduler, qaLoopback: qaSchedule })
@@ -379,6 +387,7 @@ if (hasInstanceLock) app.whenReady().then(() => {
   })
   win.loadURL('michi://app/index.html')
   installFileBridgeIPC({ ipcMain, win, app, safeStorage })
+  installOAuthLocalIPC({ ipcMain, win, app, safeStorage, assertMain: assertAppFrame, readDatabase: readAppDatabase })
   installLocalActionIPC({ ipcMain, win, app, safeStorage })
   installGitHubPublishIPC({ ipcMain, win, app, safeStorage, qaEmulator: qaGitHub.enabled, fetchImpl: (url, init) => egress().fetch('github', url, init) })
   ipcMain.handle('michi:open-top-of-mind', event => {
