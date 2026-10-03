@@ -70,7 +70,7 @@ export async function dispatchExternalReadTool(name:string,args:Record<string,un
    const task=await db.tasks.get(String(args.task_id))
    if(!task||task.deletedAt)fail('NOT_FOUND')
    const notes=registration.client.grant.fields.includes('notes')?ownerNotesForEgress(task.notes).notes:''
-   return {task:summary(task,registration),notes:notes.slice(0,4000),protected_fields:['title','due','points'],sources:[],notes_truncated:notes.length>4000}
+   return {task:summary(task,registration),notes:notes.slice(0,4000),protected_fields:['title','due','points','labels'],sources:[],notes_truncated:notes.length>4000}
   }
   if(name==='coach_search_tasks'){
    const filter=(args.filter??{}) as {query?:string;status?:string[];project_ids?:string[]},limit=Number(args.limit??20)

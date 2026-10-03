@@ -22,7 +22,7 @@ it('real app reads through the catalog core: exact 15 schemas, only granted task
   expect((await core.handle('wrong-credential',message('tools/list'))).error.message).toBe('UNAUTHENTICATED')
   expect((await core.handle('synthetic-credential',message('tools/list'))).result.tools).toEqual(catalog.tools)
   const read=await call('coach_get_task',{task_id:a})
-  expect(read.structuredContent.data.task).toMatchObject({id:a,revision:1,points:25});expect(read.structuredContent.data.notes).toBe('本人メモ');expect(read.structuredContent.meta.actor_id).toBe(reg.client.id)
+  expect(read.structuredContent.data.task).toMatchObject({id:a,revision:1,points:25});expect(read.structuredContent.data.notes).toBe('本人メモ');expect(read.structuredContent.meta.actor_id).toBe(reg.client.id);expect(read.structuredContent.data.protected_fields).toContain('labels')
   const foreign=await call('coach_get_task',{task_id:b});expect(foreign.isError).toBe(true);expect(foreign.structuredContent.data).toBeNull();expect(foreign.structuredContent.error.code).toBe('NOT_FOUND')
   const search=await call('coach_search_tasks',{});expect(search.structuredContent.data.items).toHaveLength(1);expect(JSON.stringify(search)).not.toContain('秘密')
   const contextRead=await call('coach_search_context',{query:'秘密',scope_ids:[b]});expect(contextRead.structuredContent.data.excerpts).toEqual([]);expect(JSON.stringify(contextRead)).not.toContain('秘密資料')
