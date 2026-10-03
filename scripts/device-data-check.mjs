@@ -27,7 +27,7 @@ app.whenReady().then(async () => {
   try {
     for (const partition of ['device-A', 'device-B']) {
       session.fromPartition(partition).webRequest.onBeforeRequest({ urls: ['http://*/*', 'https://*/*'] }, (_details, callback) => { requests++; callback({ cancel: true }) })
-      const win = new BrowserWindow({ show: false, webPreferences: { partition, nodeIntegration: false, contextIsolation: true } })
+      const win = new BrowserWindow({ show: false, webPreferences: { partition, sandbox: true, nodeIntegration: false, contextIsolation: true } })
       windows.push(win)
       await win.loadFile(path.join(out, 'index.html'))
       await call(win, 'ready')
