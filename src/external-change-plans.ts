@@ -4,6 +4,7 @@ import { canonicalJSON, contentDigest } from './canonical'
 import { uid } from './domain'
 import { assertExternalChangeRequest, decideExternalCommand, type ExternalChangeRequest } from './external-command-gate'
 import { externalCommandEnvelope } from './external-command-adapter'
+import { verifiedExternalInstruction } from './external-instructions'
 import { assertExternalToolAuthority, type ExternalToolContext } from './external-tools'
 import { operationMode, operationsForFields } from './automation-policy'
 import { toTaskPatch } from './command-bus'
@@ -35,7 +36,11 @@ async function authorizeRequest(request:ExternalChangeRequest,context:ExternalTo
  const {registration,policy}=await assertExternalToolAuthority(context),grant=registration.client.grant
  assertExternalChangeRequest(request)
  if(!['task.create','task.update','task.score.set_manual'].includes(request.operation))fail('FORBIDDEN_OPERATION')
- if(request.basis.kind!=='external_request')fail('UNVERIFIED_REFERENCE') // Native value confirmation remains on the shared inbox card.
+ let verifiedBasis=false
+ if(request.basis.kind==='external_request')verifiedBasis=false
+ else if(request.basis.kind==='app_instruction')verifiedBasis=(await verifiedExternalInstruction(request,context))!==null
+ else fail('UNVERIFIED_REFERENCE')
+ if(request.basis.kind!=='external_request'&&!verifiedBasis)fail('UNVERIFIED_REFERENCE')
  if(request.task_id&&!registration.task_ids.includes(request.task_id))fail('NOT_FOUND')
  const task=request.task_id?await db.tasks.get(request.task_id):null
  if(request.task_id&&(!task||task.deletedAt||grant.project_ids.length&&!grant.project_ids.includes(task.containerId??'')))fail('NOT_FOUND')
@@ -43,7 +48,7 @@ async function authorizeRequest(request:ExternalChangeRequest,context:ExternalTo
  const envelope=externalCommandEnvelope(request,request.request_key),patch=toTaskPatch(envelope.payload)
  if(task?.dueAt&&Object.hasOwn(envelope.payload,'due_date'))fail('FEATURE_NOT_IMPLEMENTED')
  const fieldMap:Record<string,string>={due_date:'due',manual_points:'points'}
- const decision=decideExternalCommand(request,{enabled:true,authenticated:true,tokenValid:true,audienceMatches:true,active:true,ownerMatches:true,datasetMatches:true,egressAllowed:true,mutationsEnabled:policy.aiChangesEnabled&&operationsForFields(Object.keys(patch) as TaskChangeField[]).every(operation=>operationMode(policy,operation)!=='deny'),scopes:grant.keys,fields:grant.fields.map(field=>fieldMap[field]??field),revision:checkRevision?task?.revision??null:request.expected_revision??null,mode:grant.mutation_mode,protectedFields:['title','due','points'],hardLockedFields:[],boundsAllowed:false,quotaAllowed:grant.max_operations_per_day>0})
+ const decision=decideExternalCommand(request,{enabled:true,authenticated:true,tokenValid:true,audienceMatches:true,active:true,ownerMatches:true,datasetMatches:true,egressAllowed:true,mutationsEnabled:policy.aiChangesEnabled&&operationsForFields(Object.keys(patch) as TaskChangeField[]).every(operation=>operationMode(policy,operation)!=='deny'),scopes:grant.keys,fields:grant.fields.map(field=>fieldMap[field]??field),revision:checkRevision?task?.revision??null:request.expected_revision??null,mode:grant.mutation_mode,protectedFields:['title','due','points'],hardLockedFields:[],boundsAllowed:false,quotaAllowed:grant.max_operations_per_day>0},()=>verifiedBasis)
  if(decision!=='AWAITING_APPROVAL'&&decision!=='AUTO_ELIGIBLE')fail(decision)
  if(Object.keys(envelope.payload).some(field=>!grant.fields.includes(field as typeof grant.fields[number])))fail('FIELD_DENIED')
  if(typeof envelope.payload.notes==='string'&&envelope.payload.notes.length>1000)fail('PROPOSAL_BOUND')
