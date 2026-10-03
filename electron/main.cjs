@@ -11,6 +11,7 @@ const { extractDocument, extractScheduleDocument } = require('./document-extract
 const { installFolderWatchIPC } = require('./folder-watch-ipc.cjs')
 const { assertModelId, validateTaskSplitRequest } = require('./ai-request-validation.cjs')
 const { installFileBridgeIPC } = require('./file-bridge-ipc.cjs')
+const { installOAuthLocalIPC } = require('./oauth-local-ipc.cjs')
 const { installLocalActionIPC } = require('./local-action-ipc.cjs')
 const { installGitHubPublishIPC } = require('./github-publish-ipc.cjs')
 const { readAppDatabase, readNotificationContext } = require('./app-db-reader.cjs')
@@ -386,6 +387,7 @@ if (hasInstanceLock) app.whenReady().then(() => {
   })
   win.loadURL('michi://app/index.html')
   installFileBridgeIPC({ ipcMain, win, app, safeStorage })
+  installOAuthLocalIPC({ ipcMain, win, app, safeStorage, assertMain: assertAppFrame, readDB: readAppDatabase })
   installLocalActionIPC({ ipcMain, win, app, safeStorage })
   installGitHubPublishIPC({ ipcMain, win, app, safeStorage, qaEmulator: qaGitHub.enabled, fetchImpl: (url, init) => egress().fetch('github', url, init) })
   ipcMain.handle('michi:open-top-of-mind', event => {

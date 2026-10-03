@@ -96,6 +96,35 @@ contextBridge.exposeInMainWorld('michiFileBridge', {
   invalidate: () => ipcRenderer.invoke('michi:filebridge-invalidate')
 })
 
+let nativeOAuthProof = null
+window.addEventListener('click', event => {
+  if (!event.isTrusted || !(event.target instanceof Element)) return
+  const button = event.target.closest('button[data-oauth-enable],button[data-oauth-register],button[data-oauth-allow],button[data-oauth-deny]')
+  if (!button || button.disabled) return
+  const kind = button.hasAttribute('data-oauth-enable') ? 'oauth-enable' : button.hasAttribute('data-oauth-register') ? 'oauth-register' : 'oauth-consent'
+  const reference = button.hasAttribute('data-oauth-enable') ? '' : button.getAttribute('data-oauth-register') ?? button.getAttribute('data-oauth-allow') ?? button.getAttribute('data-oauth-deny') ?? ''
+  const proof = { nonce: crypto.randomUUID(), kind, reference }
+  nativeOAuthProof = { ...proof, at: Date.now() }
+  ipcRenderer.send('michi:oauth-native-proof', proof)
+}, true)
+function oauthNativeCall(method, kind, reference, request) {
+  const proof = nativeOAuthProof; nativeOAuthProof = null
+  if (!proof || proof.kind !== kind || proof.reference !== reference || Date.now() - proof.at > 5000) return Promise.reject(new Error('本人の確認ボタンから操作してください'))
+  return ipcRenderer.invoke(`michi:oauth-${method}`, { request, proofNonce: proof.nonce })
+}
+contextBridge.exposeInMainWorld('michiOAuth', {
+  status: () => ipcRenderer.invoke('michi:oauth-status'),
+  setEnabled: enabled => oauthNativeCall('enable', 'oauth-enable', '', { enabled }),
+  register: request => oauthNativeCall('register', 'oauth-register', request?.clientId, request),
+  unregister: request => oauthNativeCall('unregister', 'oauth-register', request?.clientId, request),
+  consent: request => oauthNativeCall('consent', 'oauth-consent', request?.pendingId, request),
+  onConsentRequested: callback => {
+    const listener = (_event, value) => callback(value)
+    ipcRenderer.on('michi:oauth-consent-requested', listener)
+    return () => ipcRenderer.removeListener('michi:oauth-consent-requested', listener)
+  },
+})
+
 let nativeLocalActionProof = null
 window.addEventListener('click', event => {
   if (!event.isTrusted || !(event.target instanceof Element)) return
