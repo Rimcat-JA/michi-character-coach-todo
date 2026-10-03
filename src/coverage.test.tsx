@@ -40,7 +40,7 @@ describe('K11 会話ごとの取得範囲とproviderの能力表示', () => {
     const calendar = calendarCoverage(state)
     expect(calendar).toMatchObject([{ provider: 'calendar', method: 'csv-file', segments: [{ fromDate: '2026-09-01', toDate: '2026-09-30' }, { fromDate: '2026-10-05', toDate: '2026-10-31' }], gaps: [{ fromDate: '2026-10-01', toDate: '2026-10-04' }], lastCheckedAt: '2026-10-01T00:00:00.000Z' }])
     const capabilities = providerCapabilities(calendar)
-    expect(capabilities.map(row => row.provider)).toEqual(['line', 'discord', 'slack', 'teams', 'other', 'calendar'])
+    expect(capabilities.map(row => row.provider)).toEqual(['line', 'discord', 'telegram', 'slack', 'teams', 'other', 'calendar'])
     for (const row of capabilities) {
       expect(row.capabilities.manual_import.state).toBe('available')
       for (const key of ['history_backfill', 'incoming_events', 'edits', 'deletions', 'send', 'user_auth', 'policy_status'] as const) expect(row.capabilities[key].state, `${row.provider}:${key}`).toBe('unsupported')

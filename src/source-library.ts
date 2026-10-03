@@ -13,7 +13,7 @@ import { withdrawSourceObligations } from './detection-ledger'
 import { validateDocumentMetadata } from './document-metadata'
 import { assertSourceProcessingActive } from './source-processing-guard'
 
-export type SourceProvider = 'local' | 'slack' | 'line' | 'teams' | 'discord' | 'other'
+export type SourceProvider = 'local' | 'slack' | 'line' | 'teams' | 'discord' | 'telegram' | 'other'
 export type SourcePermissions = { acquire: boolean; retain: boolean; index: boolean; aiEgress: boolean; notify: boolean; externalWrite: boolean; disclose: boolean }
 export type ContextSource = {
   id: string; ownerId: string; title: string; provider: SourceProvider; externalId: string | null; conversation: string | null; author: string | null; sourceUrl: string | null
@@ -41,7 +41,7 @@ export function spanLocation(snapshot: Pick<ContextSnapshot, 'id' | 'document'> 
   return Number.isSafeInteger(index) ? snapshot.document.locations[index] ?? null : null
 }
 const db = sourceDb
-const providerNames: SourceProvider[] = ['local', 'slack', 'line', 'teams', 'discord', 'other']
+const providerNames: SourceProvider[] = ['local', 'slack', 'line', 'teams', 'discord', 'telegram', 'other']
 export const permissionKeys = ['acquire', 'retain', 'index', 'aiEgress', 'notify', 'externalWrite', 'disclose'] as const
 export const defaultSourcePermissions = (): SourcePermissions => ({ acquire: true, retain: true, index: true, aiEgress: false, notify: false, externalWrite: false, disclose: false })
 export function validateSourcePermissions(value: unknown): asserts value is SourcePermissions {
