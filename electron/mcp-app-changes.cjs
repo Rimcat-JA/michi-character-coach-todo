@@ -20,7 +20,8 @@ function createAppChangeDispatcher({getHub,readDB,dispatch}){
   if(!plan||Object.keys(plan).length!==7||plan.version!==1||plan.id!==id||row.hash!==sha(plan)||canonicalFileJSON(plan.context)!==canonicalFileJSON(bound(context)))fail('PLAN_INVALID')
   const {externalCommandEnvelope}=await import('./external-command-envelope.mjs')
   const envelope=externalCommandEnvelope(plan.request,plan.id)
-  if(plan.request.basis.kind!=='external_request')fail('UNVERIFIED_REFERENCE')
+  // Renderer verified app_instruction against the live registry before storing the plan; main rechecks scope/task binding here. Other kinds have no issuance path and fail closed.
+  if(plan.request.basis.kind!=='external_request'&&plan.request.basis.kind!=='app_instruction')fail('UNVERIFIED_REFERENCE')
   if(!context.registration.client.grant.keys.includes('tasks:prepare')||!context.registration.client.grant.keys.includes('changes:submit')||Object.keys(envelope.payload).some(field=>!context.registration.client.grant.fields.includes(field)))fail('INSUFFICIENT_SCOPE')
   if(envelope.target_id&&!context.registration.task_ids.includes(envelope.target_id))fail('NOT_FOUND')
   return {plan,row,envelope}
