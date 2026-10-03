@@ -2,6 +2,8 @@ import { dispatchExternalReadTool, type ExternalToolContext } from './external-t
 import { dispatchExternalChangeTool } from './external-change-plans'
 import { dispatchExternalRoutineTool } from './external-routine-plans'
 import { dispatchExternalDetectionTool } from './external-detection-runs'
+import { dispatchExternalHandoffTool } from './external-handoffs'
+import { dispatchSharedContextTool } from './context-share'
 import { processExternalSubmission } from './external-auto-submission'
 import type { FileBridgeWindow } from './file-bridge-types'
 type AppMCPRequest={requestId:string;name:string;args:Record<string,unknown>;context:ExternalToolContext}
@@ -9,5 +11,5 @@ export type AppMCPGateway={onRequest:(callback:(request:AppMCPRequest)=>void)=>(
 export function installExternalToolsRuntime(){
  const gateway=(window as Window&{michiAppMCP?:AppMCPGateway}).michiAppMCP
  if(!gateway)return ()=>{}
- return gateway.onRequest(request=>{const dispatch=request.name==='coach_prepare_routine_change'?dispatchExternalRoutineTool:request.name==='coach_prepare_detection_run'||request.name==='coach_get_detection_run'?dispatchExternalDetectionTool:['coach_prepare_change','coach_submit_change'].includes(request.name)?dispatchExternalChangeTool:dispatchExternalReadTool;const bridge=(window as FileBridgeWindow).michiFileBridge;const work=request.name==='michi_process_catalog_submission'&&bridge?processExternalSubmission(request.args,request.context,bridge):dispatch(request.name,request.args,request.context);void work.then(data=>gateway.respond({requestId:request.requestId,code:null,data})).catch(error=>gateway.respond({requestId:request.requestId,code:typeof error.code==='string'?error.code:'TOOL_FAILED',data:null}))})
+ return gateway.onRequest(request=>{const dispatch=request.name==='coach_prepare_routine_change'?dispatchExternalRoutineTool:request.name==='coach_prepare_detection_run'||request.name==='coach_get_detection_run'?dispatchExternalDetectionTool:request.name==='coach_prepare_handoff'?dispatchExternalHandoffTool:request.name==='coach_get_shared_context'?dispatchSharedContextTool:['coach_prepare_change','coach_submit_change'].includes(request.name)?dispatchExternalChangeTool:dispatchExternalReadTool;const bridge=(window as FileBridgeWindow).michiFileBridge;const work=request.name==='michi_process_catalog_submission'&&bridge?processExternalSubmission(request.args,request.context,bridge):dispatch(request.name,request.args,request.context);void work.then(data=>gateway.respond({requestId:request.requestId,code:null,data})).catch(error=>gateway.respond({requestId:request.requestId,code:typeof error.code==='string'?error.code:'TOOL_FAILED',data:null}))})
 }

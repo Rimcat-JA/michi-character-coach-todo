@@ -13,7 +13,7 @@ import { assertSchema } from '../electron/plugin-schema.mjs'
 export type ExternalToolContext={registration:FileBridgeRegistration;ownerId:string;datasetId:string;externalEpoch:number;policyEpoch:number;sourcePermissionRevision:number}
 function fail(code:string):never{throw Object.assign(Error(code),{code})}
 const addDaysText=(date:string,days:number)=>{const d=new Date(`${date}T00:00:00Z`);d.setUTCDate(d.getUTCDate()+days);return d.toISOString().slice(0,10)}
-export const implementedExternalTools=['coach_get_capabilities','coach_search_tasks','coach_get_task','coach_preview_score','coach_search_context','coach_prepare_change','coach_submit_change','coach_get_command_result','coach_get_history','coach_preview_routine','coach_prepare_routine_change','coach_prepare_detection_run','coach_get_detection_run'] as const
+export const implementedExternalTools=['coach_get_capabilities','coach_search_tasks','coach_get_task','coach_preview_score','coach_search_context','coach_prepare_change','coach_submit_change','coach_get_command_result','coach_get_history','coach_preview_routine','coach_prepare_routine_change','coach_prepare_detection_run','coach_get_detection_run','coach_prepare_handoff','coach_get_shared_context'] as const
 function summary(task:Task,registration:FileBridgeRegistration){
  const fields=registration.client.grant.fields
  return {id:task.id,title:fields.includes('title')?task.title:'非共有',revision:task.revision,status:task.status,scheduled_date:fields.includes('scheduled_date')?task.scheduledDate:null,points:fields.includes('manual_points')?task.effectivePoints:null,score_mode:fields.includes('manual_points')?task.score.mode:'unset',source_state:'unverified'}
@@ -35,11 +35,30 @@ export async function dispatchExternalReadTool(name:string,args:Record<string,un
  const tool=catalog.tools.find(tool=>tool.name===name)
  if(!tool)fail('TOOL_NOT_FOUND')
  assertSchema(tool.inputSchema,args)
- return db.transaction('r',db.settings,db.tasks,db.datasetState,db.completions,db.sessions,async()=>{
+ return db.transaction('r',[db.settings,db.tasks,db.datasetState,db.completions,db.sessions,db.contextSources,db.contextSnapshots],async()=>{
   const {registration}=await assertExternalToolAuthority(context)
   if(!registration.client.grant.keys.includes('tasks:read'))fail('INSUFFICIENT_SCOPE')
   if(name==='coach_get_capabilities')return {enabled:true,operations:[...implementedExternalTools],limitations:['ローカルアプリの許可タスクのみ。資料・会話・記憶は非共有。','変更案は最新の書出しを使い、既存の受信箱と本人確認を経て保存します。引継ぎ・参照根拠は未対応。','新規の点数指定、ラベル、時刻付き期限は未対応。実host未確認。アプリ終了・取消で接続は無効になります。']}
-  if(name==='coach_search_context')return {excerpts:[],coverage_note:'文脈の開示は許可されていません。資料の存在・件数・名称を返しません。'}
+  if(name==='coach_search_context'){
+    const openGrant=registration.client.grant
+    if(!openGrant.keys.includes('context:read')||!openGrant.allow_external_context)return {excerpts:[],coverage_note:'文脈の開示は許可されていません。資料の存在・件数・名称を返しません。'}
+    const query=String(args.query??''),scopeList=Array.isArray(args.scope_ids)?args.scope_ids:[],take=Math.min(Number(args.limit??10),20)
+    if(!query.trim()||query.length>500||!scopeList.length||scopeList.length>20)fail('TOOL_SCHEMA')
+    const nowMs=Date.now(),needle=query.normalize('NFC').trim().toLocaleLowerCase()
+    const hits:{id:string;revision:number;text:string;source_url:string|null;trust:string;coverage_note:string}[]=[]
+    for(const rawId of scopeList){
+     const sourceId=String(rawId)
+     const found=await db.contextSources.get(sourceId)
+     const snap=found?await db.contextSnapshots.get(`${sourceId}:${found.latestRevision}`):undefined
+     if(!found||!snap||found.ownerId!==context.ownerId||found.deletedAt||(found.retentionUntil&&Date.parse(found.retentionUntil)<=nowMs)||!found.permissions.acquire||!found.permissions.retain||!found.permissions.index||!found.permissions.aiEgress)continue
+     for(const span of snap.spans){
+      if(hits.length>=take)break
+      if(span.text&&span.text.normalize('NFC').toLocaleLowerCase().includes(needle))hits.push({id:found.id,revision:snap.revision,text:span.text.slice(0,4000),source_url:found.sourceUrl??null,trust:found.provider==='local'?'user_shared':'unverified_external',coverage_note:'開示許可済み資料の引用です。資料全体の存在・件数を表しません。'})
+     }
+     if(hits.length>=take)break
+    }
+    return {excerpts:hits,coverage_note:hits.length?'開示許可済みの引用です。':'該当する開示許可済みの引用はありません。資料の存在・件数・名称を返しません。'}
+   }
   if(name==='coach_preview_score'){
    const input=args.score as {mode:'manual'|'unset'|'formula';points?:number}
    if(input.mode==='formula')fail('UNSUPPORTED_RULE_VERSION') // The standalone formula has no catalog UUID rule registry yet.
