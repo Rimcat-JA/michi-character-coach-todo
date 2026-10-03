@@ -29,7 +29,7 @@ export function validateSourceRecords(sourceRows: unknown, snapshotRows: unknown
   for (const raw of sources) {
     const source = object(raw, ['id', 'ownerId', 'title', 'provider', 'externalId', 'conversation', 'author', 'sourceUrl', 'date', 'timezone', 'revision', 'latestRevision', 'permissionRevision', 'permissions', 'aiProvider', 'allowedModels', 'coverage', 'retentionUntil', 'createdAt', 'updatedAt', 'deletedAt'])
     addId(ids, source.id, 200)
-    if (source.ownerId !== ownerId || !string(source.title, 200) || !['local', 'slack', 'line', 'teams', 'discord', 'other'].includes(source.provider as string) || source.aiProvider !== 'openrouter' || !integer(source.revision, 1, 100000) || !integer(source.latestRevision, 1, 100000) || !integer(source.permissionRevision, 1, 100000) || source.revision !== source.latestRevision + source.permissionRevision - 1) fail()
+    if (source.ownerId !== ownerId || !string(source.title, 200) || !['local', 'slack', 'line', 'teams', 'discord', 'telegram', 'other'].includes(source.provider as string) || source.aiProvider !== 'openrouter' || !integer(source.revision, 1, 100000) || !integer(source.latestRevision, 1, 100000) || !integer(source.permissionRevision, 1, 100000) || source.revision !== source.latestRevision + source.permissionRevision - 1) fail()
     for (const value of [source.externalId, source.conversation, source.author]) if (value !== null && !string(value, 200, true)) fail()
     if (source.sourceUrl !== null) { if (!string(source.sourceUrl, 2000)) fail(); try { if (!['http:', 'https:'].includes(new URL(source.sourceUrl).protocol)) fail() } catch { fail() } }
     date(source.date)

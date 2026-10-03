@@ -8,7 +8,7 @@ import { bridgeEmbedder, buildSourceEmbeddings } from './hybrid-retrieval'
 import FolderWatchView from './FolderWatchView'
 
 type Run = (fn: () => Promise<unknown>, success?: string) => Promise<boolean>
-const providers: Record<SourceProvider, string> = { local: 'テキスト資料', slack: 'Slackの手動export', line: 'LINEの手動export', teams: 'Teamsの手動export', discord: 'Discordの手動export', other: 'その他の会話export' }
+const providers: Record<SourceProvider, string> = { local: 'テキスト資料', slack: 'Slackの手動export', line: 'LINEの手動export', teams: 'Teamsの手動export', discord: 'Discordの手動export', telegram: 'Telegramの手動export', other: 'その他の会話export' }
 const labels: Record<keyof SourcePermissions, string> = { acquire: '取得・閲覧', retain: '保存', index: '検索・索引・要約作成', aiEgress: 'OpenRouterへのAI送信', notify: '通知', externalWrite: '外部サービスの変更', disclose: '別の送信先への開示' }
 function PermissionFields({ value, onChange }: { value: SourcePermissions; onChange: (next: SourcePermissions) => void }) {
   return <div className="feature-toggle-grid">{permissionKeys.map(key => <label key={key}><input type="checkbox" aria-label={labels[key]} checked={value[key]} onChange={event => onChange({ ...value, [key]: event.target.checked })} />{labels[key]}</label>)}</div>

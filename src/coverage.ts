@@ -51,7 +51,7 @@ export function calendarCoverage(state: CalendarRulesState | null | undefined, n
 }
 
 const providerLabels: [SourceProvider | 'calendar', string, string][] = [
-  ['line', 'LINE', 'LINEのテキスト履歴を本人が選んで取込'], ['discord', 'Discord', '選択したメッセージJSONを取込'], ['slack', 'Slack', '手動exportの本文を資料として取込'],
+  ['line', 'LINE', 'LINEのテキスト履歴を本人が選んで取込'], ['discord', 'Discord', '選択したメッセージJSONを取込'], ['telegram', 'Telegram', '公式exportのresult.jsonを選択して取込'], ['slack', 'Slack', '手動exportの本文を資料として取込'],
   ['teams', 'Microsoft Teams', '手動exportの本文を資料として取込'], ['other', 'メール・Web・その他', 'Web選択引用・ローカル.eml・その他exportを取込'], ['calendar', 'カレンダー（ICS/CSVファイル）', 'ICS・CSVファイルを本人が選んで取込']
 ]
 const notConnected = 'unsupported_on_this_runtime: この単独版には外部providerのadapterがありません'

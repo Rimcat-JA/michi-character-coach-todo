@@ -7,7 +7,7 @@ import { defaultSourcePermissions, importLocalSource, sourceSpans } from './sour
 import { defaultSourceRetention } from './retention-defaults'
 import { onFeatureHidden } from './features'
 
-export type ExternalImportProvider = 'line' | 'discord'
+export type ExternalImportProvider = 'line' | 'discord' | 'telegram' | 'slack'
 export type ImportedMessageSpan = { id: string; index: number; start: number; end: number; text: string; kind: 'body' | 'quoted' | 'uncertain' }
 export type ImportedMessagePreview = {
   id: string; externalMessageId: string | null; conversationExternalId: string | null; actorKey: string | null; authorLabel: string | null
@@ -119,29 +119,43 @@ function lineMessages(raw: string, timezone: string): { conversation: string; me
 }
 
 /** Strict JSON reader also rejects duplicate keys, rather than silently taking the last value. */
-function jsonRecords(raw: string): { value: unknown; start: number; end: number }[] {
+function jsonReader(raw: string, label: string) {
   let at = raw.charCodeAt(0) === 0xfeff ? 1 : 0, nodes = 0
   const space = () => { while (/\s/.test(raw[at] ?? '') && at < raw.length) at++ }
-  const fail = (): never => { throw new Error(`Discord JSONの構造が不正です（文字位置${at}）`) }
+  const fail = (): never => { throw new Error(`${label} JSONの構造が不正です（文字位置${at}）`) }
   function string(): string { const start = at++; while (at < raw.length) { const char = raw[at++]; if (char === '\\') { at++; continue } if (char === '"') { try { return JSON.parse(raw.slice(start, at)) as string } catch { fail() } } }; return fail() }
   function value(depth: number): unknown {
-    space(); if (++nodes > 50000 || depth > 15) throw new Error('Discord JSONの入れ子・項目数が上限を超えています')
+    space(); if (++nodes > 50000 || depth > 15) throw new Error(`${label} JSONの入れ子・項目数が上限を超えています`)
     if (raw[at] === '"') return string()
     if (raw[at] === '{') {
       at++; space(); const result: Record<string, unknown> = Object.create(null), keys = new Set<string>()
       if (raw[at] === '}') { at++; return result }
-      while (at < raw.length) { space(); if (raw[at] !== '"') fail(); const key = string(); if (keys.has(key) || ['__proto__', 'prototype', 'constructor'].includes(key)) throw new Error('Discord JSONの重複キー・特殊キーは取り込めません'); keys.add(key); space(); if (raw[at++] !== ':') fail(); result[key] = value(depth + 1); space(); const next = raw[at++]; if (next === '}') return result; if (next !== ',') fail() }
+      while (at < raw.length) { space(); if (raw[at] !== '"') fail(); const key = string(); if (keys.has(key) || ['__proto__', 'prototype', 'constructor'].includes(key)) throw new Error(`${label} JSONの重複キー・特殊キーは取り込めません`); keys.add(key); space(); if (raw[at++] !== ':') fail(); result[key] = value(depth + 1); space(); const next = raw[at++]; if (next === '}') return result; if (next !== ',') fail() }
       return fail()
     }
     if (raw[at] === '[') { at++; space(); const result: unknown[] = []; if (raw[at] === ']') { at++; return result }; while (at < raw.length) { result.push(value(depth + 1)); space(); const next = raw[at++]; if (next === ']') return result; if (next !== ',') fail() }; return fail() }
     const scalar = raw.slice(at).match(/^(?:true|false|null|-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?)/)?.[0]; if (!scalar) return fail(); at += scalar.length; const parsed: unknown = JSON.parse(scalar); if (typeof parsed === 'number' && !Number.isFinite(parsed)) return fail(); return parsed
   }
-  space(); if (raw[at++] !== '[') throw new Error('Discordは公式メッセージ項目を持つJSON配列を選択してください。ZIP・別exporter形式は未対応です')
-  space(); const records: { value: unknown; start: number; end: number }[] = []
-  if (raw[at] === ']') { at++; space(); if (at !== raw.length) fail(); return records }
-  while (at < raw.length) { space(); const start = at, parsed = value(1); records.push({ value: parsed, start, end: at }); if (records.length > maxMessages) throw new Error('1000発言を超えています。選択JSONを分けてください'); space(); const next = raw[at++]; if (next === ']') break; if (next !== ',') fail() }
-  space(); if (raw[at - 1] !== ']' && !raw.trimEnd().endsWith(']') || at !== raw.length) fail()
-  return records
+  function parseArray(expectation: string): { value: unknown; start: number; end: number }[] {
+    space(); if (raw[at++] !== '[') throw new Error(`${label}${expectation}`)
+    space(); const records: { value: unknown; start: number; end: number }[] = []
+    if (raw[at] === ']') { at++; space(); if (at !== raw.length) fail(); return records }
+    while (at < raw.length) { space(); const start = at, parsed = value(1); records.push({ value: parsed, start, end: at }); if (records.length > maxMessages) throw new Error('1000発言を超えています。選択JSONを分けてください'); space(); const next = raw[at++]; if (next === ']') break; if (next !== ',') fail() }
+    space(); if (raw[at - 1] !== ']' && !raw.trimEnd().endsWith(']') || at !== raw.length) fail()
+    return records
+  }
+  function parseObject(): unknown {
+    space()
+    if (raw[at] !== '{') fail()
+    const parsed = value(0)
+    space(); if (at !== raw.length) fail()
+    return parsed
+  }
+  return { parseArray, parseObject }
+}
+/** Discord entry point keeps its established messages. */
+function jsonRecords(raw: string): { value: unknown; start: number; end: number }[] {
+  return jsonReader(raw, 'Discord').parseArray('は公式メッセージ項目を持つJSON配列を選択してください。ZIP・別exporter形式は未対応です')
 }
 function discordMessages(raw: string, timezone: string): RawMessage[] {
   const records = jsonRecords(raw), seen = new Set<string>()
@@ -177,22 +191,124 @@ function discordMessages(raw: string, timezone: string): RawMessage[] {
   })
 }
 
+/** Telegram Desktop export (result.json) subset: personal/group text messages only.
+ * Export datetimes carry no offset, so they are read as wall time in the selected timezone
+ * (same rule as LINE) and shown back for owner confirmation. Media/service entries never
+ * become message bodies. */
+function telegramMessages(raw: string, timezone: string): { conversation: string; chatType: string; messages: RawMessage[] } {
+  const parsed = jsonReader(raw, 'Telegram').parseObject()
+  if (!object(parsed) || typeof parsed.name !== 'string' || !parsed.name.trim() || parsed.name.length > 200 || typeof parsed.type !== 'string' || !Array.isArray(parsed.messages)) throw new Error('Telegramは公式exportのresult.json（name・type・messages）を選択してください')
+  if (parsed.messages.length > maxMessages) throw new Error('1000発言を超えています。期間またはファイルを分けてください')
+  const conversation = parsed.name.trim(), chatType = parsed.type
+  const warnings = chatType === 'personal_chat' ? [] : ['共有グループ・チャンネルの履歴です。別会話へ無条件に展開しません。']
+  const messages = parsed.messages.map((item, index) => {
+    if (!object(item) || !Number.isSafeInteger(item.id) || (item.type !== undefined && item.type !== 'message' && item.type !== 'service')) throw new Error(`Telegram /${index} の項目を確認してください`)
+    if (item.type === 'service') {
+      const sentAt = telegramWall(item.date, index, timezone)
+      const local = clock(sentAt, timezone)
+      return { externalMessageId: `tg:${item.id}`, conversationExternalId: null, actorKey: null, authorLabel: null, sentAt, localDate: local.date, localTime: local.time, editedAt: null, kind: 'system' as const, rawStart: 0, rawEnd: raw.length, rawExcerpt: '', pointer: `/messages/${index}`, lineFrom: null, lineTo: null, dateHeader: null, body: '[サービス通知。本文として扱いません]', referencedQuote: null, warnings: [...warnings, 'サービス通知は本人確認の対象外です。'] }
+    }
+    const sentAt = telegramWall(item.date, index, timezone)
+    const from = item.from === undefined || item.from === null ? null : item.from
+    const fromId = item.from_id === undefined || item.from_id === null ? null : item.from_id
+    if (from !== null && (typeof from !== 'string' || !from.trim() || from.length > 100)) throw new Error(`Telegram /${index} の話者名を確認してください`)
+    if (fromId !== null && typeof fromId !== 'string') throw new Error(`Telegram /${index} の話者IDを確認してください`)
+    const { body, media, formatted } = telegramText(item.text, index)
+    const editedAt = item.edited === undefined || item.edited === null ? null : telegramWall(item.edited, index, timezone)
+    if (editedAt && editedAt < sentAt) throw new Error('Telegramの編集日時が送信日時より前です')
+    const local = clock(sentAt, timezone)
+    const hasMedia = media || item.photo !== undefined || item.file !== undefined || item.media_type !== undefined
+    if (!body.trim() && !hasMedia) throw new Error('Telegramの本文が空です。未取得本文を発言なしとは扱いません')
+    return {
+      externalMessageId: `tg:${item.id}`, conversationExternalId: null,
+      actorKey: fromId ? `telegram-id:${fromId.normalize('NFC')}` : from ? `telegram-name:${from.normalize('NFC')}` : null,
+      authorLabel: from, sentAt, localDate: local.date, localTime: local.time, editedAt,
+      kind: !body.trim() ? 'attachment-only' as const : 'message' as const,
+      rawStart: 0, rawEnd: raw.length, rawExcerpt: '', pointer: `/messages/${index}`, lineFrom: null, lineTo: null, dateHeader: null,
+      body: body || '[メディアあり。本文なし。添付の取得はしていません]', referencedQuote: null,
+      warnings: [...warnings, ...(!body.trim() ? ['メディアの取得、URLへの接続、実行はしません。'] : []), ...(formatted ? ['装飾付き本文は原文のまま保存し、装飾の意味は解釈しません。'] : []), ...(editedAt ? ['保存できるのは選択JSONの編集版だけです。過去の編集・削除履歴は未取得です。'] : [])],
+    }
+  })
+  if (!messages.length) throw new Error('Telegramの選択発言がありません')
+  return { conversation, chatType, messages }
+}
+function telegramWall(value: unknown, index: number, timezone: string): string {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$/.test(value)) throw new Error(`Telegram /${index} の日時はYYYY-MM-DDTHH:mm:ssで確認してください`)
+  validateDate(value.slice(0, 10), `Telegram /${index} の日付`)
+  return lineWallTime(value.slice(0, 10), value.slice(11, 16), timezone)
+}
+/** Telegram rich text: plain strings pass through; entity arrays flatten text-only parts. */
+function telegramText(value: unknown, index: number): { body: string; media: boolean; formatted: boolean } {
+  if (typeof value === 'string') return { body: normalized(value), media: false, formatted: false }
+  if (!Array.isArray(value)) throw new Error(`Telegram /${index} の本文は文字列か文字列要素の配列にしてください`)
+  let body = '', formatted = false
+  for (const part of value) {
+    if (typeof part === 'string') { body += part; continue }
+    if (!object(part) || typeof part.text !== 'string') throw new Error(`Telegram /${index} の本文要素を確認してください`)
+    if (part.type !== undefined && typeof part.type !== 'string') throw new Error(`Telegram /${index} の本文要素を確認してください`)
+    body += part.text
+    if (part.type !== undefined && part.type !== 'plain') formatted = true
+  }
+  return { body: normalized(body), media: false, formatted }
+}
+
+/** Slack channel-day JSON array subset (one channel, one day file). Timestamps are UTC epoch seconds. */
+function slackMessages(raw: string, timezone: string): RawMessage[] {
+  const records = jsonReader(raw, 'Slack').parseArray('はチャンネル1日分のメッセージJSON配列を選択してください')
+  if (!records.length) throw new Error('Slackの選択発言がありません')
+  const seen = new Set<string>()
+  return records.map(({ value, start, end }, index) => {
+    if (!object(value)) throw new Error(`Slack /${index} の項目を確認してください`)
+    const allowed = ['ts', 'user', 'text', 'thread_ts', 'reply_count', 'replies', 'edited', 'attachments', 'blocks', 'files', 'subtype', 'bot_id']
+    if (Object.keys(value).some(key => !allowed.includes(key))) throw new Error(`Slack /${index} の対応外項目があります`)
+    if (typeof value.ts !== 'string' || !/^\d{10}\.\d{1,6}$/.test(value.ts)) throw new Error(`Slack /${index} のtsを確認してください`)
+    if (value.user !== undefined && (typeof value.user !== 'string' || !value.user.trim() || value.user.length > 100)) throw new Error(`Slack /${index} の話者を確認してください`)
+    if (typeof value.text !== 'string') throw new Error(`Slack /${index} の本文は文字列にしてください`)
+    if (value.thread_ts !== undefined && typeof value.thread_ts !== 'string') throw new Error(`Slack /${index} のスレッド参照を確認してください`)
+    if (value.edited !== undefined && (!object(value.edited) || typeof value.edited.ts !== 'string')) throw new Error(`Slack /${index} の編集情報を確認してください`)
+    const key = value.ts as string
+    if (seen.has(key)) throw new Error('Slackの同じtsが重複しています。ファイルを分けてください')
+    seen.add(key)
+    const at = new Date(Number(key) * 1000)
+    if (!Number.isFinite(at.getTime())) throw new Error(`Slack /${index} のtsを確認してください`)
+    const sentAt = at.toISOString()
+    const editedAt = value.edited ? new Date(Number((value.edited as { ts: string }).ts) * 1000).toISOString() : null
+    if (editedAt && (editedAt < sentAt || !Number.isFinite(Date.parse(editedAt)))) throw new Error('Slackの編集日時が送信日時より前です')
+    const local = clock(sentAt, timezone)
+    const body = normalized(value.text as string)
+    const attachmentCount = Array.isArray(value.attachments) ? value.attachments.length : Array.isArray(value.files) ? (value.files as unknown[]).length : 0
+    if (!body.trim() && !attachmentCount) throw new Error('Slackの本文が空です。未取得本文を発言なしとは扱いません')
+    const botLike = value.subtype !== undefined || value.bot_id !== undefined
+    return {
+      externalMessageId: `slack:${key}`, conversationExternalId: null,
+      actorKey: typeof value.user === 'string' ? `slack-id:${value.user.normalize('NFC')}` : null, authorLabel: typeof value.user === 'string' ? value.user : null,
+      sentAt, localDate: local.date, localTime: local.time, editedAt,
+      kind: botLike ? 'system' as const : !body.trim() ? 'attachment-only' as const : 'message' as const,
+      rawStart: start, rawEnd: end, rawExcerpt: raw.slice(start, end), pointer: `/${index}`, lineFrom: null, lineTo: null, dateHeader: null,
+      body: body || '[添付あり。本文なし。添付の取得はしていません]', referencedQuote: null,
+      warnings: [...(attachmentCount ? ['添付の取得、URLへの接続、実行はしません。'] : []), ...(typeof value.thread_ts === 'string' ? ['スレッドの返信です。前後関係は未取得です。'] : []), ...(value.edited ? ['保存できるのは選択JSONの編集版だけです。過去の編集・削除履歴は未取得です。'] : []), ...(botLike ? ['Bot・system発言は本人確認の対象外です。'] : []), 'Slackの記法（メンション・装飾）は原文のまま保存し、解決しません。'],
+    }
+  })
+}
+
 export async function prepareExternalMessageImport(input: ExternalImportInput): Promise<PreparedExternalMessageImport> {
-  if (!input || !['line', 'discord'].includes(input.provider)) throw new Error('LINEかDiscordを選択してください')
+  if (!input || !['line', 'discord', 'telegram', 'slack'].includes(input.provider)) throw new Error('LINE・Discord・Telegram・Slackから選択してください')
   limited(input.filename, 'ファイル名', 200); limited(input.raw, '選択した原文', 200000)
   if (new TextEncoder().encode(input.raw).length > 2 * 1024 * 1024) throw new Error('2MiB以下のUTF-8ファイルを選択してください')
   validTimezone(input.timezone); validateDate(input.fromDate, '取込開始日'); validateDate(input.toDate, '取込終了日'); if (!input.fromDate || !input.toDate || input.fromDate > input.toDate) throw new Error('取込期間を確認してください')
   const settings = await db.settings.get('main'); if (!settings) throw new Error('本人の設定がありません')
-  const policy = changePolicyFor(settings), fileSha256 = await textSha256(input.raw), parsed = input.provider === 'line' ? lineMessages(input.raw, input.timezone) : { conversation: input.conversation ?? '本人が選択したDiscord会話', messages: discordMessages(input.raw, input.timezone) }
+  const policy = changePolicyFor(settings), fileSha256 = await textSha256(input.raw)
+  const parsed = input.provider === 'line' ? lineMessages(input.raw, input.timezone) : input.provider === 'telegram' ? telegramMessages(input.raw, input.timezone) : { conversation: input.conversation ?? (input.provider === 'slack' ? '本人が選択したSlack会話' : '本人が選択したDM'), messages: input.provider === 'slack' ? slackMessages(input.raw, input.timezone) : discordMessages(input.raw, input.timezone) }
   const conversation = input.conversation?.trim() || parsed.conversation; limited(conversation, '会話名', 100)
   const messages: ImportedMessagePreview[] = []
   for (const raw of parsed.messages) {
     if (raw.localDate < input.fromDate || raw.localDate > input.toDate) continue
-    const id = await contentDigest([input.provider, fileSha256, raw.rawStart, raw.rawEnd, raw.sentAt]), spans = sourceSpans(id, raw.body).map(span => ({ ...span, kind: /^\s*>/.test(span.text) ? 'quoted' as const : /[「」“”]|(?:引用|転送)[:：]/.test(span.text) || raw.warnings.some(warning => warning.includes('export用引用符')) ? 'uncertain' as const : 'body' as const }))
+    const identity = input.provider === 'telegram' ? [input.provider, fileSha256, raw.externalMessageId, raw.sentAt] : [input.provider, fileSha256, raw.rawStart, raw.rawEnd, raw.sentAt]
+    const id = await contentDigest(identity), spans = sourceSpans(id, raw.body).map(span => ({ ...span, kind: /^\s*>/.test(span.text) ? 'quoted' as const : /[「」“”]|(?:引用|転送)[:：]/.test(span.text) || raw.warnings.some(warning => warning.includes('export用引用符')) ? 'uncertain' as const : 'body' as const }))
     messages.push({ ...raw, id, bodySha256: await textSha256(raw.body), spans })
   }
   if (!messages.length) throw new Error('選択期間に解析できた発言がありません。未取得期間の確認済みとは扱いません')
-  const speakers = [...new Map(messages.filter(message => message.actorKey).map(message => [message.actorKey!, { key: message.actorKey!, label: message.authorLabel ?? '話者未確認', idBased: input.provider === 'discord' }])).values()]
+  const speakers = [...new Map(messages.filter(message => message.actorKey).map(message => [message.actorKey!, { key: message.actorKey!, label: message.authorLabel ?? '話者未確認', idBased: /-id:/.test(message.actorKey!) }])).values()]
   const payload = { version: 1 as const, id: crypto.randomUUID(), ownerId: settings.profileId, datasetId: settings.datasetId, policyEpoch: policy.epoch, sourcePermissionRevision: policy.sourcePermissionRevision, createdAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 3600000).toISOString(), provider: input.provider, filename: input.filename, fileSha256, timezone: input.timezone, fromDate: input.fromDate, toDate: input.toDate, conversation, originalMessageCount: parsed.messages.length, excludedCount: parsed.messages.length - messages.length, messages, speakers }
   const result = freeze({ ...payload, digest: await contentDigest(payload) }); prepared.set(result, new Map()); return result
 }
