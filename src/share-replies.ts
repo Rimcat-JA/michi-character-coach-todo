@@ -1,6 +1,8 @@
 import { db } from './db'
+import { canonicalJSON } from './canonical'
+import { assertShareUnexpired, purgeExpiredSharedInbound } from './share-lifetime'
 import { today, uid, validateDate } from './domain'
-import { prepareTaskChanges, type ChangeContext, type ChangeReceipt, type PreparedChangeSet, type TaskChangePatch } from './change-set'
+import { applyChangeSet, approveChangeSetFromUI, prepareTaskChanges, type ChangeContext, type ChangeReceipt, type PreparedChangeSet, type TaskChangeField, type TaskChangePatch } from './change-set'
 import { openShareEnvelope, sealShareEnvelope, ShareError } from './share-crypto'
 import { trustedShareClick } from './share-identity'
 import { confirmTaskInstructionFromUI } from './task-user-instruction'
@@ -11,6 +13,7 @@ export type ReplyPayload = { grant_id: string; epoch: number; comments: ReplyCom
 const record = (value: unknown): value is Record<string, unknown> => Boolean(value) && typeof value === 'object' && !Array.isArray(value)
 const exact = (value: Record<string, unknown>, keys: string[]) => Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key))
 const id = (value: unknown): value is string => typeof value === 'string' && /^[A-Za-z0-9-]{8,100}$/.test(value)
+const preparedShares = new WeakMap<PreparedChangeSet, { proposalId: string; grantId: string; epoch: number; fields: string }>()
 
 function validateProposalFields(value: unknown): asserts value is Partial<Record<ProposalField, string | null>> {
   if (!record(value) || !Object.keys(value).length) throw new ShareError('提案する項目がありません')
@@ -28,9 +31,12 @@ function validateReplyPayload(value: unknown, grantId: string, epoch: number): a
 /** Recipient: comments (commenter/editor) and an edit proposal (editor), signed by me and encrypted to the owner. */
 export async function buildShareReply(shareId: string, input: { comments?: string[]; proposal?: Partial<Record<string, string | null>> }, event: Event): Promise<string> {
   trustedShareClick(event)
+  await purgeExpiredSharedInbound()
   const [identity, inbound] = await Promise.all([db.shareIdentity.get('main'), db.sharedInbound.get(shareId)])
   if (!identity) throw new ShareError('共有用の名刺がありません')
-  if (!inbound?.projection || inbound.revokedAt) throw new ShareError('この共有は取り消されています')
+  if (!inbound) throw new ShareError('この共有は取り消されています')
+  assertShareUnexpired(inbound)
+  if (!inbound.projection || inbound.revokedAt) throw new ShareError('この共有は取り消されています')
   const owner = await db.shareContacts.get(inbound.ownerFp)
   if (!owner?.verifiedAt) throw new ShareError('共有元のカードが確認されていません')
   const comments = (input.comments ?? []).map(body => body.trim()).filter(Boolean)
@@ -40,7 +46,12 @@ export async function buildShareReply(shareId: string, input: { comments?: strin
   validateReplyPayload(payload, shareId, inbound.epoch)
   const sequence = inbound.replySequence + 1
   const envelope = await sealShareEnvelope({ kind: 'reply', shareId, epoch: inbound.epoch, sequence, payload, sender: identity, recipient: owner.card })
-  await db.sharedInbound.update(shareId, { replySequence: sequence })
+  await db.transaction('rw', [db.sharedInbound, db.shareContacts], async () => {
+    const current = await db.sharedInbound.get(shareId), contact = await db.shareContacts.get(inbound.ownerFp)
+    if (!current || canonicalJSON(current) !== canonicalJSON(inbound) || !contact?.verifiedAt) throw new ShareError('処理中に共有の権限・版が変わりました。もう一度確認してください')
+    assertShareUnexpired(current)
+    await db.sharedInbound.update(shareId, { replySequence: sequence })
+  })
   return envelope
 }
 export type ReplyImportResult = { added: number; duplicates: number; proposalId: string | null }
@@ -55,24 +66,38 @@ export async function importShareReply(raw: string): Promise<ReplyImportResult> 
   const contact = await db.shareContacts.get(header.from_fp)
   if (header.from_fp !== grant.recipientId || !contact?.verifiedAt) throw new ShareError('共有した相手からの返信ではありません')
   if (grant.revokedAt) throw new ShareError('この共有は取り消し済みのため返信を受け付けません')
+  assertShareUnexpired(grant)
   if (header.epoch !== grant.authorizationEpoch) throw new ShareError('権限変更より前の古い返信です')
   validateReplyPayload(payload, grant.id, header.epoch)
   if (payload.comments.length && grant.role === 'viewer') throw new ShareError('閲覧のみの共有にはコメントできません')
   if (payload.proposal && grant.role !== 'editor') throw new ShareError('この共有では編集の提案を受け付けません')
   const taskId = grant.resource.id, at = new Date().toISOString()
-  return db.transaction('rw', [db.tasks, db.taskComments, db.shareProposals, db.resourceGrants], async () => {
+  return db.transaction('rw', [db.tasks, db.taskComments, db.shareProposals, db.resourceGrants, db.settings, db.shareContacts], async () => {
+    const live = await db.resourceGrants.get(grant.id), liveSettings = await db.settings.get('main'), liveContact = await db.shareContacts.get(contact.id)
+    if (!live || live.revokedAt || live.authorizationEpoch !== header.epoch || live.role !== grant.role || liveSettings?.datasetId !== grant.datasetId || liveSettings.profileId !== grant.ownerId || !liveContact?.verifiedAt) throw new ShareError('共有の権限・版が変わりました。返信を取り込めません')
+    assertShareUnexpired(live)
     const task = await db.tasks.get(taskId)
-    if (!task) throw new ShareError('共有したタスクが見つかりません')
+    if (!task || task.deletedAt) throw new ShareError('共有したタスクが見つかりません')
     let added = 0, duplicates = 0, proposalId: string | null = null
     for (const comment of payload.comments) {
       const commentId = `share:${grant.id}:${comment.id}`
-      if (await db.taskComments.get(commentId)) { duplicates++; continue }
+      const existing = await db.taskComments.get(commentId)
+      if (existing) {
+        if (existing.taskId !== taskId || existing.body !== comment.body || existing.ownerId !== settings.profileId) throw new ShareError('同じコメントIDで異なる内容の返信です')
+        duplicates++; continue
+      }
+      if (header.sequence <= live.replySequence) throw new ShareError('古い返信の版で新しい内容は追加できません')
       await db.taskComments.add({ id: commentId, taskId, ownerId: settings.profileId, body: comment.body, createdAt: at, authorKind: 'share_recipient', authorLabel: contact.displayName })
       added++
     }
     if (payload.proposal) {
       proposalId = `${grant.id}:${payload.proposal.id}`
-      if (!await db.shareProposals.get(proposalId)) await db.shareProposals.add({ id: proposalId, grantId: grant.id, taskId, contactId: contact.id, authorLabel: contact.displayName, fields: payload.proposal.fields, receivedAt: at, state: 'pending' })
+      const existing = await db.shareProposals.get(proposalId)
+      if (existing && canonicalJSON(existing.fields) !== canonicalJSON(payload.proposal.fields)) throw new ShareError('同じ提案IDで異なる内容の返信です')
+      if (!existing) {
+        if (header.sequence <= live.replySequence) throw new ShareError('古い返信の版で新しい内容は追加できません')
+        await db.shareProposals.add({ id: proposalId, grantId: grant.id, taskId, contactId: contact.id, authorLabel: contact.displayName, fields: payload.proposal.fields, receivedAt: at, state: 'pending', authorizationEpoch: header.epoch })
+      }
     }
     const current = await db.resourceGrants.get(grant.id)
     if (current && header.sequence > current.replySequence) await db.resourceGrants.update(grant.id, { replySequence: header.sequence })
@@ -89,9 +114,11 @@ export async function prepareShareProposal(proposalId: string, event: Event): Pr
   if (!proposal || proposal.state !== 'pending' || !settings) throw new ShareError('確認待ちの提案がありません')
   const grant = await db.resourceGrants.get(proposal.grantId)
   if (!grant || grant.revokedAt) throw new ShareError('この共有は取り消し済みです')
+  assertShareUnexpired(grant)
   // A proposal prepared under an editor grant must not survive a role downgrade:
   // the current role decides, not the role at import time.
   if (grant.role !== 'editor') throw new ShareError('この共有では編集の提案を受け付けません')
+  if (proposal.authorizationEpoch !== grant.authorizationEpoch || settings.profileId !== grant.ownerId || settings.datasetId !== grant.datasetId) throw new ShareError('古い権限版・別データセットの提案です。新しい提案を受け取ってください')
   const task = await db.tasks.get(proposal.taskId)
   if (!task || task.deletedAt) throw new ShareError('共有したタスクが見つかりません')
   const patch: TaskChangePatch = {}
@@ -101,17 +128,28 @@ export async function prepareShareProposal(proposalId: string, event: Event): Pr
   const requests = [{ taskId: task.id, expectedRevision: task.revision, patch }], reason = `共有相手「${proposal.authorLabel}」からの編集提案`
   const instruction = 'title' in patch ? await confirmTaskInstructionFromUI({ message: `${reason}を本人が確認: ${Object.entries(proposal.fields).map(([field, value]) => `${field === 'title' ? 'タイトル' : '予定日'}→${value ?? '未設定'}`).join('、')}`, referenceDate: today(), timezone: Intl.DateTimeFormat().resolvedOptions().timeZone, changes: requests }, context, event) : null
   const prepared = await prepareTaskChanges(requests, context, reason, instruction)
+  preparedShares.set(prepared, { proposalId, grantId: grant.id, epoch: grant.authorizationEpoch, fields: canonicalJSON(proposal.fields) })
   return { prepared, context, proposal }
+}
+/** Commit the owner's approval with a current-grant check in the same transaction as the ordinary ChangeSet. */
+export async function applyShareProposalFromUI(proposalId: string, prepared: PreparedChangeSet, context: ChangeContext, event: Event, checked: TaskChangeField[] = [], requestKey = `share:${prepared.id}`): Promise<ChangeReceipt> {
+  trustedShareClick(event)
+  const binding = preparedShares.get(prepared)
+  if (!binding || binding.proposalId !== proposalId) throw new ShareError('この提案の確認画面から承認してください')
+  const approval = await approveChangeSetFromUI(prepared, context, event, checked)
+  return db.transaction('rw', [db.tasks, db.settings, db.commands, db.audits, db.assessments, db.tripBundles, db.containers, db.resourceGrants, db.shareProposals, db.shareContacts], async () => {
+    const proposal = await db.shareProposals.get(proposalId), grant = await db.resourceGrants.get(binding.grantId)
+    if (!proposal || proposal.state !== 'pending' || !grant || grant.revokedAt || grant.role !== 'editor' || grant.authorizationEpoch !== binding.epoch || proposal.authorizationEpoch !== binding.epoch || canonicalJSON(proposal.fields) !== binding.fields || proposal.contactId !== grant.recipientId || grant.datasetId !== context.datasetId || grant.ownerId !== context.ownerId) throw new ShareError('確認後に共有の権限・提案が変わりました。新しい提案を確認してください')
+    if (!(await db.shareContacts.get(grant.recipientId))?.verifiedAt) throw new ShareError('共有相手の指紋をもう一度確認してください')
+    assertShareUnexpired(grant)
+    const receipt = await applyChangeSet(prepared, approval, context, requestKey, { entrance: 'file', basis: 'external_request', commandId: proposalId, label: proposal.authorLabel })
+    await db.shareProposals.update(proposalId, { state: 'applied' })
+    return receipt
+  })
 }
 export async function dismissShareProposal(proposalId: string, event: Event): Promise<void> {
   trustedShareClick(event)
   const proposal = await db.shareProposals.get(proposalId)
   if (!proposal || proposal.state !== 'pending') throw new ShareError('確認待ちの提案がありません')
   await db.shareProposals.update(proposalId, { state: 'dismissed' })
-}
-/** Marked applied only from the receipt of the approved ChangeSet that changed this proposal's task. */
-export async function markShareProposalApplied(proposalId: string, receipt: ChangeReceipt): Promise<void> {
-  const proposal = await db.shareProposals.get(proposalId)
-  if (!proposal || proposal.state !== 'pending' || !receipt.taskIds.includes(proposal.taskId)) throw new ShareError('確認待ちの提案がありません')
-  await db.shareProposals.update(proposalId, { state: 'applied' })
 }

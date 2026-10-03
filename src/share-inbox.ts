@@ -1,9 +1,10 @@
 import { db } from './db'
+import { purgeExpiredSharedInbound, shareExpired, validateShareExpiry } from './share-lifetime'
 import { openShareEnvelope, ShareError } from './share-crypto'
 import { maskSourceReferences, SHARE_NOTE_MAX, validateProjection, validateShareFields } from './share-projection'
 import { SHARE_ROLES, type ShareCard, type SharedInbound, type ShareRole } from './share-types'
 
-export type ShareImportResult = { status: 'needs_owner_confirmation'; card: ShareCard } | { status: 'stored' | 'revoked'; inbound: SharedInbound }
+export type ShareImportResult = { status: 'needs_owner_confirmation'; card: ShareCard } | { status: 'stored' | 'revoked' | 'expired'; inbound: SharedInbound }
 const record = (value: unknown): value is Record<string, unknown> => Boolean(value) && typeof value === 'object' && !Array.isArray(value)
 const exact = (value: Record<string, unknown>, keys: string[]) => Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key))
 
@@ -20,10 +21,12 @@ export async function importShareBundle(raw: string): Promise<ShareImportResult>
   if (!owner?.verifiedAt) return { status: 'needs_owner_confirmation', card: senderCard }
   let next: Omit<SharedInbound, 'receivedAt' | 'replySequence'>
   if (header.kind === 'grant') {
-    if (!record(payload) || !exact(payload, ['role', 'shared_fields', 'projection', 'share_note']) || !SHARE_ROLES.includes(payload.role as ShareRole) || typeof payload.share_note !== 'string' || payload.share_note.length > SHARE_NOTE_MAX) throw new ShareError('共有内容の形式が不正です')
+    if (!record(payload) || !(exact(payload, ['role', 'shared_fields', 'projection', 'share_note']) || exact(payload, ['role', 'shared_fields', 'projection', 'share_note', 'expires_at'])) || !SHARE_ROLES.includes(payload.role as ShareRole) || typeof payload.share_note !== 'string' || payload.share_note.length > SHARE_NOTE_MAX) throw new ShareError('共有内容の形式が不正です')
+    const expiresAt = Object.hasOwn(payload, 'expires_at') ? payload.expires_at : null
+    validateShareExpiry(expiresAt)
     validateShareFields(payload.shared_fields)
     validateProjection(payload.projection, header.share_id, payload.shared_fields)
-    next = { id: header.share_id, ownerFp: header.from_fp, ownerLabel: owner.displayName, role: payload.role as ShareRole, epoch: header.epoch, sequence: header.sequence, sharedFields: [...payload.shared_fields], projection: payload.projection, shareNote: maskSourceReferences(payload.share_note), revokedAt: null }
+    next = { id: header.share_id, ownerFp: header.from_fp, ownerLabel: owner.displayName, role: payload.role as ShareRole, epoch: header.epoch, sequence: header.sequence, sharedFields: [...payload.shared_fields], projection: payload.projection, shareNote: maskSourceReferences(payload.share_note), revokedAt: null, expiresAt }
   } else {
     if (!record(payload) || !exact(payload, ['revoked_at']) || typeof payload.revoked_at !== 'string' || Number.isNaN(Date.parse(payload.revoked_at))) throw new ShareError('取り消しファイルの形式が不正です')
     next = { id: header.share_id, ownerFp: header.from_fp, ownerLabel: owner.displayName, role: 'viewer', epoch: header.epoch, sequence: header.sequence, sharedFields: [], projection: null, shareNote: '', revokedAt: payload.revoked_at }
@@ -35,11 +38,14 @@ export async function importShareBundle(raw: string): Promise<ShareImportResult>
       if (header.epoch < prior.epoch) throw new ShareError('取り消し・権限変更より前の古い共有ファイルです')
       if (header.epoch === prior.epoch && header.sequence <= prior.sequence) throw new ShareError('取り込み済み、またはより古い共有ファイルです')
       if (prior.revokedAt && header.kind === 'grant' && header.epoch <= prior.epoch) throw new ShareError('取り消された共有です')
+      if (header.kind === 'grant' && header.epoch === prior.epoch && (next.expiresAt ?? null) !== (prior.expiresAt ?? null)) throw new ShareError('同じ権限版で共有の有効期限を変更できません')
     }
     const inbound: SharedInbound = { ...next, receivedAt: new Date().toISOString(), replySequence: prior && prior.epoch === header.epoch ? prior.replySequence : 0 }
+    const expired = header.kind === 'grant' && shareExpired(inbound)
+    if (expired) { inbound.projection = null; inbound.shareNote = ''; inbound.sharedFields = [] }
     // A revoke keeps only a tombstone (no projection) so older grant files stay rejected.
     await db.sharedInbound.put(inbound)
-    return { status: header.kind === 'grant' ? 'stored' as const : 'revoked' as const, inbound }
+    return { status: header.kind === 'revoke' ? 'revoked' as const : expired ? 'expired' as const : 'stored' as const, inbound }
   })
 }
-export async function listSharedInbound(): Promise<SharedInbound[]> { return (await db.sharedInbound.toArray()).filter(row => row.projection && !row.revokedAt) }
+export async function listSharedInbound(): Promise<SharedInbound[]> { await purgeExpiredSharedInbound(); return (await db.sharedInbound.toArray()).filter(row => row.projection && !row.revokedAt && !shareExpired(row)) }

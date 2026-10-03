@@ -35,3 +35,9 @@ jobs:
       - name: Test Electron notification and local bridges
         run: npm run test:electron
       - run: npm run build
+      - name: Check device data in hidden Chromium (Linux)
+        if: runner.os == 'Linux'
+        run: xvfb-run -a npm run check:device-data
+      - name: Check device data in hidden Chromium (Windows)
+        if: runner.os == 'Windows'
+        run: npm run check:device-data

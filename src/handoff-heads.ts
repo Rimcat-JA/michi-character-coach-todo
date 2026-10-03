@@ -12,12 +12,13 @@ export type TaskHead = { revision: number; criticalHash: string; fields: HeadFie
 export type HandoffHeads = Record<string, TaskHead>
 export type HandoffDecision = 'exported' | 'kept' | 'replaced' | 'replaced_after_export' | 'adopted' | 'different_dataset' | 'move_accepted'
 /** What this device exported or imported. Heads are always computed here from rows, never read from a manifest. */
-export type HandoffRecord = { id: string; bundleId: string; datasetId: string; deviceId: string; sourceDeviceId: string; direction: 'export' | 'import'; kind: HandoffKind; decision: HandoffDecision; createdAt: string; heads: HandoffHeads; rowIds: Record<string, string[]>; moveCode: string | null }
+export type HandoffRecord = { id: string; bundleId: string; datasetId: string; deviceId: string; sourceDeviceId: string; direction: 'export' | 'import'; kind: HandoffKind; decision: HandoffDecision; createdAt: string; heads: HandoffHeads; rowIds: Record<string, string[]>; rowHashes?: HandoffRowHashes; moveCode: string | null }
 
 /** Rows whose local-only additions (ledger, completions, notes...) would be lost by a replace. */
-export const HANDOFF_ROW_TABLES = ['assessments', 'completions', 'ledger', 'sessions', 'routines', 'containers', 'checklistItems', 'taskNotes', 'taskComments', 'taskAttachments', 'taskDependencies', 'rollovers', 'habits', 'habitLogs', 'goals', 'goalCheckIns', 'trackerEntries', 'dayNotes', 'pomodoroCycles', 'reviewRecords'] as const
+export const HANDOFF_ROW_TABLES = ['tasks', 'assessments', 'completions', 'ledger', 'sessions', 'routines', 'containers', 'checklistItems', 'taskNotes', 'taskComments', 'taskAttachments', 'taskDependencies', 'rollovers', 'habits', 'habitLogs', 'goals', 'goalCheckIns', 'trackerEntries', 'dayNotes', 'pomodoroCycles', 'reviewRecords', 'labelGroups', 'labelDefinitions', 'savedTemplates', 'planningBuckets', 'timeBlocks', 'calendarEvents', 'themeRules', 'smartLists', 'focusSelections', 'trackerDefinitions', 'tripBundles', 'calendarRules', 'achievementPolicies', 'achievementEvidence', 'achievementExports', 'taskSourceEvidence'] as const
 export type HandoffRowTable = typeof HANDOFF_ROW_TABLES[number]
-type HeadSource = { tasks: Task[]; completions: Completion[] } & Partial<Record<HandoffRowTable, { id: string }[]>>
+export type HandoffRowHashes = Partial<Record<HandoffRowTable, Record<string, string>>>
+export type HeadSource = { tasks: Task[]; completions: Completion[] } & Partial<Record<HandoffRowTable, { id: string }[]>>
 
 export async function ensureLocalDevice(): Promise<LocalDevice> {
   return db.transaction('rw', db.localDevice, async () => {
@@ -39,8 +40,26 @@ export async function computeHeads(source: HeadSource): Promise<HandoffHeads> {
 export function computeRowIds(source: HeadSource): Record<string, string[]> {
   return Object.fromEntries(HANDOFF_ROW_TABLES.map(table => [table, (source[table] ?? []).map(row => row.id).sort()]))
 }
+/** Full rows cover changes outside the critical-field review, including pin flags and formula inputs.
+ * Attachments use their content hash; neither binary data nor private row bodies enter the local history. */
+export async function computeRowHashes(source: HeadSource): Promise<HandoffRowHashes> {
+  const hashes: HandoffRowHashes = {}
+  for (const table of HANDOFF_ROW_TABLES) {
+    const rows = source[table] ?? [], entries: [string, string][] = []
+    // Bound simultaneous WebCrypto requests on a large backup. Exclude attachment bytes before serializing.
+    for (let start = 0; start < rows.length; start += 128) {
+      entries.push(...await Promise.all(rows.slice(start, start + 128).map(async row => {
+        const serializable = { ...row } as Record<string, unknown>
+        if (table === 'taskAttachments') { delete serializable.blob; delete serializable.contentBase64 }
+        return [row.id, await contentDigest(JSON.parse(JSON.stringify(serializable)))] as [string, string]
+      })))
+    }
+    hashes[table] = Object.fromEntries(entries)
+  }
+  return hashes
+}
 export async function localHandoffSource(): Promise<HeadSource> {
-  return db.transaction('r', [db.tasks, db.completions, ...HANDOFF_ROW_TABLES.map(table => db.table(table))], async () => ({ tasks: await db.tasks.toArray(), completions: await db.completions.toArray(), ...Object.fromEntries(await Promise.all(HANDOFF_ROW_TABLES.map(async table => [table, (await db.table(table).toArray()).map(row => ({ id: (row as { id: string }).id }))]))) }))
+  return db.transaction('r', HANDOFF_ROW_TABLES.map(table => db.table(table)), async () => Object.fromEntries(await Promise.all(HANDOFF_ROW_TABLES.map(async table => [table, await db.table(table).toArray()]))) as HeadSource)
 }
 /** The newest bundle this device exported or imported for the dataset: the next export's base. */
 export async function latestHandoff(datasetId: string): Promise<HandoffRecord | undefined> {
@@ -58,7 +77,7 @@ export async function recordHandoff(snapshot: Snapshot, direction: HandoffRecord
   const manifest = snapshot.handoff
   if (!manifest) return null
   const device = await ensureLocalDevice()
-  const record: HandoffRecord = { id: `${direction}:${manifest.bundle_id}`, bundleId: manifest.bundle_id, datasetId: manifest.dataset_id, deviceId: device.deviceId, sourceDeviceId: manifest.source_device_id, direction, kind: manifest.kind, decision, createdAt: new Date().toISOString(), heads: await computeHeads(snapshot), rowIds: computeRowIds(snapshot), moveCode }
+  const record: HandoffRecord = { id: `${direction}:${manifest.bundle_id}`, bundleId: manifest.bundle_id, datasetId: manifest.dataset_id, deviceId: device.deviceId, sourceDeviceId: manifest.source_device_id, direction, kind: manifest.kind, decision, createdAt: new Date().toISOString(), heads: await computeHeads(snapshot), rowIds: computeRowIds(snapshot), rowHashes: await computeRowHashes(snapshot), moveCode }
   // Re-importing the same bundle keeps its first time, so it never becomes a newer base than later exports.
   return db.transaction('rw', db.handoffHeads, async () => {
     const prior = await db.handoffHeads.get(record.id), next = prior ? { ...record, createdAt: prior.createdAt, moveCode: moveCode ?? prior.moveCode } : record

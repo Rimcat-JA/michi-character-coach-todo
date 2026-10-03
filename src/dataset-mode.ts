@@ -5,7 +5,7 @@ import { restoreCoachNotificationState } from './coach-notifications'
 import { uid, type DatasetLineage, type Settings } from './domain'
 import type { DatasetMode, DatasetState } from './dataset-guard'
 import { ensureLocalDevice, recordHandoff, stampHandoff } from './handoff-heads'
-import { inspectHandoff } from './handoff'
+import { handoffReplacementGuard, inspectHandoff } from './handoff'
 
 export const datasetModeOf = (state?: DatasetState | null): DatasetMode => state?.mode ?? 'active'
 export async function currentDatasetMode(): Promise<DatasetMode> { return datasetModeOf(await db.datasetState.get('main')) }
@@ -90,8 +90,9 @@ export async function acceptMoveBundle(snapshot: Snapshot, event: Event, options
   const preview = await inspectHandoff(snapshot)
   if (!preview.sameDataset && !options.confirmDifferentDataset) throw new Error('この端末の別データセットを置き換えます。件数を確認してから受け入れてください')
   if (preview.sameDataset && preview.comparison.blocking && !options.exportFirst) throw new Error('この端末だけの変更があります。書き出してから受け入れてください')
+  const beforeReplace = await handoffReplacementGuard(snapshot, Boolean(options.exportFirst))
   if (options.exportFirst) await (options.exportFirst.exporter ?? exportBackup)(options.exportFirst.password)
-  await restoreBackup(snapshot)
+  await restoreBackup(snapshot, { beforeReplace })
   await db.transaction('rw', [db.settings, db.audits], async () => {
     const settings = await db.settings.get('main')
     if (!settings) throw new Error('設定がありません')
