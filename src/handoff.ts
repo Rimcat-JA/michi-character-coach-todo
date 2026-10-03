@@ -1,19 +1,22 @@
 import { db } from './db'
+import Dexie from 'dexie'
+import { contentDigest } from './canonical'
 import { exportBackup, restoreBackup } from './backup'
 import { validateSnapshot, type Snapshot } from './backup-validation'
 import { updateTask, type TaskInput } from './commands'
 import { calculateScore, uid, type Task } from './domain'
 import { validateLabelsForOwner } from './labels'
-import { computeHeads, computeRowIds, ensureLocalDevice, HANDOFF_ROW_TABLES, localHandoffSource, recordHandoff, type HandoffHeads, type HandoffRecord, type HeadFields } from './handoff-heads'
+import { computeHeads, computeRowHashes, computeRowIds, ensureLocalDevice, HANDOFF_ROW_TABLES, localHandoffSource, recordHandoff, type HandoffHeads, type HandoffRecord, type HandoffRowHashes, type HandoffRowTable, type HeadFields } from './handoff-heads'
 import type { HandoffManifest } from './handoff-manifest'
 
 export type HandoffTaskState = 'identical' | 'incoming_only' | 'local_only' | 'both_changed' | 'created_local' | 'created_incoming' | 'deleted' | 'needs_review'
 export type HandoffField = keyof HeadFields
 export type HandoffFieldDiff = { field: HandoffField; base: unknown; local: unknown; incoming: unknown; changedBy: 'local' | 'incoming' | 'both' | 'unknown' }
 export type HandoffTaskComparison = { taskId: string; title: string; state: HandoffTaskState; diffs: HandoffFieldDiff[]; manualConflict: boolean; completionConflict: boolean; localRevision: number | null }
-export type HandoffComparison = { baseKnown: boolean; tasks: HandoffTaskComparison[]; localOnlyRows: Partial<Record<string, number>>; blocking: boolean }
+export type HandoffRowConflict = { table: HandoffRowTable; id: string; state: 'local_only' | 'both_changed' | 'deleted_local' | 'needs_review' }
+export type HandoffComparison = { baseKnown: boolean; tasks: HandoffTaskComparison[]; localOnlyRows: Partial<Record<string, number>>; rowConflicts?: HandoffRowConflict[]; blocking: boolean }
 export type HandoffPreview = { manifest: HandoffManifest | null; sameDataset: boolean; localDatasetId: string; incomingDatasetId: string; alreadyImported: boolean; comparison: HandoffComparison; counts: { localTasks: number; incomingTasks: number; localCompletions: number; incomingCompletions: number; localLedger: number; incomingLedger: number } }
-type Side = { heads: HandoffHeads; rowIds: Record<string, string[]> }
+type Side = { heads: HandoffHeads; rowIds: Record<string, string[]>; rowHashes?: HandoffRowHashes }
 
 /** States that mean this device holds something the incoming file does not; a direct replace is then blocked. */
 export const BLOCKING_STATES: HandoffTaskState[] = ['local_only', 'both_changed', 'created_local', 'deleted', 'needs_review']
@@ -40,8 +43,19 @@ export function compareHandoff(local: Side, incoming: Side, base: Side | null, s
   }
   const localOnlyRows: Partial<Record<string, number>> = {}
   for (const table of HANDOFF_ROW_TABLES) { const incomingIds = new Set(incoming.rowIds[table] ?? []), count = (local.rowIds[table] ?? []).filter(id => !incomingIds.has(id)).length; if (count) localOnlyRows[table] = count }
-  const blocking = sameDataset && (tasks.some(task => BLOCKING_STATES.includes(task.state)) || Object.keys(localOnlyRows).length > 0)
-  return { baseKnown: Boolean(base), tasks, localOnlyRows, blocking }
+  const rowConflicts: HandoffRowConflict[] = []
+  for (const table of HANDOFF_ROW_TABLES) {
+    const l = local.rowHashes?.[table], i = incoming.rowHashes?.[table], b = base?.rowHashes?.[table]
+    if (!l || !i) continue
+    for (const id of new Set([...Object.keys(l), ...Object.keys(i)])) {
+      if (l[id] === i[id]) continue
+      // Legacy bases stored IDs only. A different row cannot safely be attributed to either device.
+      if (!b) rowConflicts.push({ table, id, state: 'needs_review' })
+      else if (l[id] !== b[id]) rowConflicts.push({ table, id, state: !l[id] ? 'deleted_local' : i[id] !== b[id] ? 'both_changed' : 'local_only' })
+    }
+  }
+  const blocking = sameDataset && (tasks.some(task => BLOCKING_STATES.includes(task.state)) || Object.keys(localOnlyRows).length > 0 || rowConflicts.length > 0)
+  return { baseKnown: Boolean(base), tasks, localOnlyRows, rowConflicts, blocking }
 }
 
 async function baseFor(manifest: HandoffManifest | undefined, datasetId: string): Promise<HandoffRecord | null> {
@@ -49,13 +63,37 @@ async function baseFor(manifest: HandoffManifest | undefined, datasetId: string)
   const rows = await db.handoffHeads.where('bundleId').equals(manifest.base_bundle_id).toArray()
   return rows.find(row => row.datasetId === datasetId) ?? null
 }
+/** Recheck under the restore's write transaction, so a concurrent edit cannot slip past the preview.
+ * Export-first replacement must still match the data present before the export began. */
+export async function handoffReplacementGuard(snapshot: Snapshot, exportFirst = false): Promise<() => Promise<void>> {
+  const settings = await db.settings.get('main')
+  if (!settings) throw new Error('設定がありません')
+  const sameDataset = settings.datasetId === snapshot.settings[0].datasetId
+  const base = sameDataset ? await baseFor(snapshot.handoff, settings.datasetId) : null
+  const incoming: Side = { heads: await computeHeads(snapshot), rowIds: computeRowIds(snapshot), rowHashes: await computeRowHashes(snapshot) }
+  const initialHash = exportFirst || !sameDataset ? await contentDigest(await computeRowHashes(await localHandoffSource())) : null
+  return async () => {
+    if ((await db.settings.get('main'))?.datasetId !== settings.datasetId) throw new Error('確認後にデータセットが変わりました。もう一度確認してください')
+    const source = await localHandoffSource()
+    // WebCrypto is not an IndexedDB request. Keep the containing write transaction alive while hashing.
+    await Dexie.waitFor((async () => {
+      const rowHashes = await computeRowHashes(source)
+      if (initialHash !== null) {
+        if (await contentDigest(rowHashes) !== initialHash) throw new Error('確認・書き出し中にこの端末の内容が変わりました。もう一度書き出して確認してください')
+      } else {
+        const local: Side = { heads: await computeHeads(source), rowIds: computeRowIds(source), rowHashes }
+        if (compareHandoff(local, incoming, base).blocking) throw new Error('この端末だけの変更があります。書き出してから置き換えるか、個別に取り込んでください')
+      }
+    })())
+  }
+}
 /** Compares an inspected bundle with this device. Heads on both sides come from rows, never from the file's manifest. */
 export async function inspectHandoff(snapshot: Snapshot): Promise<HandoffPreview> {
   validateSnapshot(snapshot)
   const settings = await db.settings.get('main')
   if (!settings) throw new Error('設定がありません')
   const source = await localHandoffSource(), incomingDatasetId = snapshot.settings[0].datasetId, sameDataset = incomingDatasetId === settings.datasetId
-  const local = { heads: await computeHeads(source), rowIds: computeRowIds(source) }, incoming = { heads: await computeHeads(snapshot), rowIds: computeRowIds(snapshot) }
+  const local = { heads: await computeHeads(source), rowIds: computeRowIds(source), rowHashes: await computeRowHashes(source) }, incoming = { heads: await computeHeads(snapshot), rowIds: computeRowIds(snapshot), rowHashes: await computeRowHashes(snapshot) }
   const base = sameDataset ? await baseFor(snapshot.handoff, settings.datasetId) : null
   const alreadyImported = Boolean(snapshot.handoff && await db.handoffHeads.get(`import:${snapshot.handoff.bundle_id}`))
   return { manifest: snapshot.handoff ?? null, sameDataset, localDatasetId: settings.datasetId, incomingDatasetId, alreadyImported, comparison: compareHandoff(local, incoming, base, sameDataset), counts: { localTasks: source.tasks.length, incomingTasks: snapshot.tasks.length, localCompletions: source.completions.length, incomingCompletions: snapshot.completions.length, localLedger: source.ledger?.length ?? 0, incomingLedger: snapshot.ledger.length } }
@@ -75,7 +113,7 @@ export async function replaceWithHandoff(snapshot: Snapshot, options: { confirmD
   if (snapshot.handoff?.kind === 'move') throw new Error('移行ファイルは「移行を受け入れる」から取り込んでください')
   if (!preview.sameDataset && !options.confirmDifferentDataset) throw new Error('別データセットのファイルです。「別データセットで置き換え」を確認してください')
   if (preview.comparison.blocking) throw new Error('この端末だけの変更があります。書き出してから置き換えるか、個別に取り込んでください')
-  await restoreBackup(snapshot)
+  await restoreBackup(snapshot, { beforeReplace: await handoffReplacementGuard(snapshot) })
   await recordHandoff(snapshot, 'import', preview.sameDataset ? 'replaced' : 'different_dataset')
 }
 /** (c) Export this device first; the replace runs only after the export succeeded. */
@@ -84,8 +122,9 @@ export async function replaceAfterExport(snapshot: Snapshot, password: string, e
   if (snapshot.handoff?.kind === 'move') throw new Error('移行ファイルは「移行を受け入れる」から取り込んでください')
   const preview = await inspectHandoff(snapshot)
   if (!preview.sameDataset) throw new Error('別データセットのファイルは「別データセットで置き換え」から取り込んでください')
+  const beforeReplace = await handoffReplacementGuard(snapshot, true)
   await exporter(password)
-  await restoreBackup(snapshot)
+  await restoreBackup(snapshot, { beforeReplace })
   await recordHandoff(snapshot, 'import', 'replaced_after_export')
 }
 export const ADOPTABLE_FIELDS = ['title', 'notes', 'score', 'scheduledDate', 'dueDate'] as const

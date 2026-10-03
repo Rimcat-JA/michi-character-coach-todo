@@ -13,6 +13,7 @@
     "check:electron": "node scripts/electron-checks.mjs syntax",
     "test:electron": "node scripts/electron-checks.mjs test",
     "check:pwa-offline": "node scripts/pwa-offline-check.mjs",
+    "check:device-data": "node scripts/device-data-check.mjs",
     "benchmark:retrieval": "node scripts/retrieval-benchmark.mjs",
     "mcp:stdio": "node scripts/michi-mcp.mjs",
     "desktop": "npm run build && electron .",
