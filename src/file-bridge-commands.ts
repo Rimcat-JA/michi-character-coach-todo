@@ -11,7 +11,7 @@ import { uid, type Settings } from './domain'
 import { ChangeSetError, autoChangeCountsToday, changePolicyFor, decideChangePolicy, type ChangePolicy, type PreparedChangeSet, type TaskChangeField } from './change-set'
 import { operationMode, ruleFor } from './automation-policy'
 import { type PreparedAssistedTasks } from './task-assist'
-import { agentChangesStopped, commandOutcomeFacts, recordCommandOutcomeAudit, applyCommand, issueExternalApplyCapability, approveCommandFromUI, cancelCommand, commandDecision, commandFields, commandOutcome, confirmCommandValuesFromUI, externalAgentActor, isPendingCommand, noteReceivedCommands, prepareCommand, refineCommandOutcome, settleCommand, terminalCommandState, type CommandEnvelope, type CommandField, type CommandGrant, type CommandOutcome, type CommandPreparation, type PreparedCommand } from './command-bus'
+import { agentChangesStopped, commandOutcomeFacts, recordCommandOutcomeAudit, applyCommand, issueExternalApplyCapability, approveCommandFromUI, cancelCommand, commandDecision, commandFields, commandOutcome, confirmCommandValuesFromUI, externalAgentActor, forgetReceivedCommand, isPendingCommand, noteReceivedCommands, prepareCommand, refineCommandOutcome, settleCommand, terminalCommandState, type CommandEnvelope, type CommandField, type CommandGrant, type CommandOutcome, type CommandPreparation, type PreparedCommand } from './command-bus'
 import { confirmSplitCommandFromUI, type SplitChildDraft } from './task-split-change'
 import { confirmRoutineCommandFromUI, triggerForCommand } from './routine-external-change'
 import { loadCalendarRulesState } from './calendar-rules-save'
@@ -44,7 +44,8 @@ function assertSettings(registration:FileBridgeRegistration,value:Settings) {
 }
 /** Renderer-side mirror of main's check: the N09 table itself must allow automatic notes/schedule changes in these bounds. */
 export function fileBridgeAutomationAllowed(policy:ChangePolicy,fields:string[],maxScheduleShiftDays:number){
-  if(!fields.length||fields.some(field=>!['notes','scheduled_date'].includes(field)))return false
+  fields=fields.filter(field=>['notes','scheduled_date'].includes(field))
+  if(!fields.length)return false
   if(fields.includes('notes')&&operationMode(policy,'task.text')!=='auto_within_bounds')return false
   if(!fields.includes('scheduled_date'))return true
   const limit=ruleFor(policy,'task.schedule').max_schedule_days_delta??policy.bounds.maxScheduledDayShift
@@ -206,10 +207,12 @@ export function createFileBridgeController(gateway:FileBridgeGateway) {
       throw error
     }
     settleCommand(prepared.command)
+    forgetReceivedCommand(reg.client.id,prepared.entry.prepared.command.command_id)
     return notify(prepared,receipt,lease)
   }
   return {
     clearAuthority:clear,
+    releaseReviewAuthority:async()=>{await dropPrepared();entries.clear();leases.clear()},
     lastEgress:()=>lastEgress,
     refresh:async()=>adoptStatus(await gateway.status()),
     selectClient:async(clientId:string)=>{if(!gateway.selectClient)rejectFileBridge('UNSUPPORTED_OPERATION');return adoptStatus(await gateway.selectClient({clientId}))},

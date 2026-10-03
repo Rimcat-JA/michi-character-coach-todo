@@ -89,13 +89,13 @@ async function createFileBridgeService({ agentDirectory, journalDirectory, signi
     const configKeys = ['ownerId', 'datasetId', 'policyEpoch', 'sourcePermissionRevision', 'intendedHost', 'taskIds', 'fields', 'lifetimeHours']
     if (!request || typeof request !== 'object' || Array.isArray(request) || configKeys.some(key => !Object.hasOwn(request, key)) || Object.keys(request).some(key => !configKeys.includes(key) && !['automation', 'allowSplit', 'ruleIds'].includes(key)) || !Number.isInteger(request.lifetimeHours) || request.lifetimeHours < 1 || request.lifetimeHours > 168) fail('CONFIG_INVALID')
     const automation = request.automation ?? null
-    if (automation !== null && (!exact(automation, ['maxScheduleShiftDays', 'maxOperationsPerDay']) || !Number.isInteger(automation.maxScheduleShiftDays) || automation.maxScheduleShiftDays < 0 || automation.maxScheduleShiftDays > 7 || !Number.isInteger(automation.maxOperationsPerDay) || automation.maxOperationsPerDay < 1 || automation.maxOperationsPerDay > 20 || !Array.isArray(request.fields) || !request.fields.length || request.fields.some(field => !['notes', 'scheduled_date'].includes(field)))) fail('AUTOMATION_SCOPE')
+    if (automation !== null && (!exact(automation, ['maxScheduleShiftDays', 'maxOperationsPerDay']) || !Number.isInteger(automation.maxScheduleShiftDays) || automation.maxScheduleShiftDays < 0 || automation.maxScheduleShiftDays > 7 || !Number.isInteger(automation.maxOperationsPerDay) || automation.maxOperationsPerDay < 1 || automation.maxOperationsPerDay > 20 || !Array.isArray(request.fields) || !request.fields.some(field => ['notes', 'scheduled_date'].includes(field)))) fail('AUTOMATION_SCOPE')
     const allowSplit = request.allowSplit === true, ruleIds = request.ruleIds ?? []
     if (Object.hasOwn(request, 'allowSplit') && typeof request.allowSplit !== 'boolean' || !Array.isArray(ruleIds) || ruleIds.length > 50 || ruleIds.some(id => !uuid(id)) || new Set(ruleIds).size !== ruleIds.length) fail('CONFIG_INVALID')
     await ensure()
     const settings = await getSettings(), current = policy(settings)
     if (request.ownerId !== settings.profileId || request.datasetId !== settings.datasetId || request.policyEpoch !== current.epoch || request.sourcePermissionRevision !== current.sourcePermissionRevision || !settings.externalAI?.enabled || settings.externalAI.version !== 1 || !current.aiChangesEnabled) fail('AUTHORITY_CHANGED')
-    if (automation !== null && !n09Automatic(current, request.fields, automation.maxScheduleShiftDays)) fail('AUTOMATION_NOT_GRANTED')
+    if (automation !== null && !n09Automatic(current, request.fields.filter(field=>['notes','scheduled_date'].includes(field)), automation.maxScheduleShiftDays)) fail('AUTOMATION_NOT_GRANTED')
     if (!Array.isArray(request.taskIds) || request.taskIds.length > 100 || request.taskIds.some(id => !uuid(id)) || new Set(request.taskIds).size !== request.taskIds.length) fail('TASK_SCOPE')
     const tasks = await getTasks(request.taskIds)
     if (tasks.length !== request.taskIds.length || tasks.some(task => task.deletedAt)) fail('TASK_SCOPE')
@@ -243,7 +243,7 @@ async function createFileBridgeService({ agentDirectory, journalDirectory, signi
     const registration=revisedRegistration(active.registration,request),before=await getSettings()
     const proofValid=nativeProof?await verifyNativeProof('revise',registration.client.id,nativeProof):false
     if(grantExpands(active.registration,registration)&&!proofValid)fail('HUMAN_APPROVAL_REQUIRED')
-    if(registration.client.grant.automation&&!n09Automatic(policy(before),registration.client.grant.fields,registration.client.grant.automation.max_schedule_shift_days))fail('AUTOMATION_NOT_GRANTED')
+    if(registration.client.grant.automation&&!n09Automatic(policy(before),registration.client.grant.fields.filter(field=>['notes','scheduled_date'].includes(field)),registration.client.grant.automation.max_schedule_shift_days))fail('AUTOMATION_NOT_GRANTED')
     const tasks=await getTasks(registration.task_ids),rules=await getRules(registration.rule_ids??[])
     if(tasks.length!==registration.task_ids.length||tasks.some(task=>task.deletedAt)||rules.length!==(registration.rule_ids?.length??0))fail('TASK_SCOPE')
     const latest=await getSettings(),current=policy(latest)

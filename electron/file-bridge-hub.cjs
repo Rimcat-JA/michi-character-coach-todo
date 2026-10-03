@@ -148,7 +148,10 @@ async function createFileBridgeHub(options) {
   }
   async function exportSnapshot(request) { const slot = await getSlot(state.selectedClientId); return slot.service.exportSnapshot(request) }
   async function scanInbox() {
-    const slot = await getSlot(state.selectedClientId), result = await slot.service.scanInbox()
+    return scanSlot(await getSlot(state.selectedClientId))
+  }
+  async function scanSlot(slot) {
+    const result = await slot.service.scanInbox()
     for (const [reference, value] of references) if (value === slot) references.delete(reference)
     for (const entry of result.entries) if (entry.reference) references.set(entry.reference, slot)
     if (references.size > 5000) fail('INBOX_FULL')
@@ -167,6 +170,7 @@ async function createFileBridgeHub(options) {
   return Object.freeze({ status, configure, revise, selectClient, listConnections, disconnect, invalidate, invalidateClient, exportSnapshot, scanInbox,
     commandResult: async request => { if (!request || Object.keys(request).length!==2 || !uuid(request.clientId) || !uuid(request.commandId)) fail('COMMAND_ID_INVALID'); return (await getSlot(request.clientId)).service.commandResult(request.commandId) },
     clientStatus: async request => { if (!request || Object.keys(request).length!==1 || !uuid(request.clientId)) fail('CONFIG_INVALID'); return (await getSlot(request.clientId)).service.status() },
+    scanClientInbox: async request => { if (!request || Object.keys(request).length!==1 || !uuid(request.clientId)) fail('CONFIG_INVALID'); return scanSlot(await getSlot(request.clientId)) },
     authorizeApplication: (request, proof) => authorize('authorizeApplication', request, proof),
     authorizeAutomaticApplication: request => authorize('authorizeAutomaticApplication', request),
     recordApplied: request => finish('recordApplied', request), cancelApplication: request => finish('cancelApplication', request),

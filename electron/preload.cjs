@@ -76,6 +76,8 @@ function fileBridgeNativeCall(method, kind, reference, request) {
 contextBridge.exposeInMainWorld('michiFileBridge', {
   mcpConfiguration: () => ipcRenderer.invoke('michi:filebridge-mcpConfiguration'),
   status: () => ipcRenderer.invoke('michi:filebridge-status'),
+  clientStatus: request => ipcRenderer.invoke('michi:filebridge-clientStatus',request),
+  scanClientInbox: request => ipcRenderer.invoke('michi:filebridge-scanClientInbox',request),
   listConnections: () => ipcRenderer.invoke('michi:filebridge-listConnections'),
   selftest: request => ipcRenderer.invoke('michi:filebridge-selftest',request),
   selectClient: request => ipcRenderer.invoke('michi:filebridge-selectClient',request),

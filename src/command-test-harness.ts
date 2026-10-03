@@ -41,7 +41,7 @@ export async function bridgeHarness(options: { taskIds: string[]; fields: FileBr
   })
   const call = async <T>(method: string, ...args: unknown[]) => clone(await service[method](...args.map(clone))) as T
   const gateway: FileBridgeGateway = {
-    status: () => call('status'), selectClient: request => call('selectClient',request), listConnections:()=>call('listConnections'), configure: request => call('configure', request, proof('configure')), disconnect: request => call('disconnect', request, proof('disconnect', request.clientId)),
+    status: () => call('status'),clientStatus:request=>call('clientStatus',request),scanClientInbox:request=>call('scanClientInbox',request), selectClient: request => call('selectClient',request), listConnections:()=>call('listConnections'), configure: request => call('configure', request, proof('configure')), disconnect: request => call('disconnect', request, proof('disconnect', request.clientId)),
     revise:request=>call('revise',request,proof('revise',request.clientId)),invalidateClient:request=>call('invalidateClient',request),
     exportSnapshot: request => call('exportSnapshot', request), scanInbox: () => call('scanInbox'),
     authorizeApplication: binding => call('authorizeApplication', binding, proof('approve', binding.reference)), authorizeAutomaticApplication: binding => call('authorizeAutomaticApplication', binding),

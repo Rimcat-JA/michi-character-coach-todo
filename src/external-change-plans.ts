@@ -18,7 +18,19 @@ function fail(code:string):never {throw Object.assign(Error(code),{code})}
 const boundContext=(c:ExternalToolContext):ExternalToolContext=>({registration:structuredClone(c.registration),ownerId:c.ownerId,datasetId:c.datasetId,externalEpoch:c.externalEpoch,policyEpoch:c.policyEpoch,sourcePermissionRevision:c.sourcePermissionRevision})
 const prepareKey=(client:string,key:string)=>`externalprepare:${client}:${key}`
 export const externalPlanKey=(client:string,id:string)=>`externalplan:${client}:${id}`
-function publicPlan(plan:ExternalChangePlan,digest:string){return {change_set_id:plan.id,digest,state:'awaiting_approval',approval_url:null,reasons:['ローカル接続の受信箱で本人が確認します。送信だけではタスクを保存しません。'],field_diffs:plan.fieldDiffs,command_id:plan.id}}
+/** Keep request-key tombstones: a capacity error never evicts old keys or remints their commands. */
+async function assertPlanCapacity(client:string,newPlan:boolean){
+ const rows=await db.commands.toCollection().filter(row=>/^external(plan|prepare|submit):/.test(row.key)).toArray()
+ if(rows.length>=(newPlan?14999:15000)||rows.filter(row=>/^external(plan|prepare|submit):/.test(row.key)&&row.key.split(':')[1]===client).length>=(newPlan?2999:3000))fail('TOO_MANY_PROPOSALS')
+ if(newPlan){
+  const plans=rows.filter(row=>row.key.startsWith(`externalplan:${client}:`))
+  if(plans.length>=1000)fail('TOO_MANY_PROPOSALS')
+  let active=0
+  for(const row of plans){let plan:ExternalChangePlan;try{plan=JSON.parse(row.resultId)}catch{fail('PLAN_INVALID')};if(Date.parse(plan.expiresAt)>Date.now()&&!await readFileBridgeApplicationReceipt(plan.id,client))active++}
+  if(active>=100)fail('TOO_MANY_PROPOSALS')
+ }
+}
+function publicPlan(plan:ExternalChangePlan,digest:string){return {change_set_id:plan.id,digest,state:'awaiting_approval',approval_url:null,reasons:[plan.context.registration.client.grant.mutation_mode==='auto_within_bounds'?'送信時に共通コマンドバスで自動適用の範囲を再確認します。タイトル・期限・点数・範囲外の変更は本人の確認待ちです。':'ローカル接続の受信箱で本人が確認します。送信だけではタスクを保存しません。'],field_diffs:plan.fieldDiffs,command_id:plan.id}}
 async function authorizeRequest(request:ExternalChangeRequest,context:ExternalToolContext,checkRevision:boolean){
  const {registration,policy}=await assertExternalToolAuthority(context),grant=registration.client.grant
  assertExternalChangeRequest(request)
@@ -48,6 +60,7 @@ export async function dispatchExternalChangeTool(name:string,args:Record<string,
    await authorizeRequest(request,context,false)
    const hash=await Dexie.waitFor(contentDigest(request)),key=prepareKey(client,request.request_key),prior=await db.commands.get(key)
    if(prior){if(prior.hash!==hash)fail('IDEMPOTENCY_MISMATCH');const row=await db.commands.get(externalPlanKey(client,prior.resultId));if(!row)fail('PLAN_NOT_FOUND');const plan=JSON.parse(row.resultId) as ExternalChangePlan;if(row.hash!==await Dexie.waitFor(contentDigest(plan))||canonicalJSON(plan.context)!==canonicalJSON(context)||Date.parse(plan.expiresAt)<=Date.now())fail('PLAN_EXPIRED');return publicPlan(plan,row.hash)}
+   await assertPlanCapacity(client,true)
    const {task,envelope}=await authorizeRequest(request,context,true),createdAt=new Date().toISOString(),expiresAt=new Date(Math.min(Date.now()+300000,Date.parse(context.registration.client.grant.expires_at))).toISOString()
    const before:Record<string,unknown>=task?{title:task.title,notes:ownerNotesForEgress(task.notes).notes,scheduled_date:task.scheduledDate,due_date:task.dueDate,manual_points:task.score.manualPoints}:{}
    const plan:ExternalChangePlan={version:1,id:uid(),request,context,createdAt,expiresAt,fieldDiffs:Object.entries(envelope.payload).map(([path,after])=>({path,before:before[path]??null,after}))},digest=await Dexie.waitFor(contentDigest(plan))
@@ -64,7 +77,7 @@ export async function dispatchExternalChangeTool(name:string,args:Record<string,
    if(!context.registration.client.grant.keys.includes('changes:submit'))fail('INSUFFICIENT_SCOPE')
    const key=`externalsubmit:${client}:${String(args.request_key)}`,hash=await Dexie.waitFor(contentDigest({id:plan.id,digest:row.hash})),prior=await db.commands.get(key)
    if(prior){if(prior.hash!==hash||prior.resultId!==plan.id)fail('IDEMPOTENCY_MISMATCH')}
-   else{const applied=await readFileBridgeApplicationReceipt(plan.id,client);if(!applied){if(Date.parse(plan.expiresAt)<=Date.now())fail('PLAN_EXPIRED');await authorizeRequest(plan.request,context,true)}await db.commands.add({key,hash,resultId:plan.id,at:new Date().toISOString()})}
+   else{await assertPlanCapacity(client,false);const applied=await readFileBridgeApplicationReceipt(plan.id,client);if(!applied){if(Date.parse(plan.expiresAt)<=Date.now())fail('PLAN_EXPIRED');await authorizeRequest(plan.request,context,true)}await db.commands.add({key,hash,resultId:plan.id,at:new Date().toISOString()})}
    return publicPlan(plan,row.hash)
   }
   return fail('FEATURE_NOT_IMPLEMENTED')

@@ -54,3 +54,17 @@ it('foreign scope, unverified evidence, lifecycle operations, stale revisions, n
   expect((await readdir(join(h.status().root!,'inbox'))).filter(name=>name.endsWith('.ready.json'))).toEqual([])
  }finally{await h.close()}
 })
+it('unsubmitted plan spam is bounded without evicting an earlier request key or writing a task',async()=>{
+ await resetApp();const id=await createTask({...newTaskInput(),title:'capacity target'}),h=await bridgeHarness({taskIds:[id],fields:['notes']})
+ try{
+  const s=(await db.settings.get('main'))!,registration=h.status().registration!,context:ExternalToolContext={registration,ownerId:s.profileId,datasetId:s.datasetId,externalEpoch:externalAIFor(s).epoch,policyEpoch:registration.policy_epoch,sourcePermissionRevision:registration.source_permission_revision}
+  const requests=Array.from({length:101},(_,i)=>({request_key:crypto.randomUUID(),operation:'task.update',task_id:id,expected_revision:1,payload:{changes:{notes:`bounded ${i}`}},basis:{kind:'external_request',note:'proposal'}}))
+  const first=await dispatchExternalChangeTool('coach_prepare_change',requests[0],context)
+  for(const request of requests.slice(1,100))await dispatchExternalChangeTool('coach_prepare_change',request,context)
+  await expect(dispatchExternalChangeTool('coach_prepare_change',requests[100],context)).rejects.toThrow('TOO_MANY_PROPOSALS')
+  expect(await dispatchExternalChangeTool('coach_prepare_change',requests[0],context)).toEqual(first)
+  await expect(dispatchExternalChangeTool('coach_prepare_change',{...requests[0],payload:{changes:{notes:'different'}}},context)).rejects.toThrow('IDEMPOTENCY_MISMATCH')
+  expect((await db.tasks.get(id))?.revision).toBe(1);expect(await db.ledger.count()).toBe(0)
+  expect((await readdir(join(h.status().root!,'inbox'))).filter(name=>name.endsWith('.ready.json'))).toEqual([])
+ }finally{await h.close()}
+})

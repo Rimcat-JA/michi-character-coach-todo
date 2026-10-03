@@ -140,7 +140,7 @@ test('without a delegated grant, with a changed N09 table or after a stop, autom
   const manual = await fixture(t), entry = await manual.command({ notes: '自動にしたい' })
   await assert.rejects(manual.service.authorizeAutomaticApplication(entry.binding), /AUTOMATION_NOT_GRANTED/)
   await assert.rejects(manual.service.configure({ ...manual.config, fields: ['notes'], automation: { maxScheduleShiftDays: 1, maxOperationsPerDay: 1 } }, manual.native('configure')), /AUTOMATION_NOT_GRANTED/)
-  await assert.rejects(manual.service.configure({ ...manual.config, automation: { maxScheduleShiftDays: 1, maxOperationsPerDay: 1 } }, manual.native('configure')), /AUTOMATION_SCOPE/)
+  await assert.rejects(manual.service.configure({ ...manual.config, fields:['title'], automation: { maxScheduleShiftDays: 1, maxOperationsPerDay: 1 } }, manual.native('configure')), /AUTOMATION_SCOPE/)
   const f = await fixture(t, { auto: { maxScheduleShiftDays: 2, maxOperationsPerDay: 5 } }), queued = await f.command({ scheduled_date: '2026-10-02' })
   f.settings.changePolicy.operations = f.settings.changePolicy.operations.map(rule => rule.operation === 'task.schedule' ? { ...rule, mode: 'require_approval' } : rule)
   await assert.rejects(f.service.authorizeAutomaticApplication(queued.binding), /AUTOMATION_NOT_GRANTED/)

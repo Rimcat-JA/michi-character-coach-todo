@@ -68,6 +68,8 @@ export interface FileBridgeGateway {
   selectClient?(request: {clientId:string}): Promise<FileBridgeStatus>
   listConnections?(): Promise<FileBridgeStatus[]>
   status(): Promise<FileBridgeStatus>
+  clientStatus?(request:{clientId:string}):Promise<FileBridgeStatus>
+  scanClientInbox?(request:{clientId:string}):Promise<{status:FileBridgeStatus;entries:FileBridgeInboxEntry[]}>
   configure(request: FileBridgeConfigure): Promise<FileBridgeStatus>
   revise?(request:FileBridgeRevise):Promise<FileBridgeStatus>
   invalidateClient?(request:{clientId:string}):Promise<void>

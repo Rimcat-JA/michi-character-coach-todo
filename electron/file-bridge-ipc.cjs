@@ -76,7 +76,7 @@ function installFileBridgeIPC({ ipcMain, win, app, safeStorage }) {
     })().catch(error => { servicePromise = null; throw error })
     return servicePromise
   }
-  for (const method of ['status', 'listConnections', 'selectClient', 'configure','revise', 'disconnect','invalidateClient', 'exportSnapshot', 'scanInbox', 'authorizeApplication', 'authorizeAutomaticApplication', 'recordApplied', 'cancelApplication', 'recordRejected', 'invalidate']) {
+  for (const method of ['status', 'clientStatus', 'scanClientInbox', 'listConnections', 'selectClient', 'configure','revise', 'disconnect','invalidateClient', 'exportSnapshot', 'scanInbox', 'authorizeApplication', 'authorizeAutomaticApplication', 'recordApplied', 'cancelApplication', 'recordRejected', 'invalidate']) {
     ipcMain.handle(`michi:filebridge-${method}`, async (event, envelope) => {
       assertMain(event)
       if (method === 'invalidate') await appMCP.stop()

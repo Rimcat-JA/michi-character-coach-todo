@@ -224,7 +224,7 @@ export function subscribeCommands(listener: () => void) { listeners.add(listener
 export const commandsVersion = () => pendingVersion
 function sweep(notify = true) { let removed = false; for (const [key, value] of pending) if (Date.parse(value.expiresAt) <= Date.now()) { pending.delete(key); removed = true } if (removed && notify) changed() }
 /** Logout, restore and dataset changes only reduce authority. */
-export function clearCommandAuthority(options: {coachOnly?: boolean; externalOnly?: boolean; clientId?: string} = {}) { if(options.coachOnly||options.externalOnly||options.clientId){for(const [id,value] of pending)if(authorityMatches(value.actor.principal,options))pending.delete(id)}else{pending.clear(); received.clear()} changed() }
+export function clearCommandAuthority(options: {coachOnly?: boolean; externalOnly?: boolean; clientId?: string} = {}) { if(options.coachOnly||options.externalOnly||options.clientId){for(const [id,value] of pending)if(authorityMatches(value.actor.principal,options))pending.delete(id);for(const [id,value] of received)if(options.clientId?value.principalId===options.clientId:options.coachOnly?value.entrance==='ui_coach':options.externalOnly&&['file','mcp'].includes(value.entrance))received.delete(id)}else{pending.clear(); received.clear()} changed() }
 /** Read during render (S21), so it never notifies subscribers. */
 export function pendingCommands(): PreparedCommand[] { sweep(false); return [...pending.values()].sort((a, b) => a.createdAt.localeCompare(b.createdAt)) }
 export function isPendingCommand(prepared: PreparedCommand | null | undefined): prepared is PreparedCommand { return Boolean(prepared && pending.get(prepared.id) === prepared) }
@@ -240,6 +240,7 @@ function verifyPrepared(prepared: PreparedCommand) {
 /** Scanned-but-unopened external commands, listed in S21 as received. */
 export type ReceivedCommand = Readonly<{ commandId: string; entrance: CommandEntrance; type: string; targetId: string | null; expectedRevision: number | null; principalId: string; host: string | null; fields: string[]; expiresAt: string }>
 const received = new Map<string, ReceivedCommand>()
+export function forgetReceivedCommand(clientId:string,commandId:string){if(received.delete(`${clientId}:${commandId}`))changed()}
 export function noteReceivedCommands(entrance: 'file' | 'mcp' | 'api' | 'external', values: ReceivedCommand[], clientId?: string) {
   for (const [key, value] of received) if ((!clientId || value.principalId===clientId) && (entrance === 'external' ? value.entrance === 'file' || value.entrance === 'mcp' : value.entrance === entrance)) received.delete(key)
   for (const value of values) received.set(`${value.principalId}:${value.commandId}`, freeze(structuredClone(value)))

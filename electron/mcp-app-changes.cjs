@@ -54,6 +54,11 @@ function createAppChangeDispatcher({getHub,readDB,dispatch}){
    const client=await createMCPFileClient(status.root),input={commandId:plan.id,snapshotId:status.snapshot.snapshot_id,payload:envelope.payload}
    if(envelope.type==='task.create')await client.proposeCreate(input)
    else await client.proposeUpdate({...input,targetId:envelope.target_id,expectedRevision:envelope.expected_revision})
+   if(context.registration.client.grant.mutation_mode==='auto_within_bounds'){
+    const processed=await dispatch('michi_process_catalog_submission',{commandId:plan.id,clientId:context.registration.client.id},context)
+    if(await actualResult(plan.id,context))return {...data,state:'applied'}
+    if(processed?.state==='unknown')fail('OUTCOME_UNKNOWN')
+   }
    return data
   })
  }
