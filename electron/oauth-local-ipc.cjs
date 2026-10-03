@@ -8,7 +8,7 @@ const uuid = value => typeof value === 'string' && /^[a-f0-9]{8}-[a-f0-9]{4}-[1-
 
 /** Opt-in loopback OAuth + Streamable-HTTP MCP. Off by default; tokens and registry live encrypted.
  * Bearer tokens reach only the tool core: approval and grant management have no HTTP endpoints. */
-function installOAuthLocalIPC({ ipcMain, win, app, safeStorage, assertMain, readDB }) {
+function installOAuthLocalIPC({ ipcMain, win, app, safeStorage, assertMain, readDatabase }) {
   const nativeProofs = new Map()
   ipcMain.on('michi:oauth-native-proof', (event, proof) => {
     try {
@@ -25,6 +25,9 @@ function installOAuthLocalIPC({ ipcMain, win, app, safeStorage, assertMain, read
   }
   let storePromise = null, serverPromise = null, runtimeEnabled = false
   const consentWaiters = new Map(), rpcPending = new Map()
+  async function readDB(table, key) {
+    return readDatabase(win, table, key)
+  }
   ipcMain.on('michi:app-mcp-response', (event, value) => {
     try {
       assertMain(event)
@@ -110,9 +113,9 @@ function installOAuthLocalIPC({ ipcMain, win, app, safeStorage, assertMain, read
   ipcMain.handle('michi:oauth-status', async event => { assertMain(event); return statusOf() })
   ipcMain.handle('michi:oauth-enable', async (event, envelope) => {
     assertMain(event)
-    if (!envelope || Object.keys(envelope).length !== 2 || typeof envelope.enabled !== 'boolean' || typeof envelope.proofNonce !== 'string') throw new Error('本人の確認ボタンから操作してください')
+    if (!envelope || Object.keys(envelope).length !== 2 || typeof envelope.request?.enabled !== 'boolean' || typeof envelope.proofNonce !== 'string') throw new Error('本人の確認ボタンから操作してください')
     takeProof('oauth-enable', '', envelope.proofNonce)
-    if (envelope.enabled) { runtimeEnabled = true; await service(); return statusOf() }
+    if (envelope.request.enabled) { runtimeEnabled = true; await service(); return statusOf() }
     await stop()
     return statusOf()
   })

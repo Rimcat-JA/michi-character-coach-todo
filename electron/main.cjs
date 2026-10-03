@@ -387,7 +387,7 @@ if (hasInstanceLock) app.whenReady().then(() => {
   })
   win.loadURL('michi://app/index.html')
   installFileBridgeIPC({ ipcMain, win, app, safeStorage })
-  installOAuthLocalIPC({ ipcMain, win, app, safeStorage, assertMain: assertAppFrame, readDB: readAppDatabase })
+  installOAuthLocalIPC({ ipcMain, win, app, safeStorage, assertMain: assertAppFrame, readDatabase: readAppDatabase })
   installLocalActionIPC({ ipcMain, win, app, safeStorage })
   installGitHubPublishIPC({ ipcMain, win, app, safeStorage, qaEmulator: qaGitHub.enabled, fetchImpl: (url, init) => egress().fetch('github', url, init) })
   ipcMain.handle('michi:open-top-of-mind', event => {

@@ -1,7 +1,6 @@
-import { useState } from 'react'
-import { useLiveQuery } from 'dexie-react-hooks'
+import { useEffect, useState } from 'react'
 import { externalAIFor } from './external-authority'
-import { acceptHandoffDraft, listHandoffDrafts, rejectHandoffDraft } from './external-handoffs'
+import { acceptHandoffDraft, listHandoffDrafts, rejectHandoffDraft, type ContextSharePackage, type ExternalHandoff } from './external-handoffs'
 import { listContextSharePackages, revokeContextSharePackage, shareContextPackage } from './context-share'
 import type { Settings, Task } from './domain'
 
@@ -13,8 +12,20 @@ export default function HandoffsView({ settings, tasks }: { settings: Settings; 
   const [edits, setEdits] = useState<Record<string, string>>({})
   const [recipient, setRecipient] = useState('')
   const [shareTasks, setShareTasks] = useState<string[]>([])
-  const drafts = useLiveQuery(() => listHandoffDrafts(), []) ?? []
-  const packages = useLiveQuery(() => listContextSharePackages(), []) ?? []
+  const [drafts, setDrafts] = useState<ExternalHandoff[]>([])
+  const [packages, setPackages] = useState<ContextSharePackage[]>([])
+  // Reads (including retention purges) run in effects, never inside render queriers.
+  // Polling also picks up drafts/packages that arrive over pipe/HTTP while the card is open.
+  useEffect(() => {
+    let active = true
+    const load = () => {
+      listHandoffDrafts().then((rows) => { if (active) setDrafts(rows) }).catch(() => {})
+      listContextSharePackages().then((rows) => { if (active) setPackages(rows) }).catch(() => {})
+    }
+    load()
+    const timer = setInterval(load, 5000)
+    return () => { active = false; clearInterval(timer) }
+  }, [settings.profileId, settings.datasetId, notice])
   const titleOf = (id: string) => tasks.find((task) => task.id === id)?.title ?? '(削除されたタスク)'
   async function run(action: () => Promise<void>) {
     if (busy) return
