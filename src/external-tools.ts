@@ -10,7 +10,7 @@ import { assertSchema } from '../electron/plugin-schema.mjs'
 
 export type ExternalToolContext={registration:FileBridgeRegistration;ownerId:string;datasetId:string;externalEpoch:number;policyEpoch:number;sourcePermissionRevision:number}
 function fail(code:string):never{throw Object.assign(Error(code),{code})}
-export const implementedExternalTools=['coach_get_capabilities','coach_search_tasks','coach_get_task','coach_preview_score','coach_search_context','coach_prepare_change','coach_submit_change','coach_get_command_result'] as const
+export const implementedExternalTools=['coach_get_capabilities','coach_search_tasks','coach_get_task','coach_preview_score','coach_search_context','coach_prepare_change','coach_submit_change','coach_get_command_result','coach_get_history'] as const
 function summary(task:Task,registration:FileBridgeRegistration){
  const fields=registration.client.grant.fields
  return {id:task.id,title:fields.includes('title')?task.title:'非共有',revision:task.revision,status:task.status,scheduled_date:fields.includes('scheduled_date')?task.scheduledDate:null,points:fields.includes('manual_points')?task.effectivePoints:null,score_mode:fields.includes('manual_points')?task.score.mode:'unset',source_state:'unverified'}
@@ -32,7 +32,7 @@ export async function dispatchExternalReadTool(name:string,args:Record<string,un
  const tool=catalog.tools.find(tool=>tool.name===name)
  if(!tool)fail('TOOL_NOT_FOUND')
  assertSchema(tool.inputSchema,args)
- return db.transaction('r',db.settings,db.tasks,db.datasetState,async()=>{
+ return db.transaction('r',db.settings,db.tasks,db.datasetState,db.completions,db.sessions,async()=>{
   const {registration}=await assertExternalToolAuthority(context)
   if(!registration.client.grant.keys.includes('tasks:read'))fail('INSUFFICIENT_SCOPE')
   if(name==='coach_get_capabilities')return {enabled:true,operations:[...implementedExternalTools],limitations:['ローカルアプリの許可タスクのみ。資料・会話・記憶は非共有。','変更案は最新の書出しを使い、既存の受信箱と本人確認を経て保存します。引継ぎ・参照根拠は未対応。','新規の点数指定、ラベル、時刻付き期限は未対応。実host未確認。アプリ終了・取消で接続は無効になります。']}
@@ -61,6 +61,43 @@ export async function dispatchExternalReadTool(name:string,args:Record<string,un
    const page=filtered.slice(start,start+limit)
    return {items:page.map(task=>summary(task,registration)),next_cursor:start+page.length<filtered.length?page.at(-1)!.id:null}
   }
-  return fail('FEATURE_NOT_IMPLEMENTED')
+  if(name==='coach_get_history'){
+    if(!registration.client.grant.keys.includes('history:read'))fail('INSUFFICIENT_SCOPE')
+    const from=String(args.from??''),to=String(args.to??'')
+    const groupBy=args.group_by===undefined||args.group_by===null?'none':String(args.group_by)
+    const day=(value:string)=>/^\d{4}-\d{2}-\d{2}$/.test(value)&&new Date(`${value}T00:00:00Z`).toISOString().slice(0,10)===value
+    if(!day(from)||!day(to)||from>to)fail('INVALID_DATE_RANGE')
+    if((Date.parse(`${to}T00:00:00Z`)-Date.parse(`${from}T00:00:00Z`))/86400000>366)fail('DATE_RANGE_TOO_WIDE')
+    if(!['none','day','week','month'].includes(groupBy))fail('TOOL_SCHEMA')
+    const allowed=new Set(registration.task_ids)
+    const dateOf=(row: {localDate?:string|null;originalAt:string})=>row.localDate??row.originalAt.slice(0,10)
+    const completions=(await db.completions.toArray()).filter(row=>row.currentAt&&allowed.has(row.taskId)&&dateOf(row)>=from&&dateOf(row)<=to)
+    const sessions=(await db.sessions.toArray()).filter(row=>allowed.has(row.taskId)&&row.startedAt.slice(0,10)>=from&&row.startedAt.slice(0,10)<=to)
+    let points=0,unknown=0,minutes=0
+    for(const row of completions){if(row.netPoints===null)unknown++;else points+=row.netPoints}
+    for(const row of sessions)minutes+=Number(row.minutes)||0
+    const scope_note=`許可タスク${allowed.size}件の範囲の集計です。他のタスク・会話・記憶は含みません。`
+    type Bucket={from:string;to:string;points:string;completed_count:number;unknown_score_count:number;work_minutes:number}
+    const addDays=(date:string,days:number)=>{const d=new Date(`${date}T00:00:00Z`);d.setUTCDate(d.getUTCDate()+days);return d.toISOString().slice(0,10)}
+    const monthEnd=(month:string)=>{const [y,m]=month.split('-').map(Number);return new Date(Date.UTC(y,m,0)).toISOString().slice(0,10)}
+    const weekKey=(date:string)=>{const d=new Date(`${date}T00:00:00Z`);const monday=new Date(d);monday.setUTCDate(d.getUTCDate()-((d.getUTCDay()+6)%7));return monday.toISOString().slice(0,10)}
+    const buckets:Bucket[]=[]
+    if(groupBy!=='none'){
+     const keyOf=(date:string)=>groupBy==='day'?date:groupBy==='month'?date.slice(0,7):weekKey(date)
+     const groups=new Map<string,{completions:typeof completions;sessions:typeof sessions}>()
+     for(const row of completions){const key=keyOf(dateOf(row));let group=groups.get(key);if(!group){group={completions:[],sessions:[]};groups.set(key,group)}group.completions.push(row)}
+     for(const row of sessions){const key=keyOf(row.startedAt.slice(0,10));let group=groups.get(key);if(!group){group={completions:[],sessions:[]};groups.set(key,group)}group.sessions.push(row)}
+     for(const [key,group] of [...groups.entries()].sort(([a],[b])=>a<b?-1:1)){
+      let bPoints=0,bUnknown=0,bMinutes=0
+      for(const row of group.completions){if(row.netPoints===null)bUnknown++;else bPoints+=row.netPoints}
+      for(const row of group.sessions)bMinutes+=Number(row.minutes)||0
+      const range=groupBy==='day'?{from:key,to:key}:groupBy==='month'?{from:`${key}-01`,to:monthEnd(key)}:{from:key,to:addDays(key,6)}
+      buckets.push({from:range.from,to:range.to,points:String(bPoints),completed_count:group.completions.length,unknown_score_count:bUnknown,work_minutes:bMinutes})
+      if(buckets.length>=367)fail('BUCKET_LIMIT')
+     }
+    }
+    return {from,to,points:String(points),completed_count:completions.length,unknown_score_count:unknown,work_minutes:minutes,scope_note,buckets}
+   }
+   return fail('FEATURE_NOT_IMPLEMENTED')
  })
 }
