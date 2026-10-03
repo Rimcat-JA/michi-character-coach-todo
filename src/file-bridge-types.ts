@@ -2,14 +2,14 @@ import type { CapabilityCheck } from './external-authority'
 /** App-owned IPC values. Inbox JSON may describe a command, never authority or approval. */
 /** due_date and manual_points are owner-value fields: every request waits for the owner's in-app value confirmation. */
 export type FileBridgeField = 'title' | 'notes' | 'scheduled_date' | 'due_date' | 'manual_points'
-export type FileBridgeGrantKey = 'tasks:read' | 'tasks:prepare' | 'changes:submit' | 'commands:read' | 'tasks:split' | 'routines:prepare'
+export type FileBridgeGrantKey = 'tasks:read' | 'tasks:prepare' | 'changes:submit' | 'commands:read' | 'tasks:split' | 'routines:prepare' | 'history:read' | 'routines:read' | 'context:read' | 'detection:request' | 'detection:read' | 'handoff:prepare'
 export type FileBridgeHost = 'chatgpt' | 'claude' | 'codex' | 'claude_code' | 'other'
 export type FileBridgeRegistration = {
   schema_version: '1'; owner_id: string; dataset_id: string; policy_epoch: number; source_permission_revision: number; task_ids: string[]
   /** Owner-selected series an agent may propose recurrence changes for (grant key routines:prepare). */
   rule_ids?: string[]
   client: { id: string; dataset_id: string; intended_host: FileBridgeHost; transport: 'stdio'; status: 'active'; revision: number; grant_epoch: number
-    grant: { keys: FileBridgeGrantKey[]; project_ids: string[]; fields: FileBridgeField[]; mutation_mode: 'require_approval' | 'auto_within_bounds'; max_operations_per_day: number; max_schedule_shift_days: number; max_point_delta: 0; allow_external_context: false; allow_handoffs: false; expires_at: string
+    grant: { keys: FileBridgeGrantKey[]; project_ids: string[]; fields: FileBridgeField[]; mutation_mode: 'require_approval' | 'auto_within_bounds'; max_operations_per_day: number; max_schedule_shift_days: number; max_point_delta: 0; allow_external_context: boolean; allow_handoffs: boolean; expires_at: string
       /** Present only for an owner-delegated automatic grant (notes/scheduled_date only, stricter than the grant). */
       automation?: { max_schedule_shift_days: number; max_operations_per_day: number } } }
 }
@@ -47,8 +47,9 @@ export type FileBridgeConfigure = {
   ownerId: string; datasetId: string; policyEpoch: number; sourcePermissionRevision: number; intendedHost: FileBridgeHost; taskIds: string[]; fields: FileBridgeField[]; lifetimeHours: number
   automation: { maxScheduleShiftDays: number; maxOperationsPerDay: number } | null
   allowSplit?: boolean; ruleIds?: string[]
+  allowHistory?: boolean; allowRoutinePreview?: boolean; allowContextRead?: boolean; allowExternalContext?: boolean; allowDetection?: boolean; allowHandoffPrepare?: boolean; allowHandoffs?: boolean
 }
-export type FileBridgeRevise={clientId:string;expectedRevision:number;taskIds:string[];fields:FileBridgeField[];expiresAt:string;automation:FileBridgeConfigure['automation'];maxScheduleShiftDays:number;maxOperationsPerDay:number;allowSplit:boolean;ruleIds:string[]}
+export type FileBridgeRevise={clientId:string;expectedRevision:number;taskIds:string[];fields:FileBridgeField[];expiresAt:string;automation:FileBridgeConfigure['automation'];maxScheduleShiftDays:number;maxOperationsPerDay:number;allowSplit:boolean;ruleIds:string[];allowHistory:boolean;allowRoutinePreview:boolean;allowContextRead:boolean;allowExternalContext:boolean;allowDetection:boolean;allowHandoffPrepare:boolean;allowHandoffs:boolean}
 export type FileBridgeApplicationBinding = {
   reference: string; fileDigest: string; applicationDigest: string; ownerId: string; datasetId: string; policyEpoch: number; sourcePermissionRevision: number
 }

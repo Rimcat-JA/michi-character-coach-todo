@@ -219,7 +219,7 @@ test('K12/N03: split and series grants are written only from the owner configura
   const status = await f.service.configure({ ...f.config, allowSplit: true, ruleIds: [] }, f.native('configure'))
   assert.ok(status.registration.client.grant.keys.includes('tasks:split')); assert.ok(!status.registration.client.grant.keys.includes('routines:prepare')); assert.equal(Object.hasOwn(status.registration, 'rule_ids'), false)
 })
-const revisionOf=registration=>({clientId:registration.client.id,expectedRevision:registration.client.revision,taskIds:registration.task_ids,fields:['notes'],expiresAt:registration.client.grant.expires_at,automation:null,maxScheduleShiftDays:3,maxOperationsPerDay:5,allowSplit:false,ruleIds:[]})
+const revisionOf=registration=>({clientId:registration.client.id,expectedRevision:registration.client.revision,taskIds:registration.task_ids,fields:['notes'],expiresAt:registration.client.grant.expires_at,automation:null,maxScheduleShiftDays:3,maxOperationsPerDay:5,allowSplit:false,ruleIds:[],allowHistory:false,allowRoutinePreview:false,allowContextRead:false,allowExternalContext:false,allowDetection:false,allowHandoffPrepare:false,allowHandoffs:false})
 test('same-client grant reduction invalidates old snapshot, increments both revisions and preserves the durable quota journal',async t=>{
  const f=await fixture(t),old=f.status,client=await createMCPFileClient(old.root),pending=await f.command(),lease=await f.service.authorizeApplication(pending.binding,f.native('approve',pending.binding.reference))
  const next=await f.service.revise(revisionOf(old.registration),null)
@@ -251,4 +251,25 @@ test('grant revision acknowledges a DB commit already made; receipt read failure
  await assert.rejects(g.service.revise(revisionOf(g.status.registration),null),/synthetic receipt failure/)
  await assert.rejects(async()=>{const client=await createMCPFileClient(g.status.root);return client.snapshot()},error=>error.code==='CONNECTION_REVOKED')
  assert.equal(g.configuration(),null)
+})
+test('extra read/share scopes are opt-in with explicit native consent and stay off by default',async t=>{
+ const f=await fixture(t),extra={allowHistory:true,allowRoutinePreview:true,allowContextRead:true,allowExternalContext:true,allowDetection:true,allowHandoffPrepare:true,allowHandoffs:true}
+ const status=await f.service.configure({...f.config,...extra},f.native('configure')),grant=status.registration.client.grant
+ for(const key of ['history:read','routines:read','context:read','detection:request','detection:read','handoff:prepare'])assert.ok(grant.keys.includes(key),key)
+ assert.equal(grant.allow_external_context,true);assert.equal(grant.allow_handoffs,true)
+ const plain=await f.service.configure({...f.config},f.native('configure')),bare=plain.registration.client.grant
+ for(const key of ['history:read','routines:read','context:read','detection:request','detection:read','handoff:prepare'])assert.ok(!bare.keys.includes(key),key)
+ assert.equal(bare.allow_external_context,false);assert.equal(bare.allow_handoffs,false)
+ await assert.rejects(f.service.configure({...f.config,allowHistory:'yes'},f.native('configure')),error=>error.code==='CONFIG_INVALID')
+})
+test('enabling disclosure flags or extra scopes on revise consumes a native proof; reductions do not',async t=>{
+ const f=await fixture(t),request={...revisionOf(f.status.registration),allowHistory:true,allowExternalContext:true,allowHandoffs:true}
+ await assert.rejects(f.service.revise(request,null),error=>error.code==='HUMAN_APPROVAL_REQUIRED')
+ const next=await f.service.revise(request,f.native('revise',request.clientId))
+ assert.ok(next.registration.client.grant.keys.includes('history:read'))
+ assert.equal(next.registration.client.grant.allow_external_context,true);assert.equal(next.registration.client.grant.allow_handoffs,true)
+ const reduced={...revisionOf(next.registration)}
+ const done=await f.service.revise(reduced,null)
+ assert.ok(!done.registration.client.grant.keys.includes('history:read'))
+ assert.equal(done.registration.client.grant.allow_external_context,false);assert.equal(done.registration.client.grant.allow_handoffs,false)
 })

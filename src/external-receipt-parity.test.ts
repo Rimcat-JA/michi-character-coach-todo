@@ -2,7 +2,7 @@ import 'fake-indexeddb/auto'
 import { afterEach, expect, it } from 'vitest'
 import { db } from './db'
 import { createTask, newTaskInput } from './commands'
-import { bridgeHarness, click, resetApp } from './command-test-harness'
+import { bridgeHarness, resetApp } from './command-test-harness'
 import { externalAIFor } from './external-authority'
 import { dispatchExternalChangeTool } from './external-change-plans'
 import { clearExternalInstructionAuthority } from './external-instructions'
@@ -89,6 +89,8 @@ it('reference receipt: old approval cannot override a revised grant, even with a
       clientId: before.client.id, expectedRevision: before.client.revision,
       taskIds: [taskId], fields: ['notes'], expiresAt: before.client.grant.expires_at,
       automation: null, maxScheduleShiftDays: 3, maxOperationsPerDay: 5, allowSplit: false, ruleIds: [],
+      allowHistory: false, allowRoutinePreview: false, allowContextRead: false, allowExternalContext: false,
+      allowDetection: false, allowHandoffPrepare: false, allowHandoffs: false,
     })
     expect(revised.registration?.client.revision).toBe(2)
     const fresh = revised.registration!

@@ -7,7 +7,7 @@ import { isPendingCommand } from './command-bus'
 import { dispatchExternalChangeTool } from './external-change-plans'
 import { externalAIFor } from './external-authority'
 import type { FileBridgeRegistration, FileBridgeRevise } from './file-bridge-types'
-const revision=(r:FileBridgeRegistration):FileBridgeRevise=>({clientId:r.client.id,expectedRevision:r.client.revision,taskIds:r.task_ids,fields:['scheduled_date'],expiresAt:r.client.grant.expires_at,automation:null,maxScheduleShiftDays:3,maxOperationsPerDay:5,allowSplit:false,ruleIds:[]})
+const revision=(r:FileBridgeRegistration):FileBridgeRevise=>({clientId:r.client.id,expectedRevision:r.client.revision,taskIds:r.task_ids,fields:['scheduled_date'],expiresAt:r.client.grant.expires_at,automation:null,maxScheduleShiftDays:3,maxOperationsPerDay:5,allowSplit:false,ruleIds:[],allowHistory:false,allowRoutinePreview:false,allowContextRead:false,allowExternalContext:false,allowDetection:false,allowHandoffPrepare:false,allowHandoffs:false})
 it('revision latches old scope before main, cancels the bus and invalidates plan replay while preserving tasks/BYOK/ledger',async()=>{
  await resetApp();const id=await createTask({...newTaskInput(),title:'private title',scheduledDate:'2026-10-03'}),h=await bridgeHarness({taskIds:[id],fields:['title','notes','scheduled_date']})
  try{

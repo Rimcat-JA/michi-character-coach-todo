@@ -216,12 +216,13 @@ export function createFileBridgeController(gateway:FileBridgeGateway) {
     lastEgress:()=>lastEgress,
     refresh:async()=>adoptStatus(await gateway.status()),
     selectClient:async(clientId:string)=>{if(!gateway.selectClient)rejectFileBridge('UNSUPPORTED_OPERATION');return adoptStatus(await gateway.selectClient({clientId}))},
-    async configure(request:Pick<FileBridgeConfigure,'intendedHost'|'taskIds'|'fields'|'lifetimeHours'|'allowSplit'|'ruleIds'>&{automation?:FileBridgeConfigure['automation']},event:Event) {
+    async configure(request:Pick<FileBridgeConfigure,'intendedHost'|'taskIds'|'fields'|'lifetimeHours'|'allowSplit'|'ruleIds'|'allowHistory'|'allowRoutinePreview'|'allowContextRead'|'allowExternalContext'|'allowDetection'|'allowHandoffPrepare'|'allowHandoffs'>&{automation?:FileBridgeConfigure['automation']},event:Event) {
       trustedClick(event)
       const current=await settings(),policy=changePolicyFor(current)
       if(!externalAIFor(current).enabled||!policy.aiChangesEnabled)rejectFileBridge('AUTHORITY_CHANGED')
       if(request.automation&&!fileBridgeAutomationAllowed(policy,request.fields,request.automation.maxScheduleShiftDays))rejectFileBridge('AUTOMATION_NOT_GRANTED','自動化設定（S20）でメモ・予定日の範囲内自動を許可してから、同じかより狭い範囲で委任してください。')
-      const {allowSplit,ruleIds,...basic}=structuredClone(request),extended=allowSplit||ruleIds?.length?{allowSplit:Boolean(allowSplit),ruleIds:ruleIds??[]}:{}
+      const {allowSplit,ruleIds,allowHistory,allowRoutinePreview,allowContextRead,allowExternalContext,allowDetection,allowHandoffPrepare,allowHandoffs,...basic}=structuredClone(request)
+      const extended={...(allowSplit||ruleIds?.length?{allowSplit:Boolean(allowSplit),ruleIds:ruleIds??[]}:{}),...(allowHistory||allowRoutinePreview||allowContextRead||allowExternalContext||allowDetection||allowHandoffPrepare||allowHandoffs?{allowHistory:Boolean(allowHistory),allowRoutinePreview:Boolean(allowRoutinePreview),allowContextRead:Boolean(allowContextRead),allowExternalContext:Boolean(allowExternalContext),allowDetection:Boolean(allowDetection),allowHandoffPrepare:Boolean(allowHandoffPrepare),allowHandoffs:Boolean(allowHandoffs)}:{})}
       const value={...basic,automation:request.automation??null,...extended,ownerId:current.profileId,datasetId:current.datasetId,policyEpoch:policy.epoch,sourcePermissionRevision:policy.sourcePermissionRevision}
       return adoptStatus(await gateway.configure(value))
     },
