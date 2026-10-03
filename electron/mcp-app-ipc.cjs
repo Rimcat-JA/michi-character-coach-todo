@@ -1,7 +1,7 @@
 const crypto=require('node:crypto'),path=require('node:path')
 const {createMCPCore}=require('./mcp-core.cjs'),{createMCPPipeServer}=require('./mcp-pipe-server.cjs')
 const {createAppChangeDispatcher}=require('./mcp-app-changes.cjs')
-const implemented=['coach_get_capabilities','coach_search_tasks','coach_get_task','coach_preview_score','coach_search_context','coach_prepare_change','coach_submit_change','coach_get_command_result','coach_get_history']
+const implemented=['coach_get_capabilities','coach_search_tasks','coach_get_task','coach_preview_score','coach_search_context','coach_prepare_change','coach_submit_change','coach_get_command_result','coach_get_history','coach_preview_routine','coach_prepare_routine_change']
 const uuid=value=>typeof value==='string'&&/^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(value)
 function installAppMCPIPC({ipcMain,win,app,getHub,assertMain,readDB}){
  const credentials=new Map(),pending=new Map();let starting=null,server=null,generation=0

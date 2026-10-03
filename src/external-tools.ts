@@ -3,6 +3,8 @@ import { canonicalJSON } from './canonical'
 import { changePolicyFor } from './change-set'
 import { externalAIFor } from './external-authority'
 import { calculateScore, emptyScore, type Task } from './domain'
+import { expandRRule } from './rrule'
+import { isTimeZone, resolveZonedLocalTime, validClock } from './zoned-time'
 import { ownerNotesForEgress } from './egress-policy'
 import type { FileBridgeRegistration } from './file-bridge-types'
 import catalog from '../electron/contracts/plugin-tools.resolved.json'
@@ -10,7 +12,8 @@ import { assertSchema } from '../electron/plugin-schema.mjs'
 
 export type ExternalToolContext={registration:FileBridgeRegistration;ownerId:string;datasetId:string;externalEpoch:number;policyEpoch:number;sourcePermissionRevision:number}
 function fail(code:string):never{throw Object.assign(Error(code),{code})}
-export const implementedExternalTools=['coach_get_capabilities','coach_search_tasks','coach_get_task','coach_preview_score','coach_search_context','coach_prepare_change','coach_submit_change','coach_get_command_result','coach_get_history'] as const
+const addDaysText=(date:string,days:number)=>{const d=new Date(`${date}T00:00:00Z`);d.setUTCDate(d.getUTCDate()+days);return d.toISOString().slice(0,10)}
+export const implementedExternalTools=['coach_get_capabilities','coach_search_tasks','coach_get_task','coach_preview_score','coach_search_context','coach_prepare_change','coach_submit_change','coach_get_command_result','coach_get_history','coach_preview_routine','coach_prepare_routine_change'] as const
 function summary(task:Task,registration:FileBridgeRegistration){
  const fields=registration.client.grant.fields
  return {id:task.id,title:fields.includes('title')?task.title:'非共有',revision:task.revision,status:task.status,scheduled_date:fields.includes('scheduled_date')?task.scheduledDate:null,points:fields.includes('manual_points')?task.effectivePoints:null,score_mode:fields.includes('manual_points')?task.score.mode:'unset',source_state:'unverified'}
@@ -97,6 +100,49 @@ export async function dispatchExternalReadTool(name:string,args:Record<string,un
      }
     }
     return {from,to,points:String(points),completed_count:completions.length,unknown_score_count:unknown,work_minutes:minutes,scope_note,buckets}
+   }
+   if(name==='coach_preview_routine'){
+    if(!registration.client.grant.keys.includes('routines:read'))fail('INSUFFICIENT_SCOPE')
+    const definition=args.definition as {title?:unknown;trigger_type?:unknown;trigger_config?:{dtstart_date?:unknown;local_time?:unknown;rrule?:unknown;rdates?:unknown;exdates?:unknown};timezone?:unknown;basis?:unknown;evidence_refs?:unknown;steps?:{step_key?:unknown;task_blueprint?:{title?:unknown}}[]}|null|undefined
+    // Pure date math from the supplied definition only: no DB reads, no saves, no new obligations.
+    // Basis/evidence labels are echoed nowhere and grant no authority here.
+    const title=typeof definition?.title==='string'?definition.title:''
+    if(!title.trim()||title.length>300)fail('INVALID_ROUTINE_DEFINITION')
+    const steps=Array.isArray(definition?.steps)?definition.steps:[]
+    if(!steps.length||steps.length>20)fail('INVALID_ROUTINE_DEFINITION')
+    const taskTitles=steps.map(step=>typeof step?.task_blueprint?.title==='string'?step.task_blueprint.title:'')
+    if(taskTitles.some(item=>!item.trim()||item.length>300))fail('INVALID_ROUTINE_DEFINITION')
+    const config=definition?.trigger_config
+    const dtstart=typeof config?.dtstart_date==='string'?config.dtstart_date:''
+    const rruleText=typeof config?.rrule==='string'?config.rrule:''
+    const rdates=Array.isArray(config?.rdates)?config.rdates:[],exdates=Array.isArray(config?.exdates)?config.exdates:[]
+    const dateOk=(value:unknown)=>typeof value==='string'&&/^\d{4}-\d{2}-\d{2}$/.test(value)&&new Date(`${value}T00:00:00Z`).toISOString().slice(0,10)===value
+    if(!dateOk(dtstart)||!rruleText.trim()||rruleText.length>500||rdates.length>100||exdates.length>100||![...rdates,...exdates].every(dateOk))fail('INVALID_ROUTINE_DEFINITION')
+    const timezone=typeof definition?.timezone==='string'?definition.timezone:''
+    if(!isTimeZone(timezone))fail('INVALID_TIMEZONE')
+    const localTime=config?.local_time===null||config?.local_time===undefined?null:String(config.local_time)
+    if(localTime!==null&&!validClock(localTime))fail('INVALID_LOCAL_TIME')
+    if(!['user_instruction','documented_obligation','approved_rule'].includes(String(definition?.basis)))fail('INVALID_ROUTINE_DEFINITION')
+    if(!Array.isArray(definition?.evidence_refs)||definition.evidence_refs.length>100||definition.evidence_refs.some(ref=>typeof ref!=='string'||!ref.trim()||ref.length>600))fail('INVALID_ROUTINE_DEFINITION')
+    // The engine works on local wall date-times; catalog dates convert at the routine's local time (or midnight when unspecified).
+    const wallTime=localTime??'00:00'
+    const dtstartText=`${dtstart}T${wallTime}`
+    const toLocalList=(values:unknown)=>((values as string[]).map(date=>`${date}T${wallTime}`))
+    let expansion:{occurrences:string[];truncated:boolean}
+    try{expansion=expandRRule({dtstart:dtstartText,rrule:rruleText,rdates:toLocalList(rdates),exdates:toLocalList(exdates),from:dtstart,to:addDaysText(dtstart,366),timezone,limit:51})}
+    catch{fail('UNSUPPORTED_RRULE')}
+    const unknowns:string[]=[]
+    if(localTime===null)unknowns.push('時刻の指定がないため、開始日時は返しません。日付とタスク名だけを確認してください。')
+    const occurrences=expansion.occurrences.slice(0,50).map(stamp=>{
+     const date=stamp.slice(0,10),wall=stamp.slice(11)
+     let startsAt:string|null=null
+     if(localTime!==null){try{startsAt=resolveZonedLocalTime(date,wall,timezone).at}catch{startsAt=null}}
+     if(localTime!==null&&startsAt===null&&!unknowns.length)unknowns.push(`${date}は存在しないか曖昧な時刻のため、開始日時を確定できません。原文の日時を確認してください。`)
+     return {logical_key:date,starts_at:startsAt,task_titles:[...taskTitles]}
+    })
+    const conflicts:string[]=[]
+    if(expansion.truncated)conflicts.push('展開上限のため、先の回は計算していません。表示期間を移して確認してください。')
+    return {occurrences,conflicts,unknowns}
    }
    return fail('FEATURE_NOT_IMPLEMENTED')
  })
