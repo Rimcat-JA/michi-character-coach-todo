@@ -46,8 +46,8 @@ async function authorizeRequest(request:ExternalChangeRequest,context:ExternalTo
  if(request.task_id&&(!task||task.deletedAt||grant.project_ids.length&&!grant.project_ids.includes(task.containerId??'')))fail('NOT_FOUND')
  if(request.operation==='task.create'&&grant.project_ids.length)fail('FEATURE_NOT_IMPLEMENTED')
  const envelope=externalCommandEnvelope(request,request.request_key),patch=toTaskPatch(envelope.payload)
- if(task?.dueAt&&Object.hasOwn(envelope.payload,'due_date'))fail('FEATURE_NOT_IMPLEMENTED')
- const fieldMap:Record<string,string>={due_date:'due',manual_points:'points'}
+ if(task?.dueAt&&Object.hasOwn(envelope.payload,'due_date')&&!Object.hasOwn(envelope.payload,'due_at'))fail('FEATURE_NOT_IMPLEMENTED')
+ const fieldMap:Record<string,string>={due_date:'due',due_at:'due',manual_points:'points'}
  const decision=decideExternalCommand(request,{enabled:true,authenticated:true,tokenValid:true,audienceMatches:true,active:true,ownerMatches:true,datasetMatches:true,egressAllowed:true,mutationsEnabled:policy.aiChangesEnabled&&operationsForFields(Object.keys(patch) as TaskChangeField[]).every(operation=>operationMode(policy,operation)!=='deny'),scopes:grant.keys,fields:grant.fields.map(field=>fieldMap[field]??field),revision:checkRevision?task?.revision??null:request.expected_revision??null,mode:grant.mutation_mode,protectedFields:['title','due','points'],hardLockedFields:[],boundsAllowed:false,quotaAllowed:grant.max_operations_per_day>0},()=>verifiedBasis)
  if(decision!=='AWAITING_APPROVAL'&&decision!=='AUTO_ELIGIBLE')fail(decision)
  if(Object.keys(envelope.payload).some(field=>!grant.fields.includes(field as typeof grant.fields[number])))fail('FIELD_DENIED')
@@ -67,7 +67,7 @@ export async function dispatchExternalChangeTool(name:string,args:Record<string,
    if(prior){if(prior.hash!==hash)fail('IDEMPOTENCY_MISMATCH');const row=await db.commands.get(externalPlanKey(client,prior.resultId));if(!row)fail('PLAN_NOT_FOUND');const plan=JSON.parse(row.resultId) as ExternalChangePlan;if(row.hash!==await Dexie.waitFor(contentDigest(plan))||canonicalJSON(plan.context)!==canonicalJSON(context)||Date.parse(plan.expiresAt)<=Date.now())fail('PLAN_EXPIRED');return publicPlan(plan,row.hash)}
    await assertPlanCapacity(client,true)
    const {task,envelope}=await authorizeRequest(request,context,true),createdAt=new Date().toISOString(),expiresAt=new Date(Math.min(Date.now()+300000,Date.parse(context.registration.client.grant.expires_at))).toISOString()
-   const before:Record<string,unknown>=task?{title:task.title,notes:ownerNotesForEgress(task.notes).notes,scheduled_date:task.scheduledDate,due_date:task.dueDate,manual_points:task.score.manualPoints}:{}
+   const before:Record<string,unknown>=task?{title:task.title,notes:ownerNotesForEgress(task.notes).notes,scheduled_date:task.scheduledDate,due_date:task.dueDate,due_at:task.dueAt&&task.dueTimezone?{at:task.dueAt,timezone:task.dueTimezone}:null,manual_points:task.score.manualPoints}:{}
    const plan:ExternalChangePlan={version:1,id:uid(),request,context,createdAt,expiresAt,fieldDiffs:Object.entries(envelope.payload).map(([path,after])=>({path,before:before[path]??null,after}))},digest=await Dexie.waitFor(contentDigest(plan))
    // Stored plans describe a request; they never recreate bus approval or an apply capability.
    await db.commands.add({key:externalPlanKey(client,plan.id),hash:digest,resultId:JSON.stringify(plan),at:createdAt});await db.commands.add({key,hash,resultId:plan.id,at:createdAt})

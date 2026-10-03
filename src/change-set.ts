@@ -14,10 +14,10 @@ export type TaskChangeField = typeof taskChangeFields[number]
 /** A clock deadline: UTC instant plus the IANA zone it was set in; the task's dueDate must be its local date. */
 export type TaskDueClock = { at: string; timezone: string }
 export type TaskChangePatch = Partial<Pick<Task, 'title'|'notes'|'scheduledDate'|'dueDate'>> & { dueAt?: TaskDueClock|null; manualPoints?: number }
-/** Display text for a change value; a clock deadline shows its local date-time in its own zone. */
+/** Include the exact UTC instant: sub-minute precision and repeated DST times must stay distinguishable. */
 export function taskChangeValueText(value: TaskChangeValues[keyof TaskChangeValues] | undefined): string {
   if (value === null || value === undefined) return '未設定'
-  if (typeof value === 'object') return `${localDateAt(value.at, value.timezone)} ${localTimeAt(value.at, value.timezone)}（${value.timezone}）`
+  if (typeof value === 'object') return `${localDateAt(value.at, value.timezone)} ${localTimeAt(value.at, value.timezone)}（${value.timezone}） / UTC ${value.at}`
   return String(value)
 }
 export type ChangePrincipal = { id: string; kind: 'human' | 'coach' | 'external-agent'; model?: string | null }

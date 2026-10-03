@@ -1,3 +1,4 @@
+import { isTimeZone } from './zoned-time'
 import { validateDate } from './domain'
 import type { FileBridgeCommand, FileBridgeInboxEntry, FileBridgeLease, FileBridgeManifest, FileBridgeRegistration, FileBridgeResult, FileBridgeStatus } from './file-bridge-types'
 
@@ -6,7 +7,7 @@ export class FileBridgeError extends Error { readonly code: string; readonly com
 export function rejectFileBridge(code: string, message='接続・コマンドまたは承認内容を確認できません。もう一度確認してください。', commonCode?: string): never { throw new FileBridgeError(code,message,commonCode) }
 export const fileBridgeRejectedStates=['denied','conflict','expired','rejected'] as const
 const resultStates=['applied','failed','unknown',...fileBridgeRejectedStates]
-const fields=['title','notes','scheduled_date','due_date','manual_points'],grantKeys=['tasks:read','tasks:prepare','changes:submit','commands:read','tasks:split','routines:prepare','history:read','routines:read','context:read','detection:request','detection:read','handoff:prepare']
+const fields=['title','notes','scheduled_date','due_date','due_at','manual_points'],grantKeys=['tasks:read','tasks:prepare','changes:submit','commands:read','tasks:split','routines:prepare','history:read','routines:read','context:read','detection:request','detection:read','handoff:prepare']
 const record=(value:unknown):value is Record<string,unknown>=>Boolean(value&&typeof value==='object'&&!Array.isArray(value)&&Object.getPrototypeOf(value)===Object.prototype)
 const exact=(value:Record<string,unknown>,keys:string[])=>Object.keys(value).length===keys.length&&keys.every(key=>Object.hasOwn(value,key))
 const text=(value:unknown,max=200)=>typeof value==='string'&&Boolean(value.trim())&&value.length<=max
@@ -40,7 +41,9 @@ function assertRoutinePayload(payload:Record<string,unknown>) {
   const weekly=record(trigger)&&exact(trigger,['kind','weekdays','time'])&&trigger.kind==='weekly'&&Array.isArray(trigger.weekdays)&&trigger.weekdays.length>0&&trigger.weekdays.length<=7&&trigger.weekdays.every(item=>integer(item,0,6))&&new Set(trigger.weekdays).size===trigger.weekdays.length&&clock(trigger.time)
   const monthly=record(trigger)&&exact(trigger,['kind','ordinal','from','time'])&&trigger.kind==='monthly_business'&&integer(trigger.ordinal,1,31)&&['start','end'].includes(trigger.from as string)&&clock(trigger.time)
   const relative=record(trigger)&&exact(trigger,['kind','activity_id','edge','offset_days','offset_minutes'])&&trigger.kind==='activity_relative'&&text(trigger.activity_id)&&['start','end'].includes(trigger.edge as string)&&Number.isInteger(trigger.offset_days)&&Math.abs(Number(trigger.offset_days))<=366&&Number.isInteger(trigger.offset_minutes)&&Math.abs(Number(trigger.offset_minutes))<=10080
-  if(!weekly&&!monthly&&!relative)rejectFileBridge('INVALID_PAYLOAD')
+  const rrule=record(trigger)&&exact(trigger,['kind','rrule'])&&trigger.kind==='rrule'&&text(trigger.rrule,2000)
+  const completion=record(trigger)&&exact(trigger,['kind','after_days'])&&trigger.kind==='completion_relative'&&integer(trigger.after_days,1,3650)
+  if(!weekly&&!monthly&&!relative&&!rrule&&!completion)rejectFileBridge('INVALID_PAYLOAD')
 }
 export function assertFileBridgeCommand(value:unknown):asserts value is FileBridgeCommand {
   const base=['schema_version','command_id','snapshot_id','expires_at','type','target_id','expected_revision','payload']
@@ -52,7 +55,7 @@ export function assertFileBridgeCommand(value:unknown):asserts value is FileBrid
   else {
     const keys=Object.keys(payload)
     if(!keys.length||keys.some(field=>!(value.type==='task.create'?['title','notes','scheduled_date']:fields).includes(field)))rejectFileBridge('UNSUPPORTED_FIELD')
-    if(Object.hasOwn(payload,'title')&&!text(payload.title,300)||Object.hasOwn(payload,'notes')&&(typeof payload.notes!=='string'||payload.notes.length>50000)||['scheduled_date','due_date'].some(field=>Object.hasOwn(payload,field)&&!day(payload[field]))||Object.hasOwn(payload,'manual_points')&&!integer(payload.manual_points,0,100000))rejectFileBridge('INVALID_PAYLOAD')
+    if(Object.hasOwn(payload,'title')&&!text(payload.title,300)||Object.hasOwn(payload,'notes')&&(typeof payload.notes!=='string'||payload.notes.length>50000)||['scheduled_date','due_date'].some(field=>Object.hasOwn(payload,field)&&!day(payload[field]))||Object.hasOwn(payload,'due_at')&&payload.due_at!==null&&(!record(payload.due_at)||!exact(payload.due_at,['at','timezone'])||!fileBridgeTimestamp(payload.due_at.at)||!isTimeZone(payload.due_at.timezone))||Object.hasOwn(payload,'manual_points')&&!integer(payload.manual_points,0,100000))rejectFileBridge('INVALID_PAYLOAD')
   }
   if(value.type==='task.create'?(value.target_id!==null||value.expected_revision!==null||!Object.hasOwn(payload,'title')):(!uuid(value.target_id)||!integer(value.expected_revision,1)))rejectFileBridge('INVALID_TARGET')
 }

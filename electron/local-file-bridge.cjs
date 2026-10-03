@@ -3,6 +3,7 @@ const constants = require('node:fs').constants
 const path = require('node:path')
 const crypto = require('node:crypto')
 const { renderTaskEdit } = require('./file-edit-commands.cjs')
+const { validDueClock } = require('./task-due-clock.cjs')
 
 const LIMIT = 256 * 1024
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i
@@ -25,7 +26,7 @@ const bytesDigest = value => crypto.createHash('sha256').update(value).digest('h
 const samePath = (left, right) => process.platform === 'win32' ? left.toLowerCase() === right.toLowerCase() : left === right
 function freeze(value) { if (value && typeof value === 'object') { Object.freeze(value); Object.values(value).forEach(freeze) }; return value }
 const GRANT_KEYS = ['tasks:read', 'tasks:prepare', 'changes:submit', 'commands:read', 'tasks:split', 'routines:prepare', 'history:read', 'routines:read', 'context:read', 'detection:request', 'detection:read', 'handoff:prepare']
-const FIELDS = ['title', 'notes', 'scheduled_date', 'due_date', 'manual_points']
+const FIELDS = ['title', 'notes', 'scheduled_date', 'due_date', 'due_at', 'manual_points']
 const CREATE_FIELDS = ['title', 'notes', 'scheduled_date']
 const TYPES = ['task.create', 'task.update', 'task.split', 'routine.change']
 /** Terminal non-applied states carry the same stable code the app shows (K12 outcome parity). */
@@ -58,7 +59,7 @@ function parseEnvelope(text) {
   else if (command.type === 'routine.change') validateRoutinePayload(payload)
   else {
     if (!fields.length || fields.some(field => !(command.type === 'task.create' ? CREATE_FIELDS : FIELDS).includes(field))) fail('UNSUPPORTED_FIELD', 'タイトル・メモ・予定日・期限・本人指定ポイント以外は変更できません')
-    if (Object.hasOwn(payload, 'title') && !string(payload.title, 300) || Object.hasOwn(payload, 'notes') && (typeof payload.notes !== 'string' || payload.notes.length > 50000) || ['scheduled_date', 'due_date'].some(field => Object.hasOwn(payload, field) && !date(payload[field])) || Object.hasOwn(payload, 'manual_points') && (!integer(payload.manual_points) || payload.manual_points > 100000)) fail('INVALID_PAYLOAD')
+    if (Object.hasOwn(payload, 'title') && !string(payload.title, 300) || Object.hasOwn(payload, 'notes') && (typeof payload.notes !== 'string' || payload.notes.length > 50000) || ['scheduled_date', 'due_date'].some(field => Object.hasOwn(payload, field) && !date(payload[field])) || Object.hasOwn(payload, 'due_at') && !validDueClock(payload.due_at) || Object.hasOwn(payload, 'manual_points') && (!integer(payload.manual_points) || payload.manual_points > 100000)) fail('INVALID_PAYLOAD')
   }
   if (command.type === 'task.create') { if (command.target_id !== null || command.expected_revision !== null || !Object.hasOwn(payload, 'title')) fail('INVALID_TARGET') }
   else if (!uuid(command.target_id) || !integer(command.expected_revision, 1)) fail('INVALID_TARGET')
@@ -77,7 +78,10 @@ function validateRoutinePayload(payload) {
   const weekly = exact(trigger, ['kind', 'weekdays', 'time']) && trigger.kind === 'weekly' && Array.isArray(trigger.weekdays) && trigger.weekdays.length > 0 && trigger.weekdays.length <= 7 && trigger.weekdays.every(day => Number.isInteger(day) && day >= 0 && day <= 6) && new Set(trigger.weekdays).size === trigger.weekdays.length && time(trigger.time)
   const monthly = exact(trigger, ['kind', 'ordinal', 'from', 'time']) && trigger.kind === 'monthly_business' && integer(trigger.ordinal, 1) && trigger.ordinal <= 31 && ['start', 'end'].includes(trigger.from) && time(trigger.time)
   const relative = exact(trigger, ['kind', 'activity_id', 'edge', 'offset_days', 'offset_minutes']) && trigger.kind === 'activity_relative' && string(trigger.activity_id, 200) && ['start', 'end'].includes(trigger.edge) && Number.isInteger(trigger.offset_days) && Math.abs(trigger.offset_days) <= 366 && Number.isInteger(trigger.offset_minutes) && Math.abs(trigger.offset_minutes) <= 10080
-  if (!weekly && !monthly && !relative) fail('INVALID_PAYLOAD', '周期は毎週・毎月の営業日・活動相対のいずれかで指定してください')
+  const rrule = exact(trigger, ['kind', 'rrule']) && trigger.kind === 'rrule' && string(trigger.rrule, 2000)
+  const completion = exact(trigger, ['kind', 'after_days']) && trigger.kind === 'completion_relative' && integer(trigger.after_days, 1) && trigger.after_days <= 3650
+  // RRULE semantics are checked by the app's existing recurrence engine before native confirmation.
+  if (!weekly && !monthly && !relative && !rrule && !completion) fail('INVALID_PAYLOAD', '周期の種類・項目・範囲を確認してください')
 }
 
 /** Main-process boundary. Credentials and human proof are supplied by the app, never inbox JSON. */
@@ -188,6 +192,11 @@ async function createLocalFileBridge({ root, journalDirectory, signingKey, regis
       if (fields.includes('notes')) view.notes = task.notes
       if (fields.includes('scheduled_date')) view.scheduled_date = task.scheduledDate
       if (fields.includes('due_date')) view.due_date = task.dueDate ?? null
+      if (fields.includes('due_at')) {
+        const clock = task.dueAt ? { at: task.dueAt, timezone: task.dueTimezone } : null
+        if (!validDueClock(clock)) fail('TASK_SCOPE')
+        view.due_at = clock
+      }
       if (fields.includes('manual_points')) view.manual_points = points
       return view
     })

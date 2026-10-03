@@ -269,7 +269,7 @@ export function createFileBridgeController(gateway:FileBridgeGateway) {
       await db.transaction('rw',db.audits,db.settings,()=>recordEgressAudit(destination,views.map(({task,egress})=>({taskId:task.id,egress}))))
       lastEgress={withheldQuotes:views.reduce((sum,view)=>sum+view.egress.withheldQuotes,0),notesWithheld:views.filter(view=>view.egress.notesWithheld).length}
       // Owner-selected series only: id, revision, current title and trigger. No facts, sources or completions.
-      const rules=reg.rule_ids?.length?(await loadCalendarRulesState()).rules.filter(rule=>reg.rule_ids!.includes(rule.id)).map(rule=>{const definition=calendarRuleEditorDefinition(rule),trigger=triggerForCommand(definition.trigger);if(!trigger)rejectFileBridge('RULE_SCOPE','RRULE・完了起点の系列は外部へ書き出しません。接続の系列選択を見直してください。');return {id:rule.id,revision:rule.revision,title:definition.title,trigger}}):[]
+      const rules=reg.rule_ids?.length?(await loadCalendarRulesState()).rules.filter(rule=>reg.rule_ids!.includes(rule.id)).map(rule=>{const definition=calendarRuleEditorDefinition(rule),trigger=triggerForCommand(definition.trigger);if(!trigger)rejectFileBridge('RULE_SCOPE','周期の種類を確認できません。接続の系列選択を見直してください。');return {id:rule.id,revision:rule.revision,title:definition.title,trigger}}):[]
       return adoptStatus(await gateway.exportSnapshot({tasks:views.map(({task,egress})=>({id:task.id,revision:task.revision,title:task.title,notes:egress.notes,scheduledDate:task.scheduledDate,containerId:task.containerId??null})),...(rules.length?{rules}:{})}))
     },
     async scanInbox() {

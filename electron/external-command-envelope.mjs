@@ -13,8 +13,13 @@ export function externalCommandEnvelope(request,commandId){
   type='task.update';payload={...request.payload.changes}
   if(Object.hasOwn(payload,'labels'))fail('FEATURE_NOT_IMPLEMENTED')
   if(Object.hasOwn(payload,'due')){
-   if(payload.due.kind==='datetime')fail('FEATURE_NOT_IMPLEMENTED')
-   const due=payload.due;delete payload.due;payload.due_date=due.kind==='date'?due.date:null
+   const due=payload.due;delete payload.due
+   if(due.kind==='datetime'){
+    // The catalog supplies an instant, not an IANA zone. Preserve that instant in UTC;
+    // the native value confirmation shows UTC explicitly before granting any authority.
+    const at=new Date(due.at).toISOString()
+    payload.due_date=at.slice(0,10);payload.due_at={at,timezone:'UTC'}
+   }else payload.due_date=due.kind==='date'?due.date:null
   }
  }else fail('FORBIDDEN_OPERATION')
  if(typeof payload.title==='string'&&!payload.title.trim())fail('TOOL_SCHEMA')
