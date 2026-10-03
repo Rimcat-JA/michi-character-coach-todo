@@ -9,7 +9,7 @@ import { changeTrace, latestCoachChange, undoneAuditIds, type ChangeTraceEntry }
 import { changeContextFor, COMMAND_CODE_LABELS, commandProtectedFields, ENTRANCE_LABELS as entranceLabels, commandsVersion, humanContextFor, pendingCommands, receivedCommands, subscribeCommands, type PreparedCommand, type ReceivedCommand } from './command-bus'
 import { splitBody } from './task-split-change'
 
-const labels: Record<TaskChangeField, string> = { title: 'タイトル', notes: 'メモ', scheduledDate: '予定日', dueDate: '本当の締め切り', dueAt: '締め切り時刻', manualPoints: '本人指定ポイント' }
+const labels: Record<TaskChangeField, string> = { title: 'タイトル', notes: 'メモ', scheduledDate: '予定日', dueDate: '本当の締め切り', dueAt: '締め切り時刻', manualPoints: '本人指定ポイント', labels: 'ラベル' }
 const fieldLabel = (field: string) => (labels as Record<string, string>)[field] ?? ({ scheduled_date: '予定日', due_date: '本当の締め切り', manual_points: '本人指定ポイント', completionPoints: '完了時のポイント', status: '状態', deletedAt: '削除', children: '子タスク', scoreMode: 'ポイント方式', effectivePoints: '有効ポイント', project: 'プロジェクト', labels: 'ラベル', importance: '重要度', dueTimezone: '締め切りのタイムゾーン', snoozedUntil: 'スヌーズ', firstScheduledDate: '最初の予定日' } as Record<string, string>)[field] ?? field
 const clock = (value: unknown): value is { at: string; timezone: string } => Boolean(value && typeof value === 'object' && typeof (value as { at?: unknown }).at === 'string' && typeof (value as { timezone?: unknown }).timezone === 'string')
 const shown = (value: unknown) => value === null || value === undefined || value === '' ? '未設定' : clock(value) ? taskChangeValueText(value) : typeof value === 'object' ? JSON.stringify(value).slice(0, 300) : String(value)

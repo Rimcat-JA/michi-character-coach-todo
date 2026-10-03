@@ -6,10 +6,20 @@ import { buildSourceEmbeddings, searchHybrid, refreshHybridRetrieval, embeddingW
 
 const embedding = { provider: 'loopback-openai-compatible' as const, endpoint: 'http://127.0.0.1:8080', model: 'fixture' }
 beforeEach(async () => { await db.delete(); await db.open(); await ensureSettings(); await db.settings.update('main', { embedding }) })
-async function source(text = '序文\n請求書を届けてください', index = true) {
-  return importLocalSource({ title: text.slice(0, 80), text, provider: 'local', externalId: null, conversation: null, author: null, sourceUrl: null, date: '2026-10-01', fromDate: '2026-09-02', toDate: '2026-10-01', permissions: { ...defaultSourcePermissions(), index }, allowedModels: [], retentionUntil: null })
+async function source(text = '序文\n請求書を届けてください', index = true, date = '2026-10-01') {
+  return importLocalSource({ title: text.slice(0, 80), text, provider: 'local', externalId: null, conversation: null, author: null, sourceUrl: null, date, fromDate: '2026-09-02', toDate: '2026-10-01', permissions: { ...defaultSourcePermissions(), index }, allowedModels: [], retentionUntil: null })
 }
 const embed = vi.fn(async (inputs: string[]) => inputs.map(text => text.includes('序文') ? [0, 1] : [1, 0]))
+it('200件の表示上限を日付ではなくRRF順位に適用し、古い高順位の根拠も保持する', async()=>{
+  const recent=await source(Array.from({length:250},(_,i)=>`通常の資料${i}`).join('\n')),older=await source('特別な根拠',true,'2026-09-30')
+  const vectors=async(inputs:string[])=>inputs.map(text=>text.includes('特別')||text==='意味で検索'?[1,0]:[0,1])
+  await buildSourceEmbeddings(recent,vectors);await buildSourceEmbeddings(older,vectors)
+  const result=(await searchHybrid('意味で検索','2026-09-02','2026-10-01',vectors))!
+  expect(result.hits).toHaveLength(200);expect(result.hits[0].documentId).toBe(older);expect(result.hits[0].quote).toBe('特別な根拠')
+  expect((await refreshHybridRetrieval(result))?.hits[0].documentId).toBe(older)
+  await setSourcePermissions(older,1,{...defaultSourcePermissions(),index:false},[],null)
+  expect((await refreshHybridRetrieval(result))?.hits.some(hit=>hit.documentId===older)).toBe(false)
+})
 it('言い換えを取得し、RRF順序と引用の実際の位置を保持する', async () => {
   const id = await source(); await buildSourceEmbeddings(id, embed)
   const result = (await searchHybrid('インボイスを送付', '2026-09-02', '2026-10-01', embed))!

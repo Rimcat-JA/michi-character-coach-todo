@@ -1,3 +1,4 @@
+import { validateLabelSelection, labelSelectionAuthority } from './labels'
 import { authorityMatches, processingAllowed, processingEpoch } from './external-authority'
 import Dexie from 'dexie'
 import { db } from './db'
@@ -9,14 +10,15 @@ import { cancelCoachNotificationTarget } from './coach-notification-save'
 import { assertTaskInstruction, clearTaskInstructionAuthority, type VerifiedTaskInstruction } from './task-user-instruction'
 import { autoChangeCounts, automationRulesFor, changeAuditFact, coachMediatedChange, OPERATION_INFO, operationsForFields, ownerTimezone, validateAllowedHours, validateAutomationRules, validateStopFlags, withinAllowedHours, type AllowedHours, type AutomationRule, type AutomationStopFlags, type ChangeAuditFact, type OperationGroup } from './automation-policy'
 
-export const taskChangeFields = ['title', 'notes', 'scheduledDate', 'dueDate', 'dueAt', 'manualPoints'] as const
+export const taskChangeFields = ['title', 'notes', 'scheduledDate', 'dueDate', 'dueAt', 'manualPoints', 'labels'] as const
 export type TaskChangeField = typeof taskChangeFields[number]
 /** A clock deadline: UTC instant plus the IANA zone it was set in; the task's dueDate must be its local date. */
 export type TaskDueClock = { at: string; timezone: string }
-export type TaskChangePatch = Partial<Pick<Task, 'title'|'notes'|'scheduledDate'|'dueDate'>> & { dueAt?: TaskDueClock|null; manualPoints?: number }
+export type TaskChangePatch = Partial<Pick<Task, 'title'|'notes'|'scheduledDate'|'dueDate'|'labels'>> & { dueAt?: TaskDueClock|null; manualPoints?: number }
 /** Include the exact UTC instant: sub-minute precision and repeated DST times must stay distinguishable. */
 export function taskChangeValueText(value: TaskChangeValues[keyof TaskChangeValues] | undefined): string {
   if (value === null || value === undefined) return '未設定'
+  if (Array.isArray(value)) return value.length ? value.join('、') : 'ラベルなし'
   if (typeof value === 'object') return `${localDateAt(value.at, value.timezone)} ${localTimeAt(value.at, value.timezone)}（${value.timezone}） / UTC ${value.at}`
   return String(value)
 }
@@ -38,8 +40,8 @@ export type ChangePolicy = {
   stops?: AutomationStopFlags
 }
 export type TaskChangeRequest = { taskId: string; expectedRevision: number; patch: TaskChangePatch }
-export type TaskChangeValues = Pick<Task,'title'|'notes'|'scheduledDate'|'dueDate'> & { dueAt: TaskDueClock|null; manualPoints: number|null }
-export type TaskChange = { taskId: string; baseRevision: number; title: string; before: TaskChangeValues; after: TaskChangeValues; fields: TaskChangeField[]; patch: TaskChangePatch; scoreBefore: ScoreInput; scoreAfter: ScoreInput; assessmentBefore: string; effectivePointsBefore: number|null; fieldOrigins:Partial<Record<TaskChangeField,TaskFieldOrigin>> }
+export type TaskChangeValues = Pick<Task,'title'|'notes'|'scheduledDate'|'dueDate'|'labels'> & { dueAt: TaskDueClock|null; manualPoints: number|null }
+export type TaskChange = { taskId: string; baseRevision: number; title: string; before: TaskChangeValues; after: TaskChangeValues; fields: TaskChangeField[]; patch: TaskChangePatch; scoreBefore: ScoreInput; scoreAfter: ScoreInput; assessmentBefore: string; effectivePointsBefore: number|null; fieldOrigins:Partial<Record<TaskChangeField,TaskFieldOrigin>>; labelAuthority?: string }
 export type PreparedChangeSet = {
   version: 1; id: string; principal: ChangePrincipal; ownerId: string; datasetId: string
   policyEpoch: number; sourcePermissionRevision: number; aiEnabledAtPrepare: boolean; processingEpoch: number; sourceRevisions: SourceRevision[]
@@ -124,7 +126,7 @@ function trustedHumanEvent(context: ChangeContext, event: Event) {
   catch { fail('HUMAN_APPROVAL_REQUIRED','アプリの本人確認ボタンから承認してください') }
 }
 function validatePatch(value: unknown): asserts value is TaskChangePatch {
-  if (!record(value) || !Object.keys(value).length || Object.keys(value).some(field => !taskChangeFields.includes(field as TaskChangeField))) fail('UNSUPPORTED_FIELD','タイトル・メモ・予定日・期限・本人指定ポイントだけを編集できます。完了・配分・系列・権限には別の操作が必要です。')
+  if (!record(value) || !Object.keys(value).length || Object.keys(value).some(field => !taskChangeFields.includes(field as TaskChangeField))) fail('UNSUPPORTED_FIELD','タイトル・メモ・予定日・期限・本人指定ポイント・ラベルだけを編集できます。完了・配分・系列・権限には別の操作が必要です。')
   if (Object.hasOwn(value,'title') && (typeof value.title !== 'string' || !value.title.trim() || value.title.length > 300)) fail('INVALID_INPUT','タイトルは1〜300文字で入力してください')
   if (Object.hasOwn(value,'notes') && (typeof value.notes !== 'string' || value.notes.length > 50000)) fail('INVALID_INPUT','メモは50,000文字以内で入力してください')
   for (const field of ['scheduledDate','dueDate'] as const) if (Object.hasOwn(value,field)) {
@@ -132,6 +134,7 @@ function validatePatch(value: unknown): asserts value is TaskChangePatch {
     try { validateDate(value[field] as string|null,'日付') } catch { fail('INVALID_INPUT','日付が不正です') }
   }
   if (Object.hasOwn(value,'manualPoints') && !integer(value.manualPoints,0,100000)) fail('INVALID_INPUT','本人指定ポイントは0〜100000の整数にしてください')
+  if (Object.hasOwn(value,'labels')) { try { validateLabelSelection(value.labels as string[], [], []) } catch { fail('INVALID_INPUT','ラベルの選択が不正です') } }
   if (Object.hasOwn(value,'dueAt') && value.dueAt !== null && (!record(value.dueAt) || !exactKeys(value.dueAt,['at','timezone']) || typeof value.dueAt.at !== 'string' || typeof value.dueAt.timezone !== 'string')) fail('INVALID_INPUT','締め切り時刻はUTC時刻とタイムゾーンで指定してください')
 }
 function freeze<T>(value: T): T {
@@ -158,7 +161,7 @@ function authorizeProposal(prepared: PreparedChangeSet, context: ChangeContext, 
   if (Date.parse(prepared.expiresAt) <= Date.now()) fail('EXPIRED','変更案の確認期限が切れました。差分を作り直してください')
   return policy
 }
-const requiresInstruction = (changes: TaskChange[]) => changes.some(change=>change.fields.some(field=>['title','dueDate','dueAt','manualPoints'].includes(field)))
+const requiresInstruction = (changes: TaskChange[]) => changes.some(change=>change.fields.some(field=>['title','dueDate','dueAt','manualPoints','labels'].includes(field)))
 const instructionRequests = (changes: TaskChange[]): TaskChangeRequest[] => changes.map(change=>({taskId:change.taskId,expectedRevision:change.baseRevision,patch:change.patch}))
 function verifyInstruction(prepared: PreparedChangeSet, context: ChangeContext, settings: Settings) {
   if (requiresInstruction(prepared.changes) || prepared.instruction) {
@@ -169,7 +172,10 @@ function verifyInstruction(prepared: PreparedChangeSet, context: ChangeContext, 
 async function ownedTaskContainer(task:Task,ownerId:string) {
   if (task.containerId) { const container=await db.containers.get(task.containerId); if(!container||container.deletedAt||container.ownerId!==ownerId) fail('UNAUTHORIZED','このタスクの所属領域を編集する権限がありません') }
 }
-function values(task:Task):TaskChangeValues { return {title:task.title,notes:task.notes,scheduledDate:task.scheduledDate,dueDate:task.dueDate,dueAt:task.dueAt&&task.dueTimezone?{at:task.dueAt,timezone:task.dueTimezone}:null,manualPoints:task.score.manualPoints} }
+async function labelAuthorityFor(names: string[], ownerId: string, knownOnly: boolean) {
+  try { return await labelSelectionAuthority(names,ownerId,knownOnly) } catch(cause) { fail('INVALID_LABELS',cause instanceof Error?cause.message:'ラベルが不正です') }
+}
+function values(task:Task):TaskChangeValues { return {title:task.title,notes:task.notes,scheduledDate:task.scheduledDate,dueDate:task.dueDate,dueAt:task.dueAt&&task.dueTimezone?{at:task.dueAt,timezone:task.dueTimezone}:null,manualPoints:task.score.manualPoints,labels:[...task.labels]} }
 function changedCharacters(before: string, after: string) {
   let prefix = 0, suffix = 0
   while (prefix < before.length && prefix < after.length && before[prefix] === after[prefix]) prefix++
@@ -184,13 +190,13 @@ function deniedOperation(policy: ChangePolicy, fields: TaskChangeField[]): Opera
 export function decideChangePolicy(prepared: PreparedChangeSet, policy: ChangePolicy, context: ChangeDecisionContext = {}): ChangePolicyDecision {
   validateChangePolicy(policy)
   const agent = prepared.principal.kind !== 'human', rules = automationRulesFor(policy), fields = prepared.changes.flatMap(change => change.fields), operations = operationsForFields(fields)
-  const protectedFields = [...new Set(prepared.changes.flatMap(change => change.fields.filter(field => field==='manualPoints'||field==='dueDate'||field==='dueAt'||policy.locks[field] === 'locked_until_human_approval' || agent && policy.locks[field] === 'protect_from_autonomous')))]
+  const protectedFields = [...new Set(prepared.changes.flatMap(change => change.fields.filter(field => field==='labels'||field==='manualPoints'||field==='dueDate'||field==='dueAt'||policy.locks[field] === 'locked_until_human_approval' || agent && policy.locks[field] === 'protect_from_autonomous')))]
   const rule = (operation: OperationGroup) => rules.find(item => item.operation === operation)!
   if (agent && !policy.aiChangesEnabled) return {status:'denied',reason:'AIによる変更は停止しています',protectedFields}
   const denied = agent ? operations.find(operation => rule(operation).mode === 'deny') : undefined
   if (denied) return {status:'denied',reason:denied==='task.text'||denied==='task.schedule'?`AIによる変更は停止しています（${OPERATION_INFO[denied].label}）`:`この項目の代理変更は停止しています（${OPERATION_INFO[denied].label}）`,protectedFields}
   if (agent && fields.includes('title') && policy.fieldRules?.title === 'deny') return {status:'denied',reason:'この項目の代理変更は停止しています（タイトル）',protectedFields}
-  if (requiresInstruction(prepared.changes)) return {status:'awaiting_approval',reason:'本人が指定したタイトル・期限・ポイントの変更は毎回内容を確認します',protectedFields}
+  if (requiresInstruction(prepared.changes)) return {status:'awaiting_approval',reason:'本人が指定したタイトル・期限・ポイント・ラベルの変更は毎回内容を確認します',protectedFields}
   if (!agent || operations.some(operation => rule(operation).mode !== 'auto_within_bounds') || protectedFields.length) return {status:'awaiting_approval',reason:protectedFields.length?'保護された項目の本人確認が必要です':'この変更の本人確認が必要です',protectedFields}
   if (prepared.changes.length > policy.bounds.maxTasks) return {status:'awaiting_approval',reason:'自動変更の件数上限を超えています',protectedFields}
   for (const change of prepared.changes) {
@@ -227,7 +233,7 @@ export async function prepareTaskChanges(requests: TaskChangeRequest[], context:
     validatePatch(request.patch)
     if (Object.keys(request.patch).some(field=>!context.allowedFields.includes(field as TaskChangeField))) fail('UNAUTHORIZED','この項目の変更は許可されていません')
   }
-  const payload = await db.transaction('r',db.tasks,db.settings,db.containers,db.tripBundles,async()=>{
+  const payload = await db.transaction('r',[db.tasks,db.settings,db.containers,db.tripBundles,...(requests.some(request=>Object.hasOwn(request.patch,'labels'))?[db.labelGroups,db.labelDefinitions]:[])],async()=>{
     const settings = await currentSettings(context), policy=changePolicyFor(settings)
     if (context.principal.kind !== 'human' && (!processingAllowed(settings, context.principal) || !policy.aiChangesEnabled || deniedOperation(policy,requests.flatMap(request=>Object.keys(request.patch) as TaskChangeField[])))) fail('CHANGES_STOPPED','AIによる変更は停止しています')
     const changes: TaskChange[] = []
@@ -239,17 +245,19 @@ export async function prepareTaskChanges(requests: TaskChangeRequest[], context:
       const before=values(task),after:TaskChangeValues={...before,...request.patch,...(request.patch.title!==undefined?{title:request.patch.title.trim()}:{})}
       // A clock deadline and a different deadline day never coexist; moving or clearing the day needs an explicit clock decision.
       if(after.dueAt||before.dueAt&&!Object.hasOwn(request.patch,'dueAt')&&after.dueDate!==before.dueDate){try{validateTaskDue({dueDate:after.dueDate,dueAt:after.dueAt?.at??null,dueTimezone:after.dueAt?.timezone??null})}catch(error){fail('INVALID_INPUT',`${error instanceof Error?error.message:'締め切りが不正です'}。時刻付きの締め切りは日付と時刻を一緒に指定してください`)}}
+      const labelAuthority = Object.hasOwn(request.patch, 'labels') ? await labelAuthorityFor(after.labels, context.ownerId, context.principal.kind !== 'human') : undefined
       const scoreAfter=Object.hasOwn(request.patch,'manualPoints')?{...task.score,mode:'manual' as const,manualPoints:request.patch.manualPoints!}:structuredClone(task.score)
       validateTaskInput({...task,...after,score:scoreAfter})
       const fields=taskChangeFields.filter(field=>Object.hasOwn(request.patch,field)&&(canonicalJSON(before[field])!==canonicalJSON(after[field])||field==='manualPoints'&&task.score.mode!=='manual'))
       if (!fields.length) fail('NO_CHANGE','変更する内容がありません')
       if(fields.includes('manualPoints')) assertTripTaskScoreChangeAllowed(task.id,task.score,scoreAfter,await db.tripBundles.toArray())
       const fieldOrigins=Object.fromEntries(fields.map(field=>[field,context.principal.kind==='human'?'human':context.fieldOrigins?.[field]==='human_override'?'human_override':instruction?'user_instruction_via_agent':'agent_proposal']))
-      changes.push({taskId:task.id,baseRevision:task.revision,title:task.title,before,after,fields,patch:request.patch,scoreBefore:structuredClone(task.score),scoreAfter,assessmentBefore:task.assessmentId,effectivePointsBefore:task.effectivePoints,fieldOrigins})
+      changes.push({taskId:task.id,baseRevision:task.revision,title:task.title,before,after,fields,patch:request.patch,scoreBefore:structuredClone(task.score),scoreAfter,assessmentBefore:task.assessmentId,effectivePointsBefore:task.effectivePoints,fieldOrigins,...(labelAuthority ? {labelAuthority} : {})})
     }
     if(requiresInstruction(changes)||instruction){
       try { assertTaskInstruction(instruction,requests,context,settings) }
       catch(error){fail('USER_INSTRUCTION_REQUIRED',error instanceof Error?error.message:'本人の指示を確認してください')}
+      if(changes.some((change,index)=>change.labelAuthority!==instruction.changes[index].labelAuthority)) fail('LABELS_CHANGED','値を確認した後にラベル定義が変わりました')
       if(changes.some((change,index)=>canonicalJSON(change.scoreBefore)!==canonicalJSON(instruction.changes[index].scoreBefore))) fail('CONFLICT','本人指示を確認した後にポイントの状態が変わりました')
     }
     if(context.principal.kind!=='human'&&(changes.some(change=>change.fields.includes('title'))&&policy.fieldRules?.title==='deny'||deniedOperation(policy,changes.flatMap(change=>change.fields))))fail('CHANGES_STOPPED','この項目の代理変更は停止しています')
@@ -293,7 +301,7 @@ export async function applyChangeSet(value: PreparedChangeSet, approval: UIChang
   const prepared=await verifyProposal(value)
   const requestStorageKey=`changeset:request:${await Dexie.waitFor(contentDigest({principalId:context.principal.id,requestKey}))}`
   const appliedStorageKey=`changeset:applied:${prepared.id}`
-  const receipt=await db.transaction('rw',[db.tasks,db.settings,db.commands,db.audits,db.assessments,db.tripBundles,db.containers],async()=>{
+  const receipt=await db.transaction('rw',[db.tasks,db.settings,db.commands,db.audits,db.assessments,db.tripBundles,db.containers,...(prepared.changes.some(change=>change.fields.includes('labels'))?[db.labelGroups,db.labelDefinitions]:[])],async()=>{
     if (proposals.get(prepared.id)!==prepared) fail('UNVERIFIED_CHANGE_SET','この変更案は取り消されました')
     const settings=await currentSettings(context),policy=authorizeProposal(prepared,context,settings)
     verifyInstruction(prepared,context,settings)
@@ -322,6 +330,7 @@ export async function applyChangeSet(value: PreparedChangeSet, approval: UIChang
     // An owner undo without a caller trace is still recorded in the current format (S21 entrance and basis).
     for (const [index,change] of prepared.changes.entries()) {
       const task=tasks[index]!
+      if (change.labelAuthority && change.labelAuthority !== await labelAuthorityFor(change.after.labels, context.ownerId, prepared.principal.kind !== 'human')) fail('LABELS_CHANGED','ラベル定義が変わりました。選択を確認し直してください')
       const undoOf = typeof undoLink === 'string' ? undoLink : undoLink?.[task.id]
       const traced: ChangeTrace | null = trace ?? (undoOf ? { entrance: 'ui_human', basis: 'app_instruction', commandId: `undo:${undoOf}`, label: null } : null)
       await ownedTaskContainer(task,context.ownerId)
@@ -392,7 +401,7 @@ export async function prepareUndoFromAudits(auditIds: string[], context: ChangeC
       if (!before||before.mode!=='manual'||!Number.isInteger(before.manualPoints)) fail('UNDO_UNAVAILABLE','元の点数方式へは自動で戻せません。タスク編集で本人が設定してください。完了記録と実績台帳は変わりません。')
       if (!instruction) fail('USER_INSTRUCTION_REQUIRED','点数の取り消しには本人の新しい指示が必要です。完了記録と実績台帳は変わりません。')
     }
-    if (!instruction&&fact.fields.some(field=>field==='title'||field==='dueDate'||field==='dueAt'||field==='manualPoints')) fail('USER_INSTRUCTION_REQUIRED','タイトル・本当の締め切りの取り消しには本人の新しい指示が必要です。タスク編集で本人が直接戻すこともできます。')
+    if (!instruction&&fact.fields.some(field=>field==='title'||field==='dueDate'||field==='dueAt'||field==='manualPoints'||field==='labels')) fail('USER_INSTRUCTION_REQUIRED','タイトル・本当の締め切り・ラベルの取り消しには本人の新しい指示が必要です。タスク編集で本人が直接戻すこともできます。')
   }
   const first=found.rows[0].fact,label=first.principal.kind==='human'?'コーチ経由の変更の取り消し':'代理変更の取り消し'
   const prepared=await prepareTaskChanges(found.rows.map(({task,fact})=>({taskId:task.id,expectedRevision:task.revision,patch:structuredClone(fact.undo!.patch) as TaskChangePatch})),{...context,allowedFields:[...new Set(found.rows.flatMap(row=>row.fact.fields))]},`${label}（元の変更 ${first.changeSetId.slice(0,8)}）`,instruction)

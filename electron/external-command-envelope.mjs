@@ -1,7 +1,7 @@
 import catalog from './contracts/plugin-tools.resolved.json' with {type:'json'}
 import {assertSchema} from './plugin-schema.mjs'
 const fail=code=>{throw Object.assign(Error(code),{code})}
-export function externalCommandEnvelope(request,commandId){
+export function externalCommandEnvelope(request,commandId,labelNames=undefined){
  assertSchema(catalog.tools.find(tool=>tool.name==='coach_prepare_change').inputSchema,request)
  let type,payload
  if(request.operation==='task.create'){
@@ -11,7 +11,7 @@ export function externalCommandEnvelope(request,commandId){
   type='task.update';payload={manual_points:request.payload.points}
  }else if(request.operation==='task.update'){
   type='task.update';payload={...request.payload.changes}
-  if(Object.hasOwn(payload,'labels'))fail('FEATURE_NOT_IMPLEMENTED')
+  if(Object.hasOwn(payload,'labels')){if(!Array.isArray(labelNames)||labelNames.length!==payload.labels.length||labelNames.some(name=>typeof name!=='string'||!name.trim()||name.length>100))fail('LABEL_RESOLUTION_REQUIRED');payload.labels=[...labelNames]}
   if(Object.hasOwn(payload,'due')){
    const due=payload.due;delete payload.due
    if(due.kind==='datetime'){

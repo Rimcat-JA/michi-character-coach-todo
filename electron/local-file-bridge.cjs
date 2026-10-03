@@ -26,7 +26,7 @@ const bytesDigest = value => crypto.createHash('sha256').update(value).digest('h
 const samePath = (left, right) => process.platform === 'win32' ? left.toLowerCase() === right.toLowerCase() : left === right
 function freeze(value) { if (value && typeof value === 'object') { Object.freeze(value); Object.values(value).forEach(freeze) }; return value }
 const GRANT_KEYS = ['tasks:read', 'tasks:prepare', 'changes:submit', 'commands:read', 'tasks:split', 'routines:prepare', 'history:read', 'routines:read', 'context:read', 'detection:request', 'detection:read', 'handoff:prepare']
-const FIELDS = ['title', 'notes', 'scheduled_date', 'due_date', 'due_at', 'manual_points']
+const FIELDS = ['title', 'notes', 'scheduled_date', 'due_date', 'due_at', 'manual_points', 'labels']
 const CREATE_FIELDS = ['title', 'notes', 'scheduled_date']
 const TYPES = ['task.create', 'task.update', 'task.split', 'routine.change']
 /** Terminal non-applied states carry the same stable code the app shows (K12 outcome parity). */
@@ -58,7 +58,8 @@ function parseEnvelope(text) {
   if (command.type === 'task.split') validateSplitPayload(payload)
   else if (command.type === 'routine.change') validateRoutinePayload(payload)
   else {
-    if (!fields.length || fields.some(field => !(command.type === 'task.create' ? CREATE_FIELDS : FIELDS).includes(field))) fail('UNSUPPORTED_FIELD', 'タイトル・メモ・予定日・期限・本人指定ポイント以外は変更できません')
+    if (!fields.length || fields.some(field => !(command.type === 'task.create' ? CREATE_FIELDS : FIELDS).includes(field))) fail('UNSUPPORTED_FIELD', 'タイトル・メモ・予定日・期限・本人指定ポイント・ラベル以外は変更できません')
+    if (Object.hasOwn(payload, 'labels') && (!Array.isArray(payload.labels) || payload.labels.length > 30 || payload.labels.some(name => !string(name,100)) || new Set(payload.labels).size !== payload.labels.length)) fail('INVALID_PAYLOAD')
     if (Object.hasOwn(payload, 'title') && !string(payload.title, 300) || Object.hasOwn(payload, 'notes') && (typeof payload.notes !== 'string' || payload.notes.length > 50000) || ['scheduled_date', 'due_date'].some(field => Object.hasOwn(payload, field) && !date(payload[field])) || Object.hasOwn(payload, 'due_at') && !validDueClock(payload.due_at) || Object.hasOwn(payload, 'manual_points') && (!integer(payload.manual_points) || payload.manual_points > 100000)) fail('INVALID_PAYLOAD')
   }
   if (command.type === 'task.create') { if (command.target_id !== null || command.expected_revision !== null || !Object.hasOwn(payload, 'title')) fail('INVALID_TARGET') }
@@ -197,6 +198,7 @@ async function createLocalFileBridge({ root, journalDirectory, signingKey, regis
         if (!validDueClock(clock)) fail('TASK_SCOPE')
         view.due_at = clock
       }
+      if (fields.includes('labels')) { if (!Array.isArray(task.labels) || task.labels.length > 30 || task.labels.some(name => !string(name,100)) || new Set(task.labels).size !== task.labels.length) fail('TASK_SCOPE'); view.labels = [...task.labels] }
       if (fields.includes('manual_points')) view.manual_points = points
       return view
     })

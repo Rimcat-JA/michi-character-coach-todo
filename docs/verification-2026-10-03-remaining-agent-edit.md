@@ -1,34 +1,72 @@
-# Remaining work: external deadline clocks and recurrence editing
+# Remaining work: external editing, ICS recurrence and retrieval load
 
-## Restart checkpoint
+## Restart and current scope
 
-After Muse Spark reported a provider rate limit, the live repository was inspected. `C:\toodoapp\wt\remaining`, branch `codex/remaining-batch-1`, was clean at `bede79d71e06b1ad87296a691c36a248a7503a2f`. The remote main was the same commit. Muse had created this worktree and installed independent dependencies; there were no additional commits or unfinished edits to recover. PRs 61, 62 and 63 were already merged. Existing worktrees and `C:\toodoapp\app` were preserved.
+After Muse Spark's rate limit, `C:\toodoapp\wt\remaining`, branch `codex/remaining-batch-1`, was clean at main `bede79d71e06b1ad87296a691c36a248a7503a2f`. Muse had created the worktree and independent dependencies; there were no unfinished edits or extra commits. PRs 61–63 were merged. `C:\toodoapp\app`, other worktrees and dependency junctions were preserved.
 
-## Added behavior
+PR 64 remains OPEN/draft. The user deferred Computer Use on 2026-10-03. Subsequent review, automated checks, load measurement and documentation use no Computer Use. CI is code validation, not native Windows acceptance.
 
-- File/stdio MCP connections can separately grant `due_at`, export its current `{at, timezone}` value, and propose a change through the existing command bus. Dates remain `due_date`; clocks use a canonical UTC ISO instant and a valid IANA zone. Malformed dates, invalid zones and extra authority fields fail closed in both main and renderer boundaries.
-- The catalog's `due.kind=datetime` carries an offset instant but no IANA zone. Conversion preserves that instant as UTC and derives its UTC deadline day. Both `due_date` and `due_at` permissions are required. Native value confirmation and protected diffs display the date, local time, zone and exact UTC instant, including seconds/milliseconds and the distinction between repeated DST times, followed by separate checks for both protected fields. Existing grants are not expanded implicitly. Deadlines never qualify for automatic application.
-- Day-only catalog requests against an existing clock deadline remain unsupported: they cannot silently erase its clock. File/MCP callers may explicitly clear or replace a clock through the existing protected bus path.
-- Owner-selected RRULE and completion-relative series now export and accept recurrence proposals through the same file/MCP route as other series. Wire triggers are `{kind:"rrule",rrule:"..."}` or `{kind:"completion_relative",after_days:7}`. Requests cannot set DTSTART, RDATE/EXDATE, DST choices, unfinished policy, title, points or steps. RRULE text is bounded to 2,000 characters; completion intervals to 1–3,650 days. The existing app parser and `routineAssistTrigger` perform semantic validation and preserve start, clock, exceptions, DST and scoped COUNT/UNTIL behavior.
-- The person reviews the next occurrences and approves the configuration; generation still requires its own approval. Completed tasks, completion records and point ledger stay unchanged. The owner screen uses the existing recurrence description, including start and preserved choices.
-- Capabilities no longer claim that implemented handoff/reference or clock functionality is unavailable. Real hosts remain unverified.
+## Implemented behavior
 
-## Automated validation
+- External clocks: separately granted `due_at` exports/updates `{at, timezone}` through the common bus. Catalog offset datetimes preserve the instant as UTC and derive its UTC day; both date and clock grants are required. Owner confirmation/protected diffs show seconds, milliseconds and exact UTC, including repeated DST instants. A day-only request cannot silently erase an existing clock. Grants do not expand implicitly; deadlines never auto-apply.
+- Selected RRULE/completion-relative series: file/MCP carries only RRULE text or `after_days` (1–3650). The common engine preserves DTSTART, time, RDATE/EXDATE, DST choices, unfinished policy, steps and scoped COUNT/UNTIL. Owner confirmation/configuration approval precede separate generation approval. Completed work and ledger are unchanged.
+- Labels: file/stdio MCP uses existing owner label names; catalog UUIDs resolve explicitly to owner names in renderer and main. No implicit definitions. Labels have a separate grant, owner value confirmation and protected-field check, and never auto-apply. Unknown/foreign definitions, normalized duplicates and single-choice conflicts are refused. Instructions/proposals bind definition/group state; metadata changes between confirmation, preparation and commit invalidate them. Submit rechecks UUID/name binding. Undo needs a fresh instruction.
+- Snapshot controller now passes actual granted date, clock, manual points and labels to main. It previously omitted existing date/clock/point values, incorrectly exporting null. Unselected fields remain undisclosed.
+- ICS uses the common RRULE engine: day/week/month/year, ordinal weekdays, BYMONTH/BYSETPOS and non-Monday WKST. ICS keeps seconds, exact UTC UNTIL, all-day types, RDATE/EXDATE and recurrence identity. Old supported representations keep persisted version digests. Unsupported rules and ambiguous/nonexistent zoned occurrences still fail closed. The 10,000-occurrence bound counts actual instances before UNTIL, excluding look-ahead candidates.
+- Hybrid search preserves RRF order before the 200-hit cap, rather than dropping older high-rank evidence by date. Span membership/lookup use Set/Map; index validation happens once per document/revision per refresh. ACL/retention/version are rechecked after asynchronous index reads. The cache never survives a refresh; lexical-only date ordering is unchanged.
 
-Final local validation: Vitest **1,991 tests / 197 files** pass (baseline 1,967 + 24 added); Electron **295 tests: 294 pass, 1 existing platform skip, 0 fail**; lint, TypeScript/build, CJS syntax **63 files**, and PWA emulation **10/10** pass. The final PWA report is `qa-output/pwa-offline/2026-10-03T08-55-52-356Z/report.json` (generated local artifact). Added coverage exercises actual main file bridge, signed inbox, MCP client/router and app DB; native clicks in these Node tests are simulated and are **not** Windows acceptance evidence.
+## Final automated validation
 
-The clock cases cover file/MCP approval and replay, catalog-to-inbox conversion across an offset date boundary, each missing field grant, malformed clocks, protected checks and inconsistent local days. Recurrence cases cover RRULE and completion-relative changes through both entrances, native confirmation requirements, separate generation approval, preserved COUNT/exceptions/DST/unfinished choices, completed work and ledger invariance, forbidden extra fields and invalid RRULE semantics.
+- Vitest: **2,012 tests / 198 files pass** (merged baseline 1,967 + 45: clocks/recurrence 24, labels/snapshot 11, ICS 9, hybrid ranking 1).
+- Electron: **295 total; 294 pass, 1 existing platform skip, 0 fail**.
+- lint, TypeScript/build, CJS syntax **63 files**, `git diff --check` pass.
+- Final built PWA: **10/10** Chromium(Electron) emulation pass; report `qa-output/pwa-offline/2026-10-03T10-30-49-023Z/report.json` (local generated artifact).
 
-## Windows DEV limitation — acceptance not claimed
+Review covered grant boundaries, UUID/name conversion, metadata changes at each confirmation boundary, legacy nested transactions, protected checks/replay, index freshness, old component digests, second precision and UNTIL bounds. New regressions preserve high-rank older evidence among more than 200 newer hits and ICS look-ahead at the bound. Simulated Node events are not native Windows evidence; emulation is not physical offline/mobile evidence.
 
-A source development Electron app was launched from this worktree with its own fresh profile at `C:\Users\Danir\Documents\Codex\2026-10-02\h-rebase-7-muse-spark-h\work\qa-reminders-profile\remaining-clock`. The first background launch hid the window; it was stopped and relaunched visibly for Computer Use. The target window was then selectable, but Computer Use capture showed an empty client area and accessibility exposed only region nodes. Activating the exact returned window and retrying with `--force-renderer-accessibility --disable-gpu` did not recover usable controls. Read-only inspection found the app DOM and empty, dedicated DB initialized normally. No native confirmation or application was performed in this window.
+## Real IndexedDB synthetic load
 
-The source app was quit after the failed UI verification attempts. The portable-distribution launch previously rejected by approval review was not retried or bypassed. Chromium PWA emulation and Node simulated clicks must not be described as native Windows acceptance. This change remains a draft until the new clock and recurrence routes receive Windows UI evidence and the current PR head passes both CI jobs. Requirement statuses remain partial.
+`npm run benchmark:retrieval` runs hidden standalone Electron code in its own temporary profile, using production import/index/search and real Chromium IndexedDB. **10,000 synthetic spans / 120,000 characters / 384-dimensional deterministic vectors**; no keys, real model or network. Report: `qa-output/retrieval-10000/2026-10-03T10-28-58-371Z/report.json`.
 
-## Next work
+| Operation | Measurement |
+| --- | --- |
+| Import | 17.8 ms |
+| Index, 10,000 windows | 459.7 ms |
+| Lexical search | 68.7 ms |
+| Hybrid, runs 1–3 | 1,526.0 / 1,555.1 / 1,561.8 ms |
 
-1. Restore usable Windows source DEV capture/input and verify new grants, exact clock value display, both protected checks, saving/replay, RRULE/completion-relative preview/configuration/generation, stop/revoke/stale revision behavior. Record actual evidence, then review final-head CI before any merge.
-2. Audit remaining local gaps, including label proxy edits and ICS use of the common recurrence engine; do not invent support by changing status text.
-3. Real ChatGPT/Claude hosts, independent semantic judging, personal-PC/hosted deployments, physical offline and other-user intrusion, licensed Live2D/real ASR, actual provider accounts and messenger APIs remain external/unverified work. Keep mock messenger scope and the previously deferred Gmail mbox alternative unchanged.
+Each run returned 200 hits, span 9,999 first and exact quote positions. Revocation removed previous results and all embedding artifacts. Tasks/ledger and HTTP(S) requests remained zero. Electron 44.4.5; timings vary by machine/load. No Japanese semantic-quality or native acceptance claim. Initial harness startup stalled with top-level `await app.whenReady()`; using the established `.then(...)` pattern fixed the harness. Incomplete attempts are not performance evidence.
 
-Recounting the actual rows at baseline `bede79d` gives 121 entries: 93 accepted, 19 partial, 9 unconfirmed. Its footer (and previous report) incorrectly said 18 partial/10 unconfirmed. The footer is corrected to match the unchanged individual statuses. This batch does not promote any entry to accepted.
+## Windows source DEV evidence before the pause
+
+Profile: `C:\Users\Danir\Documents\Codex\2026-10-02\h-rebase-7-muse-spark-h\work\qa-reminders-profile\remaining-clock`.
+
+The initial capture was blank/UIA regions only. A later source DEV session had usable capture/input; the first failure's root cause remains unknown. Owner/task/calendar/grant data was **synthetic backend fixture setup**, not native permission consent. The production main service loaded that configuration and enforced its normal native proofs for actual applications. Fixture proofs only initialized the isolated configuration; production guards were not loosened. A noncanonical fixture RRULE initially failed state validation; repairing that test data restored the UI.
+
+Observed real Windows clicks plus read-only DB evidence:
+
+1. Snapshot export through renderer/IPC/main contained the selected existing date, manual 10pt and Japanese label.
+2. Command `51767750-3f84-4932-983c-85dadb400ef9` changed the task's clock to `2026-10-04T01:00:12.345Z` / Asia/Tokyo and `QA仕事` to `QA生活`. Owner confirmation showed exact UTC and old/new labels. Save stayed disabled until clock and label checks were both selected. Task revision became 2; manual 10pt, completions and ledger stayed unchanged. The date itself did not change: a moved date's separate checkbox was **not** tested here.
+3. Command `596f3271-6217-4801-8498-fa8b118abc5a` saved monthly first-Monday configuration. Preview showed 10-05, 11-02, 12-07 and preserved start/time/count/DST. Saving configuration did not generate tasks.
+4. Command `b8cf9ec0-5de2-453d-bd69-69a875830562` saved completion-relative 3 days with preserved initial date/time/keep-all. Again no generated tasks. DB: both rule revisions 2, one task, zero completions/ledger, three bridge receipts.
+5. Separate common-calendar generation preview showed 78 creates: 74 activity events and four task occurrences. Physical Escape stopped Computer Use before generation approval. **Generation acceptance is not claimed.**
+
+Read-only artifact: scratch `work/R2-native-after-routines.json`; captures are in task tool history. These clicks used the intermediate build: final metadata binding, ICS integration, search changes and updated owner text still need final-build UI checks. The subsequent no-Computer-Use process audit found no remaining-worktree Electron process. No source app was relaunched; PWA/benchmark harnesses exit themselves. The previously rejected portable launch was not retried/bypassed; real hosts were not tested.
+
+## Deferred native checks
+
+Only after renewed user authorization for Computer Use, use final source DEV and the isolated profile:
+
+1. Refresh snapshot; move both day and exact clock plus label. Verify every changed protected field, stored values, replay and point/completion invariance.
+2. Verify refusal after definition/group changes against final metadata binding.
+3. Recreate RRULE/completion preview, approve generation separately: four new tasks plus activity events, zero completion points, no replay duplicates.
+4. Import last-weekday/yearly ICS through the real picker; review dates/seconds, save configuration, separately generate events and repeat without duplicates. Events alone must not create tasks/points.
+5. Record final-build stop/revocation/stale-revision behavior and latest-head CI before ready/merge. Simulations stay labelled.
+
+Native grant/privacy consent was not automated. The computer-use skill's `docs/guidance.md` says: “Do not change Windows security settings, Windows privacy settings, or any in-app security or privacy settings. Do not act on security or privacy permission requests.” Consent needs manual owner action; synthetic grants cannot satisfy it. Skill: `C:\Users\Danir\.codex\plugins\cache\openai-bundled\computer-use\26.930.31730\skills\computer-use\SKILL.md`.
+
+## Other remaining dependencies
+
+Real hosts/authentication, Japanese embeddings and model detection/independent judging, human blind holdout, personal-PC/hosted/server synchronization, physical offline/other-user access, real mobile, licensed Live2D/ASR and provider accounts remain unverified. Synthetic load does not remove these limitations. Messenger scope remains mock-only; Gmail mbox stays deferred. Do not invent a deployment version or authorize real account sends implicitly.
+
+Requirements remain **121 = 93 accepted / 19 partial / 9 unconfirmed**. Prior 18/10 was a footer miscount; no individual status was promoted.

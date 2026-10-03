@@ -92,12 +92,13 @@ export async function buildSourceEmbeddings(sourceId: string, embed: EmbedFn) {
 async function usableArtifacts(source: ContextSource, snapshot: ContextSnapshot, settings: Settings, dims?: number) {
   const rows = (await db.sourceArtifacts.where('sourceId').equals(source.id).toArray()).filter(row => row.kind === 'embedding')
   const windows: EmbeddingArtifactPayload['windows'] = []
+  const spanIds = new Set(snapshot.spans.map(span => span.id))
   try {
     for (const row of rows) {
       const p = JSON.parse(row.payload) as EmbeddingArtifactPayload
       if (row.ownerId !== settings.profileId || row.sourceRevision !== snapshot.revision || row.permissionRevision !== source.permissionRevision || p.v !== 1 || p.model !== settings.embedding?.model || p.endpoint !== settings.embedding?.endpoint || !Number.isSafeInteger(p.dims) || p.dims < 1 || p.dims > 4096 || dims !== undefined && p.dims !== dims || p.snapshotRevision !== snapshot.revision || p.snapshotSha256 !== snapshot.sha256 || p.permissionRevision !== source.permissionRevision || p.sourcePermissionRevision !== changePolicyFor(settings).sourcePermissionRevision || !Array.isArray(p.windows)) return { state: 'stale' as const, windows: [] }
       for (const w of p.windows) {
-        if (!Array.isArray(w.spanIds) || !w.spanIds.length || w.spanIds.some(id => !snapshot.spans.some(span => span.id === id)) || typeof w.vec !== 'string' || !Number.isFinite(w.scale) || w.scale <= 0 || dequantize(w.vec, w.scale).length !== p.dims) return { state: 'stale' as const, windows: [] }
+        if (!Array.isArray(w.spanIds) || !w.spanIds.length || w.spanIds.some(id => !spanIds.has(id)) || typeof w.vec !== 'string' || !Number.isFinite(w.scale) || w.scale <= 0 || dequantize(w.vec, w.scale).length !== p.dims) return { state: 'stale' as const, windows: [] }
         windows.push(w)
       }
     }
@@ -105,20 +106,29 @@ async function usableArtifacts(source: ContextSource, snapshot: ContextSnapshot,
   return { state: windows.length ? 'fresh' as const : 'missing' as const, windows }
 }
 export async function refreshHybridRetrieval(result: HybridResult): Promise<HybridResult | null> {
-  const current = await refreshLocalRetrieval({ ...result, engine: 'lexical' })
+  const rankOrder = (a: HybridHit, b: HybridHit) => b.rankScore - a.rankScore || a.documentId.localeCompare(b.documentId) || a.id.localeCompare(b.id)
+  // Preserve RRF rank through ACL validation; the lexical path's date sort must not discard the best 200.
+  const current = await refreshLocalRetrieval({ ...result, engine: 'lexical', hits: [...result.hits].sort(rankOrder).slice(0, 200) }, 'input')
   if (!current) return null
   const settings = await db.settings.get('main')
   if (!settings) return null
   const hits: HybridHit[] = []
+  const indexStates = new Map<string, boolean>()
   for (const raw of current.hits) {
     const hit = raw as HybridHit
     if (hit.kind === 'library' && hit.matchedBy !== 'lexical') {
-      const source = await db.contextSources.get(hit.documentId), snapshot = await db.contextSnapshots.get(`${hit.documentId}:${hit.revision}`)
-      if (!source || !snapshot || (await usableArtifacts(source, snapshot, settings)).state !== 'fresh') continue
+      const key = `${hit.documentId}:${hit.revision}`
+      if (!indexStates.has(key)) {
+        const source = await db.contextSources.get(hit.documentId), snapshot = await db.contextSnapshots.get(key)
+        indexStates.set(key, Boolean(source && snapshot && (await usableArtifacts(source, snapshot, settings)).state === 'fresh'))
+      }
+      if (!indexStates.get(key)) continue
     }
     hits.push(hit)
   }
-  return { ...result, hits: hits.sort((a, b) => b.rankScore - a.rankScore || a.documentId.localeCompare(b.documentId) || a.id.localeCompare(b.id)), coverage: current.coverage }
+  // Recheck ACL after asynchronous index reads; this cache never survives one refresh.
+  const checked = await refreshLocalRetrieval({ ...current, hits }, 'input')
+  return checked ? { ...result, hits: (checked.hits as HybridHit[]).sort(rankOrder), coverage: checked.coverage } : null
 }
 export async function searchHybrid(query: string, fromDate: string, toDate: string, embed: EmbedFn | null): Promise<HybridResult | null> {
   const lexical = await searchLocalContext(query, fromDate, toDate)
@@ -137,8 +147,9 @@ export async function searchHybrid(query: string, fromDate: string, toDate: stri
     if (!queryVector || artifact.state !== 'fresh') continue
     const scores = new Map<string, number>()
     for (const w of artifact.windows) { const score = cosine(queryVector, dequantize(w.vec, w.scale)); for (const id of w.spanIds) scores.set(id, Math.max(scores.get(id) ?? -2, score)) }
+    const spansById = new Map(snapshot.spans.map(span => [span.id, span]))
     for (const [id, score] of scores) {
-      const span = snapshot.spans.find(item => item.id === id)!
+      const span = spansById.get(id)!
       vectorHits.push({ score, hit: { kind: 'library', id, documentId: source.id, revision: snapshot.revision, title: source.title, provider: source.provider, date: source.date, author: source.author ?? '未指定', quote: span.text, start: span.start, end: span.end, digest: snapshot.sha256, location: spanLocation(snapshot, id) } })
     }
   }

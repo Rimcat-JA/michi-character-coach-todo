@@ -19,7 +19,10 @@ function createAppChangeDispatcher({getHub,readDB,dispatch}){
   let plan;try{plan=JSON.parse(row.resultId)}catch{fail('PLAN_INVALID')}
   if(!plan||Object.keys(plan).length!==7||plan.version!==1||plan.id!==id||row.hash!==sha(plan)||canonicalFileJSON(plan.context)!==canonicalFileJSON(bound(context)))fail('PLAN_INVALID')
   const {externalCommandEnvelope}=await import('./external-command-envelope.mjs')
-  const envelope=externalCommandEnvelope(plan.request,plan.id)
+  let labelNames
+  const requestedLabels=plan.request.operation==='task.update'?plan.request.payload.changes?.labels:undefined
+  if(requestedLabels!==undefined){labelNames=[];for(const id of requestedLabels){const label=await readDB('labelDefinitions',id);if(!label||label.ownerId!==context.ownerId)fail('LABEL_NOT_FOUND');labelNames.push(label.name)};if(canonicalFileJSON(labelNames)!==canonicalFileJSON(plan.fieldDiffs.find(diff=>diff.path==='labels')?.after))fail('LABELS_CHANGED')}
+  const envelope=externalCommandEnvelope(plan.request,plan.id,labelNames)
   // Renderer verified app_instruction against the live registry before storing the plan; main rechecks scope/task binding here. Other kinds have no issuance path and fail closed.
   if(plan.request.basis.kind!=='external_request'&&plan.request.basis.kind!=='app_instruction')fail('UNVERIFIED_REFERENCE')
   if(!context.registration.client.grant.keys.includes('tasks:prepare')||!context.registration.client.grant.keys.includes('changes:submit')||Object.keys(envelope.payload).some(field=>!context.registration.client.grant.fields.includes(field)))fail('INSUFFICIENT_SCOPE')

@@ -42,6 +42,6 @@ it('catalog conversion retains null and zero; unsupported fields never silently 
  expect(externalCommandEnvelope(base,base.request_key).payload).toEqual({scheduled_date:null,due_date:null})
  expect(externalCommandEnvelope({...base,operation:'task.score.set_manual',payload:{points:0}},base.request_key).payload).toEqual({manual_points:0})
  expect(externalCommandEnvelope({...base,payload:{changes:{due:{kind:'datetime',at:'2026-10-04T01:00:00+09:00'}}}},base.request_key).payload).toEqual({due_date:'2026-10-03',due_at:{at:'2026-10-03T16:00:00.000Z',timezone:'UTC'}})
- expect(()=>externalCommandEnvelope({...base,payload:{changes:{labels:[]}}},base.request_key)).toThrow('FEATURE_NOT_IMPLEMENTED')
+ expect(()=>externalCommandEnvelope({...base,payload:{changes:{labels:[]}}},base.request_key)).toThrow('LABEL_RESOLUTION_REQUIRED')
  expect(()=>externalCommandEnvelope({...base,operation:'task.complete',payload:{expected_assessment_id:null}},base.request_key)).toThrow('FORBIDDEN_OPERATION')
 })

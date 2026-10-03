@@ -7,7 +7,7 @@ export class FileBridgeError extends Error { readonly code: string; readonly com
 export function rejectFileBridge(code: string, message='接続・コマンドまたは承認内容を確認できません。もう一度確認してください。', commonCode?: string): never { throw new FileBridgeError(code,message,commonCode) }
 export const fileBridgeRejectedStates=['denied','conflict','expired','rejected'] as const
 const resultStates=['applied','failed','unknown',...fileBridgeRejectedStates]
-const fields=['title','notes','scheduled_date','due_date','due_at','manual_points'],grantKeys=['tasks:read','tasks:prepare','changes:submit','commands:read','tasks:split','routines:prepare','history:read','routines:read','context:read','detection:request','detection:read','handoff:prepare']
+const fields=['title','notes','scheduled_date','due_date','due_at','manual_points','labels'],grantKeys=['tasks:read','tasks:prepare','changes:submit','commands:read','tasks:split','routines:prepare','history:read','routines:read','context:read','detection:request','detection:read','handoff:prepare']
 const record=(value:unknown):value is Record<string,unknown>=>Boolean(value&&typeof value==='object'&&!Array.isArray(value)&&Object.getPrototypeOf(value)===Object.prototype)
 const exact=(value:Record<string,unknown>,keys:string[])=>Object.keys(value).length===keys.length&&keys.every(key=>Object.hasOwn(value,key))
 const text=(value:unknown,max=200)=>typeof value==='string'&&Boolean(value.trim())&&value.length<=max
@@ -55,6 +55,7 @@ export function assertFileBridgeCommand(value:unknown):asserts value is FileBrid
   else {
     const keys=Object.keys(payload)
     if(!keys.length||keys.some(field=>!(value.type==='task.create'?['title','notes','scheduled_date']:fields).includes(field)))rejectFileBridge('UNSUPPORTED_FIELD')
+    if(Object.hasOwn(payload,'labels')&&(!Array.isArray(payload.labels)||payload.labels.length>30||payload.labels.some(name=>!text(name,100))||new Set(payload.labels).size!==payload.labels.length))rejectFileBridge('INVALID_PAYLOAD')
     if(Object.hasOwn(payload,'title')&&!text(payload.title,300)||Object.hasOwn(payload,'notes')&&(typeof payload.notes!=='string'||payload.notes.length>50000)||['scheduled_date','due_date'].some(field=>Object.hasOwn(payload,field)&&!day(payload[field]))||Object.hasOwn(payload,'due_at')&&payload.due_at!==null&&(!record(payload.due_at)||!exact(payload.due_at,['at','timezone'])||!fileBridgeTimestamp(payload.due_at.at)||!isTimeZone(payload.due_at.timezone))||Object.hasOwn(payload,'manual_points')&&!integer(payload.manual_points,0,100000))rejectFileBridge('INVALID_PAYLOAD')
   }
   if(value.type==='task.create'?(value.target_id!==null||value.expected_revision!==null||!Object.hasOwn(payload,'title')):(!uuid(value.target_id)||!integer(value.expected_revision,1)))rejectFileBridge('INVALID_TARGET')
