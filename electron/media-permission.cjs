@@ -9,12 +9,13 @@ function createMediaPermissionPolicy({getContents,now=Date.now}) {
   return {grant,check,request,clear:()=>{proof=null}}
 }
 function installMediaPermissionPolicy({session,ipcMain,win}) {
+  const {onWindowClosed}=require('./on-window-closed.cjs')
   const policy=createMediaPermissionPolicy({getContents:()=>win.isDestroyed()?null:win.webContents})
   ipcMain.on('michi:voice-native-start',(event,value)=>{if(value===undefined)policy.grant(event)})
   ipcMain.on('michi:voice-native-stop',event=>{if(event.sender===win.webContents&&event.senderFrame===win.webContents.mainFrame)policy.clear()})
   session.setPermissionCheckHandler((contents,permission,origin,details)=>policy.check(contents,permission,origin,details))
   session.setPermissionRequestHandler((contents,permission,callback,details)=>callback(policy.request(contents,permission,details)))
   session.setDisplayMediaRequestHandler((_request,callback)=>callback(null))
-  win.webContents.on('did-start-navigation',()=>policy.clear());win.on('hide',()=>policy.clear());win.on('closed',()=>policy.clear())
+  win.webContents.on('did-start-navigation',()=>policy.clear());win.on('hide',()=>policy.clear());onWindowClosed(win,()=>policy.clear())
 }
 module.exports={createMediaPermissionPolicy,installMediaPermissionPolicy}

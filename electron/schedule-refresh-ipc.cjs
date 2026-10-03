@@ -1,5 +1,6 @@
 const fs=require('node:fs/promises'),path=require('node:path')
 const {createScheduleRefresh}=require('./schedule-refresh.cjs')
+const {onWindowClosed}=require('./on-window-closed.cjs')
 const {createSchedulePrivateStore}=require('./schedule-private.cjs')
 const {scheduleURL}=require('./schedule-network.cjs')
 function scheduleQAFixtureMode(app,value=process.env.MICHI_QA_SCHEDULE_FIXTURES){
@@ -36,7 +37,7 @@ function installScheduleRefreshIPC({ipcMain,dialog,win,app,safeStorage,gateway,a
   })
   const catchup=()=>{void ready?.then(current=>current.tick()).catch(()=>{})};app.on('activate',catchup)
   const powerMonitor=require('electron').powerMonitor;powerMonitor.on('resume',catchup)
-  win.on('closed',()=>{void ready?.then(current=>current.close()).catch(()=>{});app.removeListener('activate',catchup);powerMonitor.removeListener('resume',catchup)})
+  onWindowClosed(win,()=>{void ready?.then(current=>current.close()).catch(()=>{});app.removeListener('activate',catchup);powerMonitor.removeListener('resume',catchup)})
   return {getService:service}
 }
 module.exports={installScheduleRefreshIPC,scheduleQAFixtureMode}

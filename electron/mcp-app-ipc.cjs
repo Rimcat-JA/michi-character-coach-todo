@@ -1,6 +1,7 @@
 const crypto=require('node:crypto'),path=require('node:path')
 const {createMCPCore}=require('./mcp-core.cjs'),{createMCPPipeServer}=require('./mcp-pipe-server.cjs')
 const {createAppChangeDispatcher}=require('./mcp-app-changes.cjs')
+const {onWindowClosed}=require('./on-window-closed.cjs')
 const implemented=['coach_get_capabilities','coach_search_tasks','coach_get_task','coach_preview_score','coach_search_context','coach_prepare_change','coach_submit_change','coach_get_command_result','coach_get_history','coach_preview_routine','coach_prepare_routine_change','coach_prepare_detection_run','coach_get_detection_run','coach_prepare_handoff','coach_get_shared_context']
 const uuid=value=>typeof value==='string'&&/^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(value)
 function installAppMCPIPC({ipcMain,win,app,getHub,assertMain,readDB}){
@@ -45,7 +46,7 @@ function installAppMCPIPC({ipcMain,win,app,getHub,assertMain,readDB}){
   return {mcpServers:{michi:{command:process.execPath,args:[path.join(app.getAppPath(),'scripts','michi-mcp.mjs'),'--connect',request.clientId],env:{ELECTRON_RUN_AS_NODE:'1',MICHI_MCP_ENDPOINT:pipe.endpoint,MICHI_MCP_CREDENTIAL:credential}}},state:'implemented',limitations:['Windowsローカルの選択タスクと受信箱への変更案送信。アプリ再起動・設定の再表示で資格情報が変わります。','外部hostの実接続は未確認。']}
  })
  async function stop(){generation++;credentials.clear();for(const row of pending.values()){clearTimeout(row.timer);row.reject(Object.assign(Error('GRANT_REVOKED'),{code:'GRANT_REVOKED'}))}pending.clear();const current=server;server=null;if(current)await current.close()}
- win.on('closed',()=>{void stop()})
+ onWindowClosed(win,()=>{void stop()})
  return {stop,revoke:clientId=>credentials.delete(clientId)}
 }
 module.exports={installAppMCPIPC}

@@ -1,4 +1,5 @@
 const { createFolderWatch } = require('./folder-watch.cjs')
+const { onWindowClosed } = require('./on-window-closed.cjs')
 function installFolderWatchIPC({ ipcMain, dialog, win, assertFrame, readDatabase }) {
   let scope = null
   const service = createFolderWatch({ active: async () => {
@@ -24,7 +25,7 @@ function installFolderWatchIPC({ ipcMain, dialog, win, assertFrame, readDatabase
     if (request.action === 'accept') { service.accept(request.id, request.candidateId, request.sha256); return true }
     throw new Error('監視操作が不正です')
   })
-  win.on('closed', () => service.close())
+  onWindowClosed(win, () => service.close())
   return service
 }
 module.exports = { installFolderWatchIPC }

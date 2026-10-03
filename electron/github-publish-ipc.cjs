@@ -2,6 +2,7 @@ const path=require('node:path')
 const fs=require('node:fs/promises')
 const {createGitHubPrivateStore}=require('./github-publish-private.cjs')
 const {createGitHubPublishService}=require('./github-publish-service.cjs')
+const {onWindowClosed}=require('./on-window-closed.cjs')
 /** All data selectors and byte hashes are fixed by main; IPC carries IDs only. */
 async function readGitHubPublicationFacts(win,exportId){
  if(win.isDestroyed()||typeof exportId!=='string'||!/^[a-f0-9-]{36}$/.test(exportId))throw new Error('PUBLICATION_INVALID')
@@ -31,6 +32,6 @@ function installGitHubPublishIPC({ipcMain,win,app,safeStorage,fetchImpl,qaEmulat
   if(argumentFree){if(method==='invalidate')proofs.clear();const result=await current[method]();return ['status','storedStatus'].includes(method)&&qaEmulator?{...result,qaEmulator:true}:result}
   return current[method](envelope)
  })
- win.on('closed',()=>proofs.clear())
+ onWindowClosed(win,()=>proofs.clear())
 }
 module.exports={installGitHubPublishIPC,readGitHubPublicationFacts}
