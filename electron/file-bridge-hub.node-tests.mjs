@@ -92,7 +92,7 @@ test('global revoke during an in-flight configure cannot publish a live copy eve
 })
 test('revising A leaves B selected, its signed snapshot and its pending lease untouched',async t=>{
  const f=await fixture(t),a=await f.connect(f.a),b=await f.connect(f.b),pending=await f.propose(b,f.b,crypto.randomUUID()),lease=await f.hub.authorizeApplication(pending.binding,f.native('approve',pending.binding.reference)),reg=a.registration
- const next=await f.hub.revise({clientId:reg.client.id,expectedRevision:1,taskIds:reg.task_ids,fields:['notes'],expiresAt:reg.client.grant.expires_at,automation:null,maxScheduleShiftDays:3,maxOperationsPerDay:5,allowSplit:false,ruleIds:[],allowHistory:false,allowRoutinePreview:false,allowContextRead:false,allowExternalContext:false,allowDetection:false,allowHandoffPrepare:false,allowHandoffs:false},null)
+ const next=await f.hub.revise({clientId:reg.client.id,expectedRevision:1,taskIds:reg.task_ids,fields:['notes'],expiresAt:reg.client.grant.expires_at,automation:null,maxScheduleShiftDays:3,maxOperationsPerDay:5,allowSplit:false,ruleIds:[],allowHistory:false,allowRoutinePreview:false,allowContextRead:false,allowExternalContext:false,allowDetection:false,allowHandoffPrepare:false,allowHandoffs:false,allowRoutineChange:false},null)
  assert.equal(next.registration.client.revision,2);assert.equal((await f.hub.status()).registration.client.id,b.registration.client.id)
  assert.equal((await(await createMCPFileClient(b.root)).snapshot()).tasks[0].id,f.b.id)
  const result=await f.hub.recordApplied({leaseId:lease.leaseId,reference:pending.binding.reference,receipt:f.persist(pending,lease,f.b)});assert.equal(result.client_id,b.registration.client.id)

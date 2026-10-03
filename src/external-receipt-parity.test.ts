@@ -90,7 +90,7 @@ it('reference receipt: old approval cannot override a revised grant, even with a
       taskIds: [taskId], fields: ['notes'], expiresAt: before.client.grant.expires_at,
       automation: null, maxScheduleShiftDays: 3, maxOperationsPerDay: 5, allowSplit: false, ruleIds: [],
       allowHistory: false, allowRoutinePreview: false, allowContextRead: false, allowExternalContext: false,
-      allowDetection: false, allowHandoffPrepare: false, allowHandoffs: false,
+      allowDetection: false, allowHandoffPrepare: false, allowHandoffs: false, allowRoutineChange: false,
     })
     expect(revised.registration?.client.revision).toBe(2)
     const fresh = revised.registration!

@@ -48,8 +48,10 @@ export type FileBridgeConfigure = {
   automation: { maxScheduleShiftDays: number; maxOperationsPerDay: number } | null
   allowSplit?: boolean; ruleIds?: string[]
   allowHistory?: boolean; allowRoutinePreview?: boolean; allowContextRead?: boolean; allowExternalContext?: boolean; allowDetection?: boolean; allowHandoffPrepare?: boolean; allowHandoffs?: boolean
+  /** Propose brand-new series (scope=new). Existing-series changes still need ruleIds binding. */
+  allowRoutineChange?: boolean
 }
-export type FileBridgeRevise={clientId:string;expectedRevision:number;taskIds:string[];fields:FileBridgeField[];expiresAt:string;automation:FileBridgeConfigure['automation'];maxScheduleShiftDays:number;maxOperationsPerDay:number;allowSplit:boolean;ruleIds:string[];allowHistory:boolean;allowRoutinePreview:boolean;allowContextRead:boolean;allowExternalContext:boolean;allowDetection:boolean;allowHandoffPrepare:boolean;allowHandoffs:boolean}
+export type FileBridgeRevise={clientId:string;expectedRevision:number;taskIds:string[];fields:FileBridgeField[];expiresAt:string;automation:FileBridgeConfigure['automation'];maxScheduleShiftDays:number;maxOperationsPerDay:number;allowSplit:boolean;ruleIds:string[];allowHistory:boolean;allowRoutinePreview:boolean;allowContextRead:boolean;allowExternalContext:boolean;allowDetection:boolean;allowHandoffPrepare:boolean;allowHandoffs:boolean;allowRoutineChange:boolean}
 export type FileBridgeApplicationBinding = {
   reference: string; fileDigest: string; applicationDigest: string; ownerId: string; datasetId: string; policyEpoch: number; sourcePermissionRevision: number
 }
