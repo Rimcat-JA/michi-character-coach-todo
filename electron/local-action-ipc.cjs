@@ -3,6 +3,7 @@ const path = require('node:path')
 const crypto = require('node:crypto')
 const { createLocalActionCoordinator } = require('./local-action-service.cjs')
 const { createPrivateJSONStore } = require('./private-json-store.cjs')
+const { onWindowClosed } = require('./on-window-closed.cjs')
 
 function installLocalActionIPC({ ipcMain, win, app, safeStorage }) {
   const nativeProofs = new Map()
@@ -59,6 +60,6 @@ function installLocalActionIPC({ ipcMain, win, app, safeStorage }) {
     if (['status', 'invalidate'].includes(method)) { if (envelope !== undefined) throw new Error('操作引数が不正です'); return current[method]() }
     return current[method](envelope)
   })
-  win.on('closed', () => { nativeProofs.clear() })
+  onWindowClosed(win, () => { nativeProofs.clear() })
 }
 module.exports = { installLocalActionIPC }

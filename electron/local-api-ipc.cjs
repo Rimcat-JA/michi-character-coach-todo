@@ -1,4 +1,5 @@
 const path=require('node:path')
+const {onWindowClosed}=require('./on-window-closed.cjs')
 const {createLocalAPIService}=require('./local-api-service.cjs'),{createLocalAPIServer}=require('./local-api-server.cjs')
 function installLocalAPIIPC({ipcMain,win,app,safeStorage,assertFrame,readDatabase}){
  const proofs=new Map();let ready=null,server=null,startQueue=Promise.resolve()
@@ -7,6 +8,6 @@ function installLocalAPIIPC({ipcMain,win,app,safeStorage,assertFrame,readDatabas
  function changeServer(enable,port){const work=startQueue.then(async()=>{if(server){await server.close();server=null}if(enable){const s=await service();server=await createLocalAPIServer({service:s,port});try{await s.recordPort(server.port)}catch(e){await server.close();server=null;throw e}}});startQueue=work.catch(()=>{});return work}
  ipcMain.handle('michi:localapi',async(event,value)=>{assertFrame(event);if(!value||typeof value!=='object'||Array.isArray(value)||typeof value.action!=='string')throw new Error('LOCAL_API_REQUEST_INVALID');const action=value.action,keys=['status','pending','invalidate'].includes(action)?['action']:['configure','issue','authorize'].includes(action)?['action','input','proofNonce']:['action','input'];if(Object.keys(value).length!==keys.length||keys.some(k=>!Object.hasOwn(value,k)))throw new Error('LOCAL_API_REQUEST_INVALID');const s=await service();if(action==='status')return {...await s.status(),running:Boolean(server),url:server?'http://127.0.0.1:'+server.port+'/api/v1':null};if(action==='configure'){const result=await s.configure(value.input,value.proofNonce);await changeServer(result.enabled,result.port);return {...await s.status(),running:Boolean(server),url:server?'http://127.0.0.1:'+server.port+'/api/v1':null}}if(action==='issue')return s.issue(value.input,value.proofNonce);if(action==='pending')return s.pending();if(action==='authorize')return s.authorize(value.input,value.proofNonce);if(action==='applied')return s.applied(value.input);if(action==='reject')return s.reject(value.input);if(action==='revoke'){if(!value.input||Object.keys(value.input).length!==1||typeof value.input.tokenId!=='string')throw new Error('LOCAL_API_REQUEST_INVALID');return s.revoke(value.input.tokenId)}if(action==='invalidate'){await s.invalidate();await changeServer(false,0);return true}throw new Error('LOCAL_API_REQUEST_INVALID')})
  win.webContents.once('did-finish-load',()=>{void service().then(s=>s.status()).then(status=>{if(status.enabled)return changeServer(true,status.port)}).catch(()=>{/* Leave a failed listener stopped; status distinguishes actual running. */})})
- win.on('closed',()=>{proofs.clear();void changeServer(false,0)})
+ onWindowClosed(win,()=>{proofs.clear();void changeServer(false,0)})
 }
 module.exports={installLocalAPIIPC}

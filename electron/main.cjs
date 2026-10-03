@@ -11,6 +11,7 @@ const { extractDocument, extractScheduleDocument } = require('./document-extract
 const { installFolderWatchIPC } = require('./folder-watch-ipc.cjs')
 const { assertModelId, validateTaskSplitRequest } = require('./ai-request-validation.cjs')
 const { installFileBridgeIPC } = require('./file-bridge-ipc.cjs')
+const { onWindowClosed } = require('./on-window-closed.cjs')
 const { installOAuthLocalIPC } = require('./oauth-local-ipc.cjs')
 const { installLocalActionIPC } = require('./local-action-ipc.cjs')
 const { installGitHubPublishIPC } = require('./github-publish-ipc.cjs')
@@ -410,7 +411,7 @@ if (hasInstanceLock) app.whenReady().then(() => {
     showMain()
     return true
   })
-  win.on('closed', () => { if (miniWin && !miniWin.isDestroyed()) miniWin.close() })
+  onWindowClosed(win, () => { if (miniWin && !miniWin.isDestroyed()) miniWin.close() })
   const showMain = () => { for (const action of trayMode.showActions(win.isDestroyed() ? null : { destroyed: false, minimized: win.isMinimized() })) win[action]() }
   showMainWindow = showMain
   const quitFromTray = () => { trayMode.requestQuit(); if (miniWin && !miniWin.isDestroyed()) miniWin.close(); if (tray) { tray.destroy(); tray = null } app.quit() }

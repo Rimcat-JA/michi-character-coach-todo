@@ -3,6 +3,7 @@ const path = require('node:path')
 const { createOAuthLocalStore } = require('./oauth-local.cjs')
 const { createMCPHttpServer } = require('./mcp-http-server.cjs')
 const { createPrivateJSONStore } = require('./private-json-store.cjs')
+const { onWindowClosed } = require('./on-window-closed.cjs')
 const implemented = ['coach_get_capabilities', 'coach_search_tasks', 'coach_get_task', 'coach_preview_score', 'coach_search_context', 'coach_prepare_change', 'coach_submit_change', 'coach_get_command_result', 'coach_get_history', 'coach_preview_routine', 'coach_prepare_routine_change', 'coach_prepare_detection_run', 'coach_get_detection_run', 'coach_prepare_handoff', 'coach_get_shared_context']
 const uuid = value => typeof value === 'string' && /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(value)
 
@@ -154,7 +155,7 @@ function installOAuthLocalIPC({ ipcMain, win, app, safeStorage, assertMain, read
     waiter.resolve(allow)
     return { decided: allow }
   })
-  win.on('closed', () => { void stop(); nativeProofs.clear() })
+  onWindowClosed(win, () => { void stop(); nativeProofs.clear() })
   return { stop, revokeClient: async clientId => { const oauth = await store().catch(() => null); if (oauth) await oauth.revokeClient(clientId).catch(() => {}) } }
 }
 module.exports = { installOAuthLocalIPC }

@@ -1,5 +1,6 @@
 const fs=require('node:fs/promises'),path=require('node:path'),crypto=require('node:crypto')
 const {createCalDAVClient}=require('./caldav-client.cjs'),{createSchedulePrivateStore}=require('./schedule-private.cjs'),{scheduleURL}=require('./schedule-network.cjs'),{nextDue}=require('./schedule-refresh.cjs')
+const {onWindowClosed}=require('./on-window-closed.cjs')
 const sha=value=>crypto.createHash('sha256').update(value).digest('hex')
 function installCalDAVIPC({ipcMain,dialog,win,app,safeStorage,gateway,readDatabase,assertFrame,refreshScheduler,qaLoopback=false}){
   let ready=null;const clients=new Map(),discoveries=new Map(),writeBindings=new Map(),busy=new Set(),removers=new Map()
@@ -55,6 +56,6 @@ function installCalDAVIPC({ipcMain,dialog,win,app,safeStorage,gateway,readDataba
     if(action==='disconnect'){const consent=await dialog.showMessageBox(win,{type:'question',title:'CalDAVの取得を停止',message:'この接続の取得・書込を停止します。端末内の予定は保持します。',buttons:['接続を停止','取消'],defaultId:1,cancelId:1,noLink:true});if(consent.response!==0)return false;record.revoked=true;value.caldav=value.caldav.filter(row=>row!==record);removers.get(record.id)?.();removers.delete(record.id);clients.delete(record.id);const saved=structuredClone(value);for(const row of saved.caldav)delete row.pendingCandidate;await store.save(saved);return true}
     throw new Error('CALDAV_REQUEST_INVALID')
   })
-  win.on('closed',()=>{for(const remove of removers.values())remove();removers.clear();clients.clear();discoveries.clear();writeBindings.clear()})
+  onWindowClosed(win,()=>{for(const remove of removers.values())remove();removers.clear();clients.clear();discoveries.clear();writeBindings.clear()})
 }
 module.exports={installCalDAVIPC}

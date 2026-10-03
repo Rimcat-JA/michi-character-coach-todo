@@ -5,6 +5,7 @@ const { createFileBridgeHub, revokeStoredCopy } = require('./file-bridge-hub.cjs
 const { createPrivateJSONStore } = require('./private-json-store.cjs')
 const { runMCPFileSelftest } = require('./mcp-selftest.cjs')
 const { installAppMCPIPC } = require('./mcp-app-ipc.cjs')
+const { onWindowClosed } = require('./on-window-closed.cjs')
 const { readAppDatabase } = require('./app-db-reader.cjs')
 
 function installFileBridgeIPC({ ipcMain, win, app, safeStorage }) {
@@ -97,6 +98,6 @@ function installFileBridgeIPC({ ipcMain, win, app, safeStorage }) {
     })
   }
   const appMCP = installAppMCPIPC({ipcMain,win,app,getHub:service,assertMain,readDB})
-  win.on('closed', () => { nativeProofs.clear(); diagnosticAbort.abort() })
+  onWindowClosed(win, () => { nativeProofs.clear(); diagnosticAbort.abort() })
 }
 module.exports = { installFileBridgeIPC }
