@@ -13,7 +13,7 @@ import { assertSchema } from '../electron/plugin-schema.mjs'
 export type ExternalToolContext={registration:FileBridgeRegistration;ownerId:string;datasetId:string;externalEpoch:number;policyEpoch:number;sourcePermissionRevision:number}
 function fail(code:string):never{throw Object.assign(Error(code),{code})}
 const addDaysText=(date:string,days:number)=>{const d=new Date(`${date}T00:00:00Z`);d.setUTCDate(d.getUTCDate()+days);return d.toISOString().slice(0,10)}
-export const implementedExternalTools=['coach_get_capabilities','coach_search_tasks','coach_get_task','coach_preview_score','coach_search_context','coach_prepare_change','coach_submit_change','coach_get_command_result','coach_get_history','coach_preview_routine','coach_prepare_routine_change'] as const
+export const implementedExternalTools=['coach_get_capabilities','coach_search_tasks','coach_get_task','coach_preview_score','coach_search_context','coach_prepare_change','coach_submit_change','coach_get_command_result','coach_get_history','coach_preview_routine','coach_prepare_routine_change','coach_prepare_detection_run','coach_get_detection_run'] as const
 function summary(task:Task,registration:FileBridgeRegistration){
  const fields=registration.client.grant.fields
  return {id:task.id,title:fields.includes('title')?task.title:'非共有',revision:task.revision,status:task.status,scheduled_date:fields.includes('scheduled_date')?task.scheduledDate:null,points:fields.includes('manual_points')?task.effectivePoints:null,score_mode:fields.includes('manual_points')?task.score.mode:'unset',source_state:'unverified'}
