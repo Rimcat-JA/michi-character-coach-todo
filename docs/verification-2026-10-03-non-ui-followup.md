@@ -37,3 +37,5 @@
 Windows source DEVで、同IDノート/pin/習慣・目標の差分表示、書き出し中編集の拒否、新規共有の期限preview/発行、期限切れ表示消去、期限/権限変更後の確認画面の拒否、見積履歴のスクロール/0と未設定を確認する。本人の指紋照合/同意は合成fixtureで代用しない。配布版起動の以前の承認レビュー拒否を迂回しない。PR64の未実施画面確認も残っている。
 
 この追加分だけで121要件全体を完了扱いにしない。接続型サーバー・同期/移行・サーバーACL/招待・共有コーチ、実host/実provider認証、メッセンジャー実連携、実モデルblind評価、OCR、スマホ/OS遮断/配布版試験は未完了。新しい外部アカウント接続や実メッセージ送信は行っていない。Draft PRは画面確認前にマージしない。
+
+CI初回run `37124309120` のUbuntuでは新しいChromium起動がSUID sandbox helperの所有者/4755未設定で停止した。unit/Electron Node/buildは成功。Linux CIでElectronを明示インストールし、指定helperをroot:root/4755に設定するよう修正。renderer sandboxも明示true。--no-sandbox等の保護緩和は行わない。修正後のhead/CIはPR本文・checkpointを参照。
