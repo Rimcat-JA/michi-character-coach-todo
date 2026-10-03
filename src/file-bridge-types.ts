@@ -1,7 +1,7 @@
 import type { CapabilityCheck } from './external-authority'
 /** App-owned IPC values. Inbox JSON may describe a command, never authority or approval. */
-/** due_date and manual_points are owner-value fields: every request waits for the owner's in-app value confirmation. */
-export type FileBridgeField = 'title' | 'notes' | 'scheduled_date' | 'due_date' | 'manual_points'
+/** due_date, due_at, manual_points and labels are owner-value fields: every request waits for the owner's in-app value confirmation. */
+export type FileBridgeField = 'title' | 'notes' | 'scheduled_date' | 'due_date' | 'due_at' | 'manual_points' | 'labels'
 export type FileBridgeGrantKey = 'tasks:read' | 'tasks:prepare' | 'changes:submit' | 'commands:read' | 'tasks:split' | 'routines:prepare' | 'history:read' | 'routines:read' | 'context:read' | 'detection:request' | 'detection:read' | 'handoff:prepare'
 export type FileBridgeHost = 'chatgpt' | 'claude' | 'codex' | 'claude_code' | 'other'
 export type FileBridgeRegistration = {
@@ -17,11 +17,12 @@ export type FileBridgeManifest = {
   schema_version: '1'; snapshot_id: string; owner_id: string; dataset_id: string; client_id: string; policy_epoch: number; source_permission_revision: number
   registration_revision: number; grant_epoch: number; generated_at: string; expires_at: string; view_path: 'views/tasks.active.json'; view_sha256: string; entity_revisions: Record<string, number>; registration_sha256: string
 }
-export type FileBridgeTrigger = { kind: 'weekly'; weekdays: number[]; time: string } | { kind: 'monthly_business'; ordinal: number; from: 'start' | 'end'; time: string } | { kind: 'activity_relative'; activity_id: string; edge: 'start' | 'end'; offset_days: number; offset_minutes: number }
+/** RRULE/completion proposals change the recurrence only; start, clock, exceptions and DST choices stay app-owned. */
+export type FileBridgeTrigger = { kind: 'weekly'; weekdays: number[]; time: string } | { kind: 'monthly_business'; ordinal: number; from: 'start' | 'end'; time: string } | { kind: 'activity_relative'; activity_id: string; edge: 'start' | 'end'; offset_days: number; offset_minutes: number } | { kind: 'rrule'; rrule: string } | { kind: 'completion_relative'; after_days: number }
 export type FileBridgeScope = { kind: 'all_uncompleted' } | { kind: 'this_and_future'; from_date: string } | { kind: 'this_instance'; generation_key: string }
 export type FileBridgeCommand = {
   schema_version: '1'; command_id: string; snapshot_id: string; expires_at: string; type: 'task.create' | 'task.update' | 'task.split' | 'routine.change'; target_id: string | null; expected_revision: number | null
-  payload: { title?: string; notes?: string; scheduled_date?: string | null; due_date?: string | null; manual_points?: number; children?: { title: string; points: number | null }[]; scope?: FileBridgeScope; definition?: { trigger: FileBridgeTrigger } }
+  payload: { labels?: string[]; title?: string; notes?: string; scheduled_date?: string | null; due_date?: string | null; due_at?: { at: string; timezone: string } | null; manual_points?: number; children?: { title: string; points: number | null }[]; scope?: FileBridgeScope; definition?: { trigger: FileBridgeTrigger } }
   /** Self-declared labels only; the app never derives authority from them. */
   basis?: { kind: 'external_request'; note?: string }; via?: 'mcp_stdio'
 }
@@ -63,7 +64,7 @@ export type FileBridgeApplicationReceipt = {
   version: 1; commandId: string; fileDigest: string; applicationDigest: string; ownerId: string; datasetId: string; clientId: string; policyEpoch: number; sourcePermissionRevision: number
   registrationRevision: number; grantEpoch: number; taskIds: string[]; appliedAt: string
 }
-export type FileBridgeSnapshotTask = { id: string; revision: number; title: string; notes: string; scheduledDate: string | null; containerId: string | null }
+export type FileBridgeSnapshotTask = { id: string; revision: number; title: string; notes: string; scheduledDate: string | null; containerId: string | null; labels?: string[]; dueDate?: string|null; dueAt?: string|null; dueTimezone?: string|null; score?: {manualPoints:number|null} }
 export type FileBridgeSnapshotRule = { id: string; revision: number; title: string; trigger: FileBridgeTrigger }
 export interface FileBridgeGateway {
   mcpConfiguration?(): Promise<{mcpServers:{michi:{command:string;args:string[];env:{ELECTRON_RUN_AS_NODE:'1'}}}}>

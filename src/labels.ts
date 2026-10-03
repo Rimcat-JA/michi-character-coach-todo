@@ -1,3 +1,5 @@
+import Dexie from 'dexie'
+import {contentDigest} from './canonical'
 import { db, ensureSettings } from './db'
 import { uid, type LabelDefinition, type LabelGroup } from './domain'
 
@@ -64,4 +66,12 @@ export async function validateLabelsForOwner(labels: string[]) {
     db.labelDefinitions.where('ownerId').equals(settings.profileId).toArray()
   ])
   validateLabelSelection(labels, groups, definitions)
+}
+
+/** Bind the selected values to the owner's exact definition/group state across confirmation and commit. */
+export async function labelSelectionAuthority(names: string[], ownerId: string, knownOnly: boolean) {
+  const groups = await db.labelGroups.where('ownerId').equals(ownerId).toArray(), definitions = await db.labelDefinitions.where('ownerId').equals(ownerId).toArray()
+  validateLabelSelection(names, groups, definitions)
+  if (knownOnly && names.some(name => !definitions.some(label => label.name === name))) throw Object.assign(new Error('本人の既存ラベルから選択してください'), {code:'LABEL_NOT_FOUND'})
+  return Dexie.waitFor(contentDigest({groups:groups.sort((a,b)=>a.id.localeCompare(b.id)),definitions:definitions.sort((a,b)=>a.id.localeCompare(b.id))}))
 }

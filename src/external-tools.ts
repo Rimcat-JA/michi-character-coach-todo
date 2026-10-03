@@ -38,7 +38,7 @@ export async function dispatchExternalReadTool(name:string,args:Record<string,un
  return db.transaction('r',[db.settings,db.tasks,db.datasetState,db.completions,db.sessions,db.contextSources,db.contextSnapshots],async()=>{
   const {registration}=await assertExternalToolAuthority(context)
   if(!registration.client.grant.keys.includes('tasks:read'))fail('INSUFFICIENT_SCOPE')
-  if(name==='coach_get_capabilities')return {enabled:true,operations:[...implementedExternalTools],limitations:['ローカルアプリの許可タスクのみ。資料・会話・記憶は非共有。','変更案は最新の書出しを使い、既存の受信箱と本人確認を経て保存します。引継ぎ・参照根拠は未対応。','新規の点数指定、ラベル、時刻付き期限は未対応。実host未確認。アプリ終了・取消で接続は無効になります。']}
+  if(name==='coach_get_capabilities')return {enabled:true,operations:[...implementedExternalTools],limitations:['ローカルアプリの許可タスクのみ。資料の開示・引継ぎには個別の許可が必要です。','変更案は最新の書出しを使い、既存の受信箱と本人確認を経て保存します。時刻付き期限には日付・時刻の両項目の許可が必要で、カタログの日時はUTCで確認します。','ラベルは本人の既存定義を選び、毎回値と変更を確認します。新規タスクの点数指定は未対応。実host未確認。アプリ終了・取消で接続は無効になります。']}
   if(name==='coach_search_context'){
     const openGrant=registration.client.grant
     if(!openGrant.keys.includes('context:read')||!openGrant.allow_external_context)return {excerpts:[],coverage_note:'文脈の開示は許可されていません。資料の存在・件数・名称を返しません。'}
@@ -70,7 +70,7 @@ export async function dispatchExternalReadTool(name:string,args:Record<string,un
    const task=await db.tasks.get(String(args.task_id))
    if(!task||task.deletedAt)fail('NOT_FOUND')
    const notes=registration.client.grant.fields.includes('notes')?ownerNotesForEgress(task.notes).notes:''
-   return {task:summary(task,registration),notes:notes.slice(0,4000),protected_fields:['title','due','points'],sources:[],notes_truncated:notes.length>4000}
+   return {task:summary(task,registration),notes:notes.slice(0,4000),protected_fields:['title','due','points','labels'],sources:[],notes_truncated:notes.length>4000}
   }
   if(name==='coach_search_tasks'){
    const filter=(args.filter??{}) as {query?:string;status?:string[];project_ids?:string[]},limit=Number(args.limit??20)

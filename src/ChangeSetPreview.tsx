@@ -4,7 +4,7 @@ import { applyChangeSet, approveChangeSetFromUI, autoChangeCountsToday, cancelCh
 import { cancelCommand, ENTRANCE_LABELS as entranceLabels, grantDecision, outcomeNotice, submitCommand, type CommandOutcome, type PreparedCommand } from './command-bus'
 import { db } from './db'
 
-const labels: Record<TaskChangeField,string> = {title:'タイトル',notes:'メモ',scheduledDate:'予定日',dueDate:'本当の締め切り',dueAt:'締め切り時刻',manualPoints:'本人指定ポイント'}
+const labels: Record<TaskChangeField,string> = {title:'タイトル',notes:'メモ',scheduledDate:'予定日',dueDate:'本当の締め切り',dueAt:'締め切り時刻',manualPoints:'本人指定ポイント',labels:'ラベル'}
 /**
  * The one approval card for task edits from every entrance. With `command` the shared bus approves and applies;
  * `onApprove` lets the file entrance wrap the same approval in its main-process lease.

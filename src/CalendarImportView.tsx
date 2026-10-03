@@ -42,7 +42,7 @@ export default function CalendarImportView({ state, onApplied, refreshInput }: P
   const when = (start: string | null, end: string | null, zone: string) => `${start ? new Date(start).toLocaleString('ja-JP', { timeZone: zone }) : '日時なし'}${end ? `〜${new Date(end).toLocaleString('ja-JP', { timeZone: zone })}` : ''} (${zone})`
   return <section className="card setting-section calendar-rules-view calendar-import-view"><h2>ICS予定の読取専用取込</h2>
     <p>本人が選んだローカルファイルを保存します。元カレンダーへの書き戻し、招待への返信、Google・OutlookのOAuth同期は未接続です。予定だけからタスク、締切、ポイントを作りません。</p>
-    <p>UTC、IANA・Windowsタイムゾーン、終日予定と日・週・月の基本周期に対応します。VTIMEZONEは各参照日時で検証し、アラームは警告付きで除外します。複雑な周期や終了不明の予定は保留します。</p>
+    <p>UTC、IANA・Windowsタイムゾーン、終日予定と日・週・月・年、第n曜日・最終平日などの周期に対応します。VTIMEZONEは各参照日時で検証し、アラームは警告付きで除外します。対応外の周期や終了不明の予定は保留します。</p>
     {refreshInput && <button type="button" disabled={busy || !applicabilityConfirmed} onClick={() => void read(refreshInput.file)}>取得したICSの差分を確認</button>}
     {message && <p role="status">{message}</p>}
     <label>対象<select disabled={busy} value={chosenContext?.id ?? ''} onChange={event => { setContextId(event.target.value); setSourceId(''); setNewFeedId(`feed-${uid()}`); setApplicabilityConfirmed(false); reset() }}><option value="">選択してください</option>{state.contexts.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label>

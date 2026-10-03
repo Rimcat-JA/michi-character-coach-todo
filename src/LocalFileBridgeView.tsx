@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useLiveQuery } from 'dexie-react-hooks'
-import { changePolicyFor, type TaskChangeField } from './change-set'
+import { changePolicyFor, taskChangeValueText, type TaskChangeField } from './change-set'
 import { createFileBridgeController, fileBridgeAutomationAllowed, type FileBridgeApplicationOutcome, type PreparedFileBridgeApplication } from './file-bridge-commands'
 import { egressNotice } from './egress-policy'
 import { runExternalSelftest, setExternalAIEnabled } from './external-ai'
@@ -13,21 +13,21 @@ import TaskSplitPreview from './TaskSplitPreview'
 import { humanContextFor, changeContextFor } from './command-bus'
 import { splitBody, type SplitChildDraft } from './task-split-change'
 import { externallyEditableTrigger, routineBody } from './routine-external-change'
-import { calendarRuleEditorDefinition } from './calendar-rule-editor'
+import { calendarRuleEditorDefinition, describeCalendarTrigger } from './calendar-rule-editor'
 import type { FileBridgeField, FileBridgeGateway, FileBridgeHost, FileBridgeInboxEntry, FileBridgeResult, FileBridgeStatus, FileBridgeWindow } from './file-bridge-types'
 import type { CalendarRule } from './calendar-resolver'
 import type { Settings, Task } from './domain'
 
-const labels:Record<FileBridgeField,string>={title:'タスク名',notes:'メモ',scheduled_date:'予定日',due_date:'本当の締め切り',manual_points:'本人指定ポイント'}
-const valueFields:FileBridgeField[]=['title','due_date','manual_points']
+const labels:Record<FileBridgeField,string>={title:'タスク名',notes:'メモ',scheduled_date:'予定日',due_date:'本当の締め切りの日付',due_at:'本当の締め切りの時刻とタイムゾーン',manual_points:'本人指定ポイント',labels:'ラベル'}
+const valueFields:FileBridgeField[]=['title','due_date','due_at','manual_points','labels']
 const resultLabels:Record<FileBridgeResult['state'],string>={applied:'保存を確認済み',unknown:'結果未確定。再実行せず保存履歴を確認してください。',failed:'実行失敗',denied:'拒否',conflict:'競合',expired:'期限切れ・権限変更',rejected:'受付拒否'}
 const resultText=(result:FileBridgeResult)=>`${resultLabels[result.state]}${result.code?`（${result.code}）`:''}`
-const weekdayNames=['日','月','火','水','木','金','土']
-function triggerText(trigger:CalendarRule['trigger']) {
-  if(trigger.kind==='weekly')return `毎週${trigger.weekdays.map(day=>weekdayNames[day]).join('・')}曜 ${trigger.time}`
-  if(trigger.kind==='monthly_business')return `毎月${trigger.from==='end'?'最終から':''}第${trigger.ordinal}営業日 ${trigger.time}`
-  if(trigger.kind==='activity_relative')return `活動の${trigger.edge==='start'?'開始':'終了'}から${trigger.offsetDays}日・${trigger.offsetMinutes}分`
-  return trigger.kind==='rrule'?`RRULE ${trigger.rrule}`:`完了から${trigger.afterDays}日後 ${trigger.time}`
+const triggerText=(trigger:CalendarRule['trigger'])=>describeCalendarTrigger(trigger)
+function currentValueText(task:Task,field:string) {
+  if(field==='dueAt')return taskChangeValueText(task.dueAt&&task.dueTimezone?{at:task.dueAt,timezone:task.dueTimezone}:null)
+  if(field==='labels')return taskChangeValueText(task.labels)
+  if(field==='manualPoints')return taskChangeValueText(task.score.manualPoints)
+  return String((task as unknown as Record<string,unknown>)[field]??'未設定')
 }
 export default function LocalFileBridgeView({settings,tasks,gateway,onApplied}: {settings:Settings;tasks:Task[];gateway?:FileBridgeGateway;onApplied?:(receipt:FileBridgeApplicationOutcome['receipt'])=>void}) {
   const connection=gateway??(window as FileBridgeWindow).michiFileBridge
@@ -108,9 +108,9 @@ export default function LocalFileBridgeView({settings,tasks,gateway,onApplied}: 
         <p>選択した内容をフォルダーへ書き出します。このフォルダーを渡す相手は内容を読めます。資料から検出したタスクの引用（資料の根拠・旧形式メモの引用行）は書き出しません。</p>
         <label className="field"><span>利用するクライアント</span><select value={host} disabled={busy} onChange={event=>setHost(event.target.value as FileBridgeHost)}><option value="codex">Codex</option><option value="claude_code">Claude Code</option><option value="chatgpt">ChatGPT</option><option value="claude">Claude</option><option value="other">その他</option></select></label>
         <label className="field"><span>許可の有効時間</span><select value={hours} disabled={busy} onChange={event=>{const value=Number(event.target.value);setHours(value);setGrantEdit(previous=>previous?{...previous,expiresAt:new Date(Date.now()+value*3600000).toISOString()}:null)}}>{[1,4,12,24].map(value=><option key={value} value={value}>{value}時間</option>)}</select></label>
-        <fieldset disabled={busy}><legend>共有・変更依頼を受ける項目</legend>{(['title','notes','scheduled_date','due_date','manual_points'] as FileBridgeField[]).map(field=><label key={field} className="field"><span><input type="checkbox" checked={fields.includes(field)} onChange={event=>setFields(event.target.checked?[...fields,field]:fields.filter(item=>item!==field))}/> {labels[field]}{valueFields.includes(field)?'（依頼のたびに本人が値を確認）':''}</span></label>)}</fieldset>
+        <fieldset disabled={busy}><legend>共有・変更依頼を受ける項目</legend>{(['title','notes','scheduled_date','due_date','due_at','manual_points','labels'] as FileBridgeField[]).map(field=><label key={field} className="field"><span><input type="checkbox" checked={fields.includes(field)} onChange={event=>setFields(event.target.checked?[...fields,field]:fields.filter(item=>item!==field))}/> {labels[field]}{valueFields.includes(field)?'（依頼のたびに本人が値を確認）':''}</span></label>)}</fieldset>
         <label className="field"><span><input type="checkbox" checked={allowSplit} disabled={busy} onChange={event=>setAllowSplit(event.target.checked)}/> 選択タスクの分割案を受け付ける（配分は毎回本人が確認）</span></label>
-        {editableRules.length?<fieldset disabled={busy}><legend>周期の変更案を受け付ける系列（名称・点数は変更不可。RRULE・完了起点の系列は対象外）</legend>{editableRules.map(rule=><label key={rule.id} className="field"><span><input type="checkbox" checked={ruleIds.includes(rule.id)} onChange={event=>setRuleIds(event.target.checked?[...ruleIds,rule.id]:ruleIds.filter(id=>id!==rule.id))}/> {calendarRuleEditorDefinition(rule).title}（{triggerText(calendarRuleEditorDefinition(rule).trigger)}）</span></label>)}</fieldset>:null}
+        {editableRules.length?<fieldset disabled={busy}><legend>周期の変更案を受け付ける系列（名称・点数は変更不可。RRULE・完了起点の開始・時刻・例外は保持）</legend>{editableRules.map(rule=><label key={rule.id} className="field"><span><input type="checkbox" checked={ruleIds.includes(rule.id)} onChange={event=>setRuleIds(event.target.checked?[...ruleIds,rule.id]:ruleIds.filter(id=>id!==rule.id))}/> {calendarRuleEditorDefinition(rule).title}（{triggerText(calendarRuleEditorDefinition(rule).trigger)}）</span></label>)}</fieldset>:null}
         <fieldset disabled={busy}><legend>追加の参照・共有範囲（既定OFF。ONは本人同意の記録になり、改訂時の拡大は本人確認ボタンが必要）</legend>
           <label className="field"><span><input type="checkbox" checked={allowHistory} onChange={event=>setAllowHistory(event.target.checked)}/> 完了履歴の集計参照を許可する（件数・点数・作業時間のみ）</span></label>
           <label className="field"><span><input type="checkbox" checked={allowRoutinePreview} onChange={event=>setAllowRoutinePreview(event.target.checked)}/> 周期ルールの次回プレビューを許可する（保存はしない）</span></label>
@@ -125,7 +125,7 @@ export default function LocalFileBridgeView({settings,tasks,gateway,onApplied}: 
         <p>変更案は本人が確認します。下で自動適用を委任したメモ・予定日は、その範囲内だけ承認なしで保存します。新規作成では点数と締め切りを未設定にします。完了・取消・削除・実績訂正・権限の変更は受け付けません。</p>
         <fieldset disabled={busy}><legend>範囲内の自動適用（任意）</legend><label className="field"><span><input type="checkbox" checked={autoMode&&autoAllowed} disabled={!autoAllowed} onChange={event=>setAutoMode(event.target.checked)}/> 範囲内のメモ・予定日の変更は承認なしで適用する</span></label>
           <div className="form-grid"><label className="field">予定日を動かせる日数<input type="number" min={0} max={7} step={1} value={autoDays} onChange={event=>setAutoDays(Number(event.target.value))}/></label><label className="field">1日の自動件数<input type="number" min={1} max={20} step={1} value={autoCount} onChange={event=>setAutoCount(Number(event.target.value))}/></label></div>
-          <small>{autoAllowed?'自動適用は許可した範囲のメモ・予定日だけです。タイトル・期限・点数・新規作成と範囲外の変更は毎回本人が確認します。':'自動化設定（S20）でメモ・予定日を「範囲内で自動」にし、共有項目でメモか予定日を選ぶと使えます。'}</small></fieldset>
+          <small>{autoAllowed?'自動適用は許可した範囲のメモ・予定日だけです。タイトル・期限・点数・ラベル・新規作成と範囲外の変更は毎回本人が確認します。':'自動化設定（S20）でメモ・予定日を「範囲内で自動」にし、共有項目でメモか予定日を選ぶと使えます。'}</small></fieldset>
         <button type="button" data-file-bridge-configure="true" className="primary-button" disabled={busy||!fields.length||taskIds.length>100||!external.enabled||!policy.aiChangesEnabled} onClick={event=>{const native=event.nativeEvent;void run(async()=>replaceStatus(await controller.configure({intendedHost:host,taskIds,fields,lifetimeHours:hours,allowSplit,ruleIds,allowHistory,allowRoutinePreview,allowContextRead,allowExternalContext,allowDetection,allowHandoffPrepare,allowHandoffs,allowRoutineChange,automation:autoMode&&autoAllowed?{maxScheduleShiftDays:autoDays,maxOperationsPerDay:autoCount}:null},native)))}}>選択した範囲だけを許可して接続</button>
         {connection?.revise&&status?.registration?<div><button type="button" className="secondary-button" disabled={busy} onClick={editGrant}>現在の許可を編集欄へ読み込む</button>{grantEdit?.clientId===status.registration.client.id&&grantEdit.revision===status.registration.client.revision?<><p>接続 {grantEdit.clientId.slice(0,8)}・版 {grantEdit.revision} を更新します。上のタスク・項目・自動化の選択を使います。有効期限：{new Date(grantEdit.expiresAt).toLocaleString('ja-JP')}。有効時間の選択を変えると期限も更新します。</p><div className="form-grid"><label className="field">承認できる予定日移動の上限<input type="number" min={0} max={31} step={1} value={grantDays} disabled={busy} onChange={event=>setGrantDays(Number(event.target.value))}/></label><label className="field">1日の接続操作上限<input type="number" min={0} max={100} step={1} value={grantCount} disabled={busy} onChange={event=>setGrantCount(Number(event.target.value))}/></label></div><p className="muted">範囲の縮小はすぐ反映できます。共有の追加・期限や上限の拡大・自動適用の追加は、下の本人確認ボタンから行います。更新に失敗した場合、この接続を停止します。他の接続は継続します。</p><button type="button" data-file-bridge-revise={grantEdit.clientId} className="primary-button" disabled={busy||taskIds.length>100||!external.enabled||!policy.aiChangesEnabled} onClick={event=>{const native=event.nativeEvent;void run(()=>reviseGrant(native))}}>この接続の許可を更新</button></>:null}</div>:null}
       </details>
@@ -144,8 +144,8 @@ export default function LocalFileBridgeView({settings,tasks,gateway,onApplied}: 
       {entries.length?<div><h4>受信した案</h4>{entries.map(entry=><article key={entry.filename}><strong>{entry.filename}</strong>{entry.state==='rejected'?<p>受付拒否：{entry.error}</p>:entry.state==='finished'?<p>{resultText(entry.result)}</p>:<div><p>{{'task.create':'タスクの新規作成','task.update':'既存タスクの変更','task.split':'タスクの分割','routine.change':'系列の周期変更'}[entry.prepared.command.type]}{entry.prepared.command.via==='mcp_stdio'?'（ローカルMCP経由・自己申告）':''} / 本人の承認待ち</p><button type="button" className="secondary-button" disabled={busy||Boolean(outcome)} onClick={()=>void run(async()=>show(await controller.prepare(entry.reference)))}>内容を確認</button></div>}</article>)}</div>:null}
       {prepared&&command?<section className="change-set-preview" aria-label="外部コマンドの本人確認"><h4>今回だけ許可する内容</h4>
         <p className="muted">接続 {prepared.registration.client.intended_host}・入口 {prepared.entrance==='mcp'?'ローカルMCP':'ファイル受信箱'}。確認期限 {new Date(prepared.entry.prepared.expiresAt).toLocaleString('ja-JP')}。変更内容 {prepared.digest.slice(0,12)}</p>
-        {command.envelope.type==='task.update'&&command.stage==='owner_values'?<div><p>外部エージェントがタイトル・本当の締め切り・本人指定ポイントの変更を依頼しています。値は依頼であり本人の指示ではありません。次の値で変更する場合だけ、本人が確定してください。</p>
-          {command.ownerValues![0]&&Object.entries(command.ownerValues![0].patch).map(([field,value])=><p key={field}>{({title:'タイトル',notes:'メモ',scheduledDate:'予定日',dueDate:'本当の締め切り',manualPoints:'本人指定ポイント'} as Record<string,string>)[field]}：{String(target?(field==='manualPoints'?target.score.manualPoints??'未設定':(target as unknown as Record<string,unknown>)[field]??'未設定'):'?')} → <strong>{String(value??'未設定')}</strong></p>)}
+        {command.envelope.type==='task.update'&&command.stage==='owner_values'?<div><p>外部エージェントがタイトル・本当の締め切り・本人指定ポイント・ラベルの変更を依頼しています。値は依頼であり本人の指示ではありません。次の値で変更する場合だけ、本人が確定してください。</p>
+          {command.ownerValues![0]&&Object.entries(command.ownerValues![0].patch).map(([field,value])=><p key={field}>{({title:'タイトル',notes:'メモ',scheduledDate:'予定日',dueDate:'本当の締め切りの日付',dueAt:'本当の締め切りの時刻',manualPoints:'本人指定ポイント',labels:'ラベル'} as Record<string,string>)[field]}：{target?currentValueText(target,field):'?'} → <strong>{taskChangeValueText(value)}</strong></p>)}
           <label className="field">本人の確認メモ（任意）<input value={valueMessage} maxLength={500} onChange={event=>setValueMessage(event.target.value)}/></label>
           <button type="button" className="primary-button" disabled={busy||!external.enabled} onClick={event=>{const native=event.nativeEvent;void run(async()=>show(await controller.confirmValuesFromUI(prepared,native,valueMessage)))}}>本人の指定値を確定して差分を作る</button></div>
         :command.envelope.type==='task.split'&&split?.stage==='owner_values'?<div><p>外部エージェントの分割案です。名前と配分は提案です。親の{target?.score.manualPoints??'?'}ptと合計を一致させ、本人が値を確定してください。</p>
