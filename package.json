@@ -12,6 +12,7 @@
     "test": "vitest run",
     "check:electron": "node scripts/electron-checks.mjs syntax",
     "test:electron": "node scripts/electron-checks.mjs test",
+    "test:ocr": "node --test electron/document-ocr.electron-tests.mjs",
     "check:pwa-offline": "node scripts/pwa-offline-check.mjs",
     "check:ocr": "node scripts/check-ocr-assets.mjs",
     "check:device-data": "node scripts/device-data-check.mjs",

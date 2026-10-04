@@ -21,10 +21,10 @@
 
 ## 自動試験（許容基準を明示。空文字でないだけでは合格にしない）
 
-- `electron/document-ocr.node-tests.mjs`（16件）: 英字スキャンのCER≦0.08（verified・行bbox2件）、日本語・混合のCER≦0.12、格納順と異なるPDFの正しい割当、共有画像の両頁抽出、複数画像頁の最大処理＋残り列挙、文字層頁内画像の無視（`Hello`のみ・未読0）、白紙・回転12°の未検証化（confidence<0.7）、DCTの対応外明示、宣言20000pxの展開前拒否、総計35MPの5頁目拒否（`総処理量`）、`timeoutMs`短縮での時間上限＋0/60001の拒否、実OCR中の取消→再読取成功、逐次再利用、Office/scheduleの拒否、OCRファイルの非通信静的検査。
+- `electron/document-ocr.electron-tests.mjs`（16件、`npm run test:ocr`で実行）: 英字スキャンのCER≦0.08（verified・行bbox2件）、日本語・混合のCER≦0.12、格納順と異なるPDFの正しい割当、共有画像の両頁抽出、複数画像頁の最大処理＋残り列挙、文字層頁内画像の無視（`Hello`のみ・未読0）、白紙・回転12°の未検証化（confidence<0.7）、DCTの対応外明示、宣言20000pxの展開前拒否、総計35MPの5頁目拒否（`総処理量`）、`timeoutMs`短縮での時間上限＋0/60001の拒否、実OCR中の取消→再読取成功、逐次再利用、Office/scheduleの拒否、OCRファイルの非通信静的検査。タイミング敏感な名前付きパイプ試験とのCPU競合を避けるため、`test:electron`とは別CIステップで直列実行する。
 - `src/ocr-import.test.ts`（3件）: メタデータ検証（hash・confidence・bbox・余分keyの拒否＋従来互換）、OCR取込の保存・索引とタスク/台帳/候補の不変＋backup検証互換、削除・許可取消・古い版遅延応答の拒否。
 - 全体Vitestは **202 files / 2036 tests成功**（失敗0）。
-- Electron Node試験は **311件（310成功＋既存platform skip 1、失敗0）**。前回306件−旧OCR 11件＋新OCR 16件。
+- Electron Node試験は合計 **311件（310成功＋既存platform skip 1、失敗0）**。内訳：`test:electron` 295件（294成功＋skip 1、旧来どおり）＋`test:ocr` 16件。CIでは直列の別ステップで実行。
 - `npm run check:ocr` 成功（Windows CLI）。`npm run check:electron` 成功。`npm run lint` 警告0。`npm run build`（tsc＋Vite）成功。
 - PWA offline 10/10成功（非表示Chromium、report: `qa-output/pwa-offline/2026-10-04T07-20-54-085Z/report.json`）。※前head時の記録。再実行はCIに委ねる。
 
