@@ -7,13 +7,13 @@ const { pdfGrid } = require('./schedule-document-grid.mjs')
 globalThis.fetch = async () => { throw new Error('文書読取中は通信しません') }
 const fail = message => { throw new Error(message) }
 function validateOcrOption(ocr) {
-  if (ocr === undefined) return { enabled: false }
+  if (ocr === undefined) return { enabled: false, timeoutMs: 60000 }
   if (!ocr || typeof ocr !== 'object' || Array.isArray(ocr)) fail('OCR指定が不正です')
-  const keys = Object.keys(ocr).sort().join(',')
-  if (keys !== 'enabled' && keys !== 'enabled,language') fail('OCR指定が不正です')
-  if (typeof ocr.enabled !== 'boolean') fail('OCR指定が不正です')
+  if (!Object.keys(ocr).every(key => ['enabled', 'language', 'timeoutMs'].includes(key)) || typeof ocr.enabled !== 'boolean') fail('OCR指定が不正です')
   if (ocr.language !== undefined && ocr.language !== 'eng+jpn') fail('OCR言語はeng+jpnだけが対象です')
-  return { enabled: ocr.enabled }
+  // Shortening only, capped at the 60s OCR budget: the timeout can never be relaxed.
+  if (ocr.timeoutMs !== undefined && (!Number.isInteger(ocr.timeoutMs) || ocr.timeoutMs < 1 || ocr.timeoutMs > 60000)) fail('OCR指定が不正です')
+  return { enabled: ocr.enabled, timeoutMs: ocr.timeoutMs ?? 60000 }
 }
 const parser = new XMLParser({ preserveOrder: true, ignoreAttributes: false, parseTagValue: false, trimValues: false })
 function xml(bytes) {
@@ -56,66 +56,85 @@ async function extract({ name, bytes, schedule, yTolerance, xGap, ocr }) {
   const tables = []
   const extension = name.toLowerCase().split('.').pop(), locations = [], lines = [], unread = [], notices = ['原ファイルは保存せず、全文hashと抽出本文だけを保存します。外部リンク・マクロ・埋込オブジェクトを実行しません。', 'テキスト層だけを抽出します。画像・図・埋込オブジェクト・レイアウト・OCRの内容は未確認です。']
   const ocrPages = []
-  let ocrEngine = null, ocrImageQueue = null, ocrPixelsTotal = 0
+  let ocrEngine = null, ocrDocument = null, tessEngine = null
   const ocrNotice = () => {
     if (!ocrOption.enabled || !ocrEngine) return
     notices[1] = 'テキスト層を優先し、文字のないページだけ本人の明示選択で端末内OCRを試みます。OCR結果は候補であり、タスク・期限・点数・台帳を直接変更しません。'
-    notices.push(`OCR（端末内・外部送信なし）: ${ocrEngine.name} v${ocrEngine.version}・言語${ocrEngine.languageTag}・${ocrEngine.license}・資産hash ${ocrEngine.hash.slice(0, 16)}…。対応書体はブロック体（${ocrEngine.charsetLength}文字）のみ。低confidence・未検証の行（□を含む）は本人確認が必要です。予定資料の表・回転・結合・数式は未接続です。`)
+    notices.push(`OCR（端末内・外部送信なし）: ${ocrEngine.name} v${ocrEngine.version}・言語${ocrEngine.languages}・${ocrEngine.license}・資産hash ${ocrEngine.hash.slice(0, 16)}…。一般書体（英字・日本語）の読取に対応。低confidence・未検証の行は本人確認が必要です。予定資料の表・回転・結合・数式は未接続です。`)
   }
-  const ensureOcrImages = () => {
-    if (ocrImageQueue !== null) return ocrImageQueue
-    const { ENGINE, assetHash } = require('./ocr-engine.cjs')
-    const { extractPdfImages } = require('./ocr-pdf-images.cjs')
-    ocrEngine = { name: ENGINE.name, version: ENGINE.version, languageTag: ENGINE.languageTag, license: ENGINE.license, hash: assetHash(), charsetLength: [...ENGINE.charset].length }
-    ocrImageQueue = extractPdfImages(bytes)
-    return ocrImageQueue
-  };
+  const ensureOcrDocument = () => {
+    if (ocrDocument !== null) return ocrDocument
+    const { ENGINE, version, tessdataDir } = require('./ocr-tesseract.cjs')
+    const { pageImages } = require('./ocr-pdf-images.cjs')
+    const fs = require('node:fs')
+    const path = require('node:path')
+    const hash = createHash('sha256')
+    for (const file of ['eng.traineddata', 'jpn.traineddata']) hash.update(fs.readFileSync(path.join(tessdataDir(), file)))
+    ocrEngine = { name: ENGINE.name, version: version(), languages: ENGINE.languages, license: ENGINE.license, hash: hash.digest('hex') }
+    ocrDocument = pageImages(bytes)
+    return ocrDocument
+  }
+  const ensureTessEngine = async () => {
+    if (!tessEngine) {
+      const { createEngine } = require('./ocr-tesseract.cjs')
+      tessEngine = await createEngine()
+    }
+    return tessEngine
+  }
+  const closeTessEngine = async () => {
+    if (tessEngine) { const engine = tessEngine; tessEngine = null; await engine.close().catch(() => {}) }
+  }
   const add = (location, value) => {
     const text = String(value).replace(/\r\n?|\n/g, ' ').normalize('NFC').trim()
     if (text) { lines.push(text); locations.push(location) }
     if (lines.length > 10000 || lines.join('\n').length > 200000) fail('抽出本文は200000文字・10000行までです')
   }
-  const attemptPageOcr = pageNumber => {
-    const queue = ensureOcrImages()
-    const entry = queue.shift()
-    if (!entry) {
-      unread.push({ location: `ページ${pageNumber}`, reason: '画像を抽出できませんでした。OCRの対象画像がありません' })
-      ocrPages.push({ page: pageNumber, status: 'no-image', confidence: null, chars: 0, verified: false })
+  // OCR targets the images the page itself draws (content-stream `Do` order),
+  // never file-order leftovers. Text-layer pages are left alone entirely:
+  // decorative images there are out of scope, not OCR targets.
+  const attemptPageOcr = async pageNumber => {
+    const doc = ensureOcrDocument()
+    const entries = doc.pages[pageNumber - 1] ?? []
+    const usable = entries.filter(entry => !entry.unsupported).sort((a, b) => b.width * b.height - a.width * a.height)
+    entries.forEach((entry, index) => {
+      if (entry.unsupported) unread.push({ location: `ページ${pageNumber}・画像${index + 1}`, reason: `OCRで読み取れませんでした（${entry.reason}）` })
+    })
+    if (!usable.length) {
+      if (!entries.length) {
+        unread.push({ location: `ページ${pageNumber}`, reason: '画像を抽出できませんでした。OCRの対象画像がありません' })
+        ocrPages.push({ page: pageNumber, status: 'no-image', confidence: null, chars: 0, verified: false })
+      } else ocrPages.push({ page: pageNumber, status: 'unsupported-image', confidence: null, chars: 0, verified: false })
       return
     }
-    if (entry.unsupported) {
-      unread.push({ location: `ページ${pageNumber}`, reason: `OCRで読み取れませんでした（${entry.reason}）。JPEG・回転・低品質の画像は未対応です` })
-      ocrPages.push({ page: pageNumber, status: 'unsupported-image', confidence: null, chars: 0, verified: false })
+    const [target, ...rest] = usable
+    rest.forEach(entry => {
+      const index = entries.indexOf(entry)
+      unread.push({ location: `ページ${pageNumber}・画像${index + 1}`, reason: 'OCR対象外です（そのページで最大の画像のみ処理します）' })
+    })
+    const { CONFIDENCE_OK } = require('./ocr-tesseract.cjs')
+    const engine = await ensureTessEngine()
+    const result = await engine.recognizePage(target.pixels, target.width, target.height)
+    if (!result.lines.length || !result.text.trim()) {
+      unread.push({ location: `ページ${pageNumber}`, reason: 'OCRで文字を確認できませんでした（白紙または読取不可）' })
+      ocrPages.push({ page: pageNumber, status: 'failed:empty', confidence: null, chars: 0, verified: false })
       return
     }
-    if (entry.width * entry.height > 8000000) {
-      unread.push({ location: `ページ${pageNumber}`, reason: 'OCRで読み取れませんでした（画像がOCR上限8MPを超えています）。分割したPDFで確認してください' })
-      ocrPages.push({ page: pageNumber, status: 'pixel-limit', confidence: null, chars: 0, verified: false })
-      return
-    }
-    ocrPixelsTotal += entry.width * entry.height
-    if (ocrPixelsTotal > 30000000) {
-      unread.push({ location: `ページ${pageNumber}`, reason: 'OCRで読み取れませんでした（総処理量の上限30MPを超えています）。分割したPDFで確認してください' })
-      ocrPages.push({ page: pageNumber, status: 'total-limit', confidence: null, chars: 0, verified: false })
-      return
-    }
-    const { ocrBitmap } = require('./ocr-engine.cjs')
-    const result = ocrBitmap({ pixels: entry.pixels, width: entry.width, height: entry.height })
-    if ((result.status === 'ok' || result.status === 'low-confidence') && result.lines.length) {
-      result.lines.forEach((line, index) => add(`ページ${pageNumber}・OCR行${index + 1}`, line.text))
-      const verified = result.lines.every(line => line.verified)
-      ocrPages.push({ page: pageNumber, status: result.status, confidence: result.confidence, chars: result.lines.reduce((sum, line) => sum + [...line.text].length, 0), verified })
-      return
-    }
-    const reason = { blank: '白紙または文字がありません', 'rotation-suspected': '回転・傾き・ノイズの可能性があり未対応です', unreadable: '読み取れる文字がありません', 'pixel-limit': '画像が大きすぎます', 'too-many-lines': '行数が多すぎます', 'invalid-input': '画像を解読できませんでした' }[result.status] ?? '読み取れる文字がありません'
-    unread.push({ location: `ページ${pageNumber}`, reason: `OCRで読み取れませんでした（${reason}）。ブロック体以外の書体・手書き・写真・低品質は未対応です` })
-    ocrPages.push({ page: pageNumber, status: `failed:${result.status}`, confidence: null, chars: 0, verified: false })
+    result.lines.forEach((line, index) => add(`ページ${pageNumber}・OCR行${index + 1}`, line.text))
+    const verified = result.confidence * 100 >= CONFIDENCE_OK
+    ocrPages.push({
+      page: pageNumber,
+      status: verified ? 'ok' : 'low-confidence',
+      confidence: result.confidence,
+      chars: [...result.text].length,
+      verified,
+      boxes: result.lines.map(line => line.bbox),
+    })
   }
   if (extension === 'pdf') {
     if (Buffer.from(bytes.subarray(0, 5)).toString() !== '%PDF-') fail('PDFの形式が不正です')
     if (schedule && ocrOption.enabled) fail('予定資料のOCRは未接続です。表のbbox照合ができるまでテキスト層のPDF/XLSXで確認してください')
-    // pdfjs may detach the input buffer; extract OCR images first.
-    if (ocrOption.enabled) ensureOcrImages()
+    // pdfjs may detach the input buffer; map page images first.
+    if (ocrOption.enabled) ensureOcrDocument()
     const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs')
     const task = pdfjs.getDocument({ data: bytes, isEvalSupported: false, disableFontFace: true, useSystemFonts: false, useWorkerFetch: false, stopAtErrors: true, verbosity: 0 })
     let pdf
@@ -133,11 +152,11 @@ async function extract({ name, bytes, schedule, yTolerance, xGap, ocr }) {
         let line = '', found = false
         for (const item of content.items) if (typeof item.str === 'string') { line += item.str + ' '; if (item.hasEOL) { add(`ページ${i}`, line); found ||= Boolean(line.trim()); line = '' } }
         add(`ページ${i}`, line); found ||= Boolean(line.trim())
-        if (!found && !schedule && ocrOption.enabled) { try { attemptPageOcr(i) } catch { unread.push({ location: `ページ${i}`, reason: 'OCRで読み取れませんでした（画像処理を安全に中止しました）' }); ocrPages.push({ page: i, status: 'failed:aborted', confidence: null, chars: 0, verified: false }) } }
+        if (!found && !schedule && ocrOption.enabled) { try { await attemptPageOcr(i) } catch { unread.push({ location: `ページ${i}`, reason: 'OCRで読み取れませんでした（画像処理を安全に中止しました）' }); ocrPages.push({ page: i, status: 'failed:aborted', confidence: null, chars: 0, verified: false }) } }
         else if (!found) unread.push({ location: `ページ${i}`, reason: 'テキスト層がありません。画像だけのページはOCR選択（既定OFF）で読み取れます' })
         page.cleanup()
       }
-    } catch (error) { if (error.name === 'PasswordException') fail('暗号化PDFは読み取れません'); throw error } finally { await task.destroy() }
+    } catch (error) { if (error.name === 'PasswordException') fail('暗号化PDFは読み取れません'); throw error } finally { await closeTessEngine(); await task.destroy() }
   } else if (['docx', 'pptx', 'xlsx'].includes(extension)) {
     if (ocrOption.enabled) fail('OCRはPDFの画像ページだけが対象です。Office埋込画像は未読範囲として残します')
     if (bytes[0] !== 0x50 || bytes[1] !== 0x4b || bytes[2] !== 3 || bytes[3] !== 4) fail('Office文書の形式が不正です')
@@ -205,7 +224,7 @@ async function extract({ name, bytes, schedule, yTolerance, xGap, ocr }) {
   }
   if (ocrOption.enabled) ocrNotice()
   const document = { format: extension, name, fileSha256: originalSha256, size: originalSize, locations, unread, notices }
-  if (ocrOption.enabled && ocrEngine) document.ocr = { engine: ocrEngine.name, version: ocrEngine.version, languages: ocrEngine.languageTag, license: ocrEngine.license, assetHash: ocrEngine.hash, pages: ocrPages }
+  if (ocrOption.enabled && ocrEngine) document.ocr = { engine: ocrEngine.name, version: ocrEngine.version, languages: ocrEngine.languages, license: ocrEngine.license, assetHash: ocrEngine.hash, pages: ocrPages }
   return { text: lines.join('\n'), document, ...(schedule ? { tables, parameters: { yTolerance, xGap } } : {}) }
 }
 extract(workerData).then(result => parentPort.postMessage({ result }), error => parentPort.postMessage({ error: error.message }))

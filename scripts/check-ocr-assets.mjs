@@ -1,16 +1,25 @@
 // CLI asset check for the offline OCR path (Windows-friendly, no display).
-// Verifies engine record, template asset hash, charset coverage and that the
-// OCR path performs no network fetch or model download.
+// Verifies engine record, vendored tessdata hashes, and that the OCR path
+// performs no network fetch or model download.
 import { readFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
 import { createRequire } from 'node:module'
 
 const require = createRequire(import.meta.url)
-const { ENGINE, assetHash } = require('../electron/ocr-engine.cjs')
-const hash = assetHash()
-if (!/^[a-f0-9]{64}$/.test(hash)) throw new Error('OCR asset hash is invalid')
-for (const file of ['electron/ocr-engine.cjs', 'electron/ocr-pdf-images.cjs', 'electron/document-worker.cjs']) {
-  const source = readFileSync(new URL(`../${file}`, import.meta.url), 'utf8')
-  if (file !== 'electron/document-worker.cjs' && /fetch\s*\(|require\(['"]node:(https?|net|http)/.test(source)) throw new Error(`${file} must not fetch`)
+const { ENGINE, version, tessdataDir } = require('../electron/ocr-tesseract.cjs')
+const path = (await import('node:path')).default
+if (version() !== require('tesseract.js/package.json').version) throw new Error('OCR engine version mismatch')
+const hash = createHash('sha256')
+for (const file of ['eng.traineddata', 'jpn.traineddata']) {
+  const bytes = readFileSync(path.join(tessdataDir(), file))
+  if (!bytes.length) throw new Error(`${file} is empty`)
+  hash.update(bytes)
 }
-for (const ch of 'MEETING 1000本人確認') if (!ENGINE.charset.includes(ch)) throw new Error(`charset misses ${ch}`)
-console.log(JSON.stringify({ engine: ENGINE.name, version: ENGINE.version, languages: ENGINE.languageTag, license: ENGINE.license, assetHash: hash, charsetLength: [...ENGINE.charset].length }, null, 2))
+const assetHash = hash.digest('hex')
+for (const file of ['electron/ocr-tesseract.cjs', 'electron/ocr-pdf-images.cjs', 'electron/document-extract.cjs']) {
+  const source = readFileSync(new URL(`../${file}`, import.meta.url), 'utf8')
+  if (/require\(['"]node:(https?|net|http)['"]/.test(source) || /[^a-zA-Z]fetch\s*\(/.test(source)) throw new Error(`${file} must not fetch`)
+}
+const worker = readFileSync(new URL('../electron/document-worker.cjs', import.meta.url), 'utf8')
+if (!worker.includes('globalThis.fetch = async () => { throw')) throw new Error('worker fetch ban missing')
+console.log(JSON.stringify({ engine: ENGINE.name, version: version(), languages: ENGINE.languages, model: ENGINE.model, license: ENGINE.license, assetHash }, null, 2))

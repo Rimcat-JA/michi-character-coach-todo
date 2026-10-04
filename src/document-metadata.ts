@@ -8,9 +8,17 @@ function validateOcrMetadata(value: unknown): asserts value is NonNullable<Snaps
   if (!/^[a-f0-9]{64}$/.test(row.assetHash)) throw new Error('文書のOCR記録が不正です')
   if (!Array.isArray(row.pages) || row.pages.length > 200) throw new Error('文書のOCR記録が不正です')
   for (const page of row.pages) {
-    if (!page || typeof page !== 'object' || Array.isArray(page) || Object.keys(page).sort().join(',') !== 'chars,confidence,page,status,verified') throw new Error('文書のOCR記録が不正です')
+    if (!page || typeof page !== 'object' || Array.isArray(page)) throw new Error('文書のOCR記録が不正です')
+    const keys = Object.keys(page).sort().join(',')
+    if (keys !== 'chars,confidence,page,status,verified' && keys !== 'boxes,chars,confidence,page,status,verified') throw new Error('文書のOCR記録が不正です')
     if (!Number.isSafeInteger(page.page) || page.page < 1 || page.page > 200 || typeof page.status !== 'string' || !page.status.trim() || page.status.length > 60) throw new Error('文書のOCR記録が不正です')
     if (!(page.confidence === null || typeof page.confidence === 'number' && page.confidence >= 0 && page.confidence <= 1) || !Number.isSafeInteger(page.chars) || page.chars < 0 || page.chars > 200000 || typeof page.verified !== 'boolean') throw new Error('文書のOCR記録が不正です')
+    if (page.boxes !== undefined) {
+      if (!Array.isArray(page.boxes) || page.boxes.length > 200) throw new Error('文書のOCR記録が不正です')
+      for (const box of page.boxes) {
+        if (!Array.isArray(box) || box.length !== 4 || box.some(v => typeof v !== 'number' || !Number.isFinite(v) || v < 0 || v > 100000)) throw new Error('文書のOCR記録が不正です')
+      }
+    }
   }
 }
 

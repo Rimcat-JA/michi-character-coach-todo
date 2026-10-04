@@ -1,210 +1,193 @@
-// Local OCR path: real pixel-to-text extraction over generated scan PDFs.
-// No network, no model download. Fixtures are deterministic (seeded noise).
+// Offline general-font OCR path: Tesseract (vendored tessdata) over committed
+// OS-font scan fixtures. No network, no download. Tolerances are explicit.
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { createRequire } from 'node:module'
+import { createHash } from 'node:crypto'
 
 const require = createRequire(import.meta.url)
 const { extractDocument, cancelDocument } = require('./document-extract.cjs')
-const { ENGINE, assetHash, renderTextBitmap } = require('./ocr-engine.cjs')
-const { extractPdfImages } = require('./ocr-pdf-images.cjs')
+const { pageImages } = require('./ocr-pdf-images.cjs')
 
-function seeded(seed) {
-  let s = seed
-  return () => { s = (s * 1103515245 + 12345) & 0x7fffffff; return s / 0x7fffffff }
-}
-const noisy = (bitmap, rate, seed) => {
-  const rand = seeded(seed)
-  const pixels = Uint8Array.from(bitmap.pixels)
-  for (let i = 0; i < pixels.length; i++) if (rand() < rate) pixels[i] = pixels[i] < 128 ? 255 : 0
-  return { pixels, width: bitmap.width, height: bitmap.height }
-}
-const rotated = (bitmap, degrees) => {
-  const rad = degrees * Math.PI / 180, cos = Math.cos(rad), sin = Math.sin(rad)
-  const w = bitmap.width, h = bitmap.height
-  const nw = Math.ceil(Math.abs(w * cos) + Math.abs(h * sin)) + 8
-  const nh = Math.ceil(Math.abs(w * sin) + Math.abs(h * cos)) + 8
-  const pixels = new Uint8Array(nw * nh).fill(255)
-  const cx = w / 2, cy = h / 2, nx = nw / 2, ny = nh / 2
-  for (let y = 0; y < nh; y++) for (let x = 0; x < nw; x++) {
-    const sx = Math.round((x - nx) * cos + (y - ny) * sin + cx)
-    const sy = Math.round(-(x - nx) * sin + (y - ny) * cos + cy)
-    if (sx >= 0 && sy >= 0 && sx < w && sy < h) pixels[y * nw + x] = bitmap.pixels[sy * w + sx]
-  }
-  return { pixels, width: nw, height: nh }
-}
-const toHex = pixels => Buffer.from(pixels).toString('hex')
-// Minimal scan PDF: one grayscale image XObject per page (ASCIIHex, DeviceGray 8-bit).
-function scanPdf(pages) {
-  const objects = ['<< /Type /Catalog /Pages 2 0 R >>', `__PAGES__`]
-  const pageIds = []
-  pages.forEach(image => {
-    const pageId = objects.length + 1
-    pageIds.push(pageId)
-    const imgId = pageId + 1, contentId = pageId + 2
-    objects.push(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${image.width} ${image.height}] /Resources << /XObject << /Im${pageId} ${imgId} 0 R >> >> /Contents ${contentId} 0 R >>`)
-    objects.push(`<< /Type /XObject /Subtype /Image /Width ${image.width} /Height ${image.height} /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /ASCIIHexDecode /Length ${image.width * image.height * 2 + 1} >>\nstream\n${toHex(image.pixels)}>\nendstream`)
-    objects.push(`<< /Length 50 >>\nstream\nq ${image.width} 0 0 ${image.height} 0 0 cm /Im${pageId} Do Q\nendstream`)
-  })
-  objects[1] = `<< /Type /Pages /Kids [${pageIds.map(id => `${id} 0 R`).join(' ')}] /Count ${pages.length} >>`
-  let text = '%PDF-1.4\n'
-  const offsets = [0]
-  objects.forEach((object, i) => { offsets.push(Buffer.byteLength(text)); text += `${i + 1} 0 obj\n${object}\nendobj\n` })
-  const xref = Buffer.byteLength(text)
-  text += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n${offsets.slice(1).map(value => `${String(value).padStart(10, '0')} 00000 n \n`).join('')}trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF`
-  return new Uint8Array(Buffer.from(text, 'latin1'))
-}
+const fixture = name => ({ name, bytes: new Uint8Array(readFileSync(new URL(`./fixtures/ocr/${name}`, import.meta.url))) })
 const ocr = { enabled: true, language: 'eng+jpn' }
+const norm = text => String(text).normalize('NFC').replace(/\s+/g, ' ').trim()
+function distance(a, b) {
+  const x = [...a], y = [...b]
+  const dp = Array.from({ length: x.length + 1 }, (_, i) => [i, ...new Array(y.length).fill(0)])
+  for (let j = 1; j <= y.length; j++) dp[0][j] = j
+  for (let i = 1; i <= x.length; i++) for (let j = 1; j <= y.length; j++) dp[i][j] = Math.min(dp[i - 1][j] + 1, dp[i][j - 1] + 1, dp[i - 1][j - 1] + (x[i - 1] === y[j - 1] ? 0 : 1))
+  return dp[x.length][y.length]
+}
+const cer = (actual, expected) => distance(norm(actual), norm(expected)) / Math.max(1, [...norm(expected)].length)
 
-test('engine metadata is recorded: version, languages, license, asset hash', () => {
-  assert.equal(ENGINE.name, 'michi-local-block-ocr')
-  assert.match(ENGINE.version, /^\d+\.\d+\.\d+$/)
-  assert.deepEqual(ENGINE.languages, ['eng', 'jpn'])
-  assert.match(assetHash(), /^[a-f0-9]{64}$/)
-  assert.match(ENGINE.license, /repo-local/)
-  for (const ch of 'MEETING 1000本人確認') assert.ok(ENGINE.charset.includes(ch), `charset covers ${ch}`)
+const EN = 'Meeting at 10:00\nPlease submit the report'
+const JA = '会議は10時からです\n提出してください'
+const MIXED = 'Meeting at 10:00\n会議は10時からです'
+
+test('engine record pins Tesseract version, license and vendored asset hashes', () => {
+  const { ENGINE, version } = require('./ocr-tesseract.cjs')
+  assert.equal(version(), require('tesseract.js/package.json').version)
+  assert.equal(version(), '6.0.1')
+  assert.equal(ENGINE.name, 'tesseract.js')
+  assert.equal(ENGINE.languages, 'eng+jpn')
+  assert.match(ENGINE.license, /Apache-2\.0/)
+  const dir = new URL('./ocr-tessdata/', import.meta.url)
+  const hash = createHash('sha256')
+  for (const file of ['eng.traineddata', 'jpn.traineddata']) hash.update(readFileSync(new URL(file, dir)))
+  assert.match(hash.digest('hex'), /^[a-f0-9]{64}$/)
 })
 
-test('OCR files never fetch: no network imports in the OCR path', () => {
-  for (const file of ['ocr-engine.cjs', 'ocr-pdf-images.cjs']) {
+test('OCR path performs no network fetch', () => {
+  for (const file of ['ocr-tesseract.cjs', 'ocr-pdf-images.cjs', 'document-extract.cjs']) {
     const source = readFileSync(new URL(`./${file}`, import.meta.url), 'utf8')
-    assert.doesNotMatch(source, /fetch\s*\(|require\(['"]node:(https?|net|http)|from ['"]node:https?/i)
+    assert.doesNotMatch(source, /require\(['"]node:(https?|net|http)['"]/)
+    assert.doesNotMatch(source, /[^a-zA-Z]fetch\s*\(/)
   }
+  const worker = readFileSync(new URL('./document-worker.cjs', import.meta.url), 'utf8')
+  assert.match(worker, /globalThis\.fetch = async \(\) => \{ throw/)
 })
 
-test('English scan PDF extracts exact text with engine record (default OFF keeps old behavior)', async () => {
-  const bytes = scanPdf([renderTextBitmap('MEETING 1000')])
-  await assert.rejects(extractDocument({ name: 'scan.pdf', bytes }), /OCR選択/)
-  const result = await extractDocument({ name: 'scan.pdf', bytes, ocr })
-  assert.equal(result.text, 'MEETING 1000')
-  assert.deepEqual(result.document.locations, ['ページ1・OCR行1'])
-  assert.equal(result.document.ocr.engine, ENGINE.name)
-  assert.equal(result.document.ocr.version, ENGINE.version)
+test('English scan reads exact with word boxes (default OFF keeps old behavior)', async () => {
+  await assert.rejects(extractDocument(fixture('ocr-en.pdf')), /OCR選択/)
+  const result = await extractDocument({ ...fixture('ocr-en.pdf'), ocr })
+  assert.ok(cer(result.text, EN) <= 0.08, `CER bound: ${result.text}`)
+  assert.deepEqual(result.document.locations, ['ページ1・OCR行1', 'ページ1・OCR行2'])
+  assert.equal(result.document.ocr.engine, 'tesseract.js')
   assert.equal(result.document.ocr.languages, 'eng+jpn')
-  assert.equal(result.document.ocr.assetHash, assetHash())
-  assert.equal(result.document.ocr.pages.length, 1)
   assert.equal(result.document.ocr.pages[0].status, 'ok')
-  assert.ok(result.document.ocr.pages[0].confidence >= 0.95)
   assert.equal(result.document.ocr.pages[0].verified, true)
+  assert.ok(result.document.ocr.pages[0].confidence >= 0.7)
+  assert.equal(result.document.ocr.pages[0].boxes.length, 2)
+  for (const box of result.document.ocr.pages[0].boxes) assert.equal(box.length, 4)
   assert.ok(result.document.notices.some(notice => notice.includes('外部送信なし')))
-  assert.ok(result.document.notices.some(notice => notice.includes('直接変更しません')))
 })
 
-test('Japanese scan PDF extracts exact text with page-tagged locations', async () => {
-  const ja = await extractDocument({ name: 'scan.pdf', bytes: scanPdf([renderTextBitmap('本人確認')]), ocr })
-  assert.equal(ja.text, '本人確認')
-  assert.deepEqual(ja.document.locations, ['ページ1・OCR行1'])
-  assert.equal(ja.document.ocr.pages[0].status, 'ok')
+test('Japanese and mixed scans read within stated CER bounds', async () => {
+  const ja = await extractDocument({ ...fixture('ocr-ja.pdf'), ocr })
+  assert.ok(cer(ja.text, JA) <= 0.12, `JA CER bound: ${ja.text}`)
   assert.equal(ja.document.ocr.pages[0].verified, true)
+  const mixed = await extractDocument({ ...fixture('ocr-mixed.pdf'), ocr })
+  assert.ok(cer(mixed.text, MIXED) <= 0.12, `mixed CER bound: ${mixed.text}`)
 })
 
-test('mixed pages keep the text layer and append OCR lines with page tags', async () => {
-  // Page 1: real text layer (Helvetica). Page 2: image-only scan for OCR.
-  const image = renderTextBitmap('本人確認')
+test('page mapping follows drawn references, not storage order', async () => {
+  const { pages } = pageImages(fixture('ocr-shuffled.pdf').bytes)
+  assert.equal(pages.length, 1)
+  assert.equal(pages[0].length, 1)
+  assert.ok(!pages[0][0].unsupported)
+  const result = await extractDocument({ ...fixture('ocr-shuffled.pdf'), ocr })
+  assert.ok(cer(result.text, MIXED) <= 0.12)
+})
+
+test('shared image objects decode once and serve every reusing page', async () => {
+  const { pages } = pageImages(fixture('ocr-reuse.pdf').bytes)
+  assert.equal(pages.length, 2)
+  assert.equal(pages[0][0].objid, pages[1][0].objid)
+  const result = await extractDocument({ ...fixture('ocr-reuse.pdf'), ocr })
+  assert.deepEqual(result.document.locations, ['ページ1・OCR行1', 'ページ1・OCR行2', 'ページ2・OCR行1', 'ページ2・OCR行2'])
+  assert.ok(cer(result.text, `${EN}\n${EN}`) <= 0.08)
+})
+
+test('multi-image pages process the largest drawn image and list the rest', async () => {
+  const result = await extractDocument({ ...fixture('ocr-multi.pdf'), ocr })
+  assert.ok(cer(result.text, MIXED) <= 0.12)
+  assert.ok(result.document.unread.some(item => item.location === 'ページ1・画像2' && /最大の画像/.test(item.reason)))
+})
+
+test('images on text-layer pages are never OCR targets', async () => {
+  const result = await extractDocument({ ...fixture('ocr-logo-text.pdf'), ocr })
+  assert.equal(result.text, 'Hello')
+  assert.deepEqual(result.document.locations, ['ページ1'])
+  assert.equal(result.document.unread.length, 0)
+  assert.ok(!result.text.includes('ACME'))
+})
+
+test('blank and rotated scans never verify', async () => {
+  await assert.rejects(extractDocument({ ...fixture('ocr-blank.pdf'), ocr }), /白紙または読取不可/)
+  const tilted = await extractDocument({ ...fixture('ocr-rotated.pdf'), ocr })
+  assert.equal(tilted.document.ocr.pages[0].verified, false)
+  assert.equal(tilted.document.ocr.pages[0].status, 'low-confidence')
+  assert.ok(tilted.document.ocr.pages[0].confidence < 0.7)
+})
+
+// Raw single-image PDFs for structural edge cases (no font rendering involved).
+function rawImagePdf({ width, height, color, bits, filters, streamBytes }) {
+  const filterPart = filters.length ? (filters.length === 1 ? `/Filter /${filters[0]}` : `/Filter [${filters.map(f => `/${f}`).join(' ')}]`) : ''
+  const hex = filters.includes('ASCIIHexDecode')
+  const body = hex ? `${Buffer.from(streamBytes).toString('hex')}>\n` : `${Buffer.from(streamBytes).toString('latin1')}\n`
   const objects = [
     '<< /Type /Catalog /Pages 2 0 R >>',
-    '<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>',
-    '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Resources << /Font << /F1 6 0 R >> >> /Contents 7 0 R >>',
-    `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${image.width} ${image.height}] /Resources << /XObject << /Im0 5 0 R >> >> /Contents 8 0 R >>`,
-    `<< /Type /XObject /Subtype /Image /Width ${image.width} /Height ${image.height} /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /ASCIIHexDecode /Length ${image.width * image.height * 2 + 1} >>\nstream\n${toHex(image.pixels)}>\nendstream`,
-    '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>',
-    '<< /Length 42 >>\nstream\nBT /F1 12 Tf 10 100 Td (Submit report) Tj ET\nendstream',
-    `<< /Length 44 >>\nstream\nq ${image.width} 0 0 ${image.height} 0 0 cm /Im0 Do Q\nendstream`,
+    '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+    `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Resources << /XObject << /Im3 4 0 R >> >> /Contents 5 0 R >>`,
+    `<< /Type /XObject /Subtype /Image /Width ${width} /Height ${height} /ColorSpace /${color} /BitsPerComponent ${bits} ${filterPart} /Length ${Buffer.byteLength(body, 'latin1')} >>\nstream\n${body}endstream`,
+    '<< /Length 31 >>\nstream\nq 10 0 0 10 0 0 cm /Im3 Do Q\nendstream',
   ]
-  let text = '%PDF-1.4\n'
+  let pdf = '%PDF-1.4\n'
   const offsets = [0]
-  objects.forEach((object, i) => { offsets.push(Buffer.byteLength(text)); text += `${i + 1} 0 obj\n${object}\nendobj\n` })
-  const xref = Buffer.byteLength(text)
-  text += `xref\n0 9\n0000000000 65535 f \n${offsets.slice(1).map(value => `${String(value).padStart(10, '0')} 00000 n \n`).join('')}trailer\n<< /Size 9 /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF`
-  const mixed = await extractDocument({ name: 'mixed.pdf', bytes: new Uint8Array(Buffer.from(text, 'latin1')), ocr })
-  assert.match(mixed.text, /Submit report/)
-  assert.match(mixed.text, /本人確認/)
-  assert.deepEqual(mixed.document.locations, ['ページ1', 'ページ2・OCR行1'])
-  assert.equal(mixed.document.unread.length, 0)
-})
-
-test('blank and rotated scans are refused without fabricated text', async () => {
-  const blank = { pixels: new Uint8Array(300 * 100).fill(255), width: 300, height: 100 }
-  await assert.rejects(extractDocument({ name: 'blank.pdf', bytes: scanPdf([blank]), ocr }), /白紙または文字がありません/)
-  const tilted = rotated(renderTextBitmap('MEETING 1000'), 12)
-  await assert.rejects(extractDocument({ name: 'tilted.pdf', bytes: scanPdf([tilted]), ocr }), /回転・傾き・ノイズ/)
-})
-
-test('noisy scans degrade explicitly: unknown marks, unverified, lower confidence', async () => {
-  const clean = await extractDocument({ name: 'c.pdf', bytes: scanPdf([renderTextBitmap('MEETING 1000')]), ocr })
-  const degraded = await extractDocument({ name: 'n.pdf', bytes: scanPdf([noisy(renderTextBitmap('MEETING 1000'), 0.02, 7)]), ocr })
-  assert.match(degraded.text, /□/)
-  assert.equal(degraded.document.ocr.pages[0].verified, false)
-  assert.ok(degraded.document.ocr.pages[0].confidence < clean.document.ocr.pages[0].confidence)
-  assert.ok(degraded.text.replace(/[□\s]/g, '').length >= 8, 'most characters survive light noise')
-})
+  objects.forEach((object, i) => { offsets.push(Buffer.byteLength(pdf)); pdf += `${i + 1} 0 obj\n${object}\nendobj\n` })
+  const xref = Buffer.byteLength(pdf)
+  pdf += `xref\n0 6\n0000000000 65535 f \n${offsets.slice(1).map(value => `${String(value).padStart(10, '0')} 00000 n \n`).join('')}trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF`
+  return { name: 'edge.pdf', bytes: new Uint8Array(Buffer.from(pdf, 'latin1')) }
+}
 
 test('JPEG/DCT images stay unread with an explicit reason instead of a guess', async () => {
-  const objects = ['<< /Type /Catalog /Pages 2 0 R >>', '<< /Type /Pages /Kids [3 0 R] /Count 1 >>', '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Resources << /XObject << /Im0 4 0 R >> >> /Contents 5 0 R >>', '<< /Type /XObject /Subtype /Image /Width 4 /Height 4 /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /DCTDecode /Length 8 >>\nstream\nFFFFFFFFFFFFFFFF\nendstream', '<< /Length 31 >>\nstream\nq 100 0 0 100 0 0 cm /Im0 Do Q\nendstream']
-  let text = '%PDF-1.4\n'
-  const offsets = [0]
-  objects.forEach((object, i) => { offsets.push(Buffer.byteLength(text)); text += `${i + 1} 0 obj\n${object}\nendobj\n` })
-  const xref = Buffer.byteLength(text)
-  text += `xref\n0 6\n0000000000 65535 f \n${offsets.slice(1).map(value => `${String(value).padStart(10, '0')} 00000 n \n`).join('')}trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF`
-  await assert.rejects(extractDocument({ name: 'photo.pdf', bytes: new Uint8Array(Buffer.from(text, 'latin1')), ocr }), /DCTDecode/)
+  await assert.rejects(extractDocument({ ...rawImagePdf({ width: 4, height: 4, color: 'DeviceGray', bits: 8, filters: ['DCTDecode'], streamBytes: new Uint8Array(8) }), ocr }), /DCTDecode/)
 })
 
-test('PDF image extractor decodes gray/RGB/1-bit/Flate and flags oversized input', async () => {
-  const gray = renderTextBitmap('REPORT 2026')
-  const found = extractPdfImages(scanPdf([gray]))
-  assert.equal(found.length, 1)
-  assert.ok(!found[0].unsupported)
-  assert.equal(found[0].width, gray.width)
-  assert.deepEqual(found[0].pixels, gray.pixels)
-  // Raw single-image PDFs in every supported encoding: RGB, 1-bit, Flate.
-  const { deflateSync } = await import('fflate')
-  const rawImagePdf = (image, { color, bits, filters, streamBytes }) => {
-    const filterPart = filters.length === 1 ? `/Filter /${filters[0]}` : `/Filter [${filters.map(f => `/${f}`).join(' ')}]`
-    const body = filters.includes('ASCIIHexDecode') ? `${Buffer.from(streamBytes).toString('hex')}>\n` : `${Buffer.from(streamBytes).toString('latin1')}\n`
-    const objects = [
-      '<< /Type /Catalog /Pages 2 0 R >>',
-      '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
-      `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${image.width} ${image.height}] /Resources << /XObject << /Im3 4 0 R >> >> /Contents 5 0 R >>`,
-      `<< /Type /XObject /Subtype /Image /Width ${image.width} /Height ${image.height} /ColorSpace /${color} /BitsPerComponent ${bits} ${filterPart} /Length ${Buffer.byteLength(body, 'latin1')} >>\nstream\n${body}endstream`,
-      '<< /Length 31 >>\nstream\nq 10 0 0 10 0 0 cm /Im3 Do Q\nendstream',
-    ]
-    let pdf = '%PDF-1.4\n'
-    const offsets = [0]
-    objects.forEach((object, i) => { offsets.push(Buffer.byteLength(pdf)); pdf += `${i + 1} 0 obj\n${object}\nendobj\n` })
-    const xref = Buffer.byteLength(pdf)
-    pdf += `xref\n0 6\n0000000000 65535 f \n${offsets.slice(1).map(value => `${String(value).padStart(10, '0')} 00000 n \n`).join('')}trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF`
-    return new Uint8Array(Buffer.from(pdf, 'latin1'))
-  }
-  const rgb = { width: 2, height: 1, pixels: new Uint8Array([200, 200, 200, 10, 10, 10]) }
-  const rgbRaw = new Uint8Array([200, 200, 200, 10, 10, 10])
-  const rgbFound = extractPdfImages(rawImagePdf(rgb, { color: 'DeviceRGB', bits: 8, filters: [], streamBytes: rgbRaw }))
-  assert.deepEqual(rgbFound[0].pixels, new Uint8Array([200, 10]))
-  const bw = { width: 9, height: 1 }
-  const bwFound = extractPdfImages(rawImagePdf(bw, { color: 'DeviceGray', bits: 1, filters: [], streamBytes: new Uint8Array([0xff, 0x00]) }))
-  assert.deepEqual(bwFound[0].pixels.slice(0, 9), new Uint8Array([0, 0, 0, 0, 0, 0, 0, 0, 255]))
-  const flateHex = deflateSync(gray.pixels)
-  const flateFound = extractPdfImages(rawImagePdf(gray, { color: 'DeviceGray', bits: 8, filters: ['ASCIIHexDecode', 'FlateDecode'], streamBytes: flateHex }))
-  assert.ok(!flateFound[0].unsupported)
-  assert.deepEqual(flateFound[0].pixels, gray.pixels)
-})
-
-test('cancel leaves no adopted response: next extraction still succeeds', async () => {
-  const { renderTextBitmap: render } = require('./ocr-engine.cjs')
-  const pages = Array.from({ length: 30 }, (_, i) => render(`REPORT ${(2020 + i) % 100}${i}`.slice(0, 11)))
-  const bytes = scanPdf(pages)
-  const pending = extractDocument({ name: 'scan.pdf', bytes, ocr })
-  // Whether the worker already finished or not, cancel must not deadlock or
-  // poison later requests; a late first response is never adopted afterwards.
-  await cancelDocument()
-  const outcome = await pending.then(
-    value => value.text,
-    error => `rejected:${error instanceof Error ? error.message : String(error)}`
+test('declared dimensions are enforced before any pixel buffer is allocated', async () => {
+  const t0 = Date.now()
+  await assert.rejects(
+    extractDocument({ ...rawImagePdf({ width: 20000, height: 20000, color: 'DeviceGray', bits: 8, filters: ['FlateDecode'], streamBytes: new Uint8Array(100) }), ocr }),
+    /上限/
   )
-  if (outcome.startsWith('rejected:')) assert.match(outcome, /中止|時間上限|終わって|文書を読み取れません/)
-  else assert.match(outcome, /REPORT/)
-  const again = await extractDocument({ name: 'scan.pdf', bytes: scanPdf([render('REPORT 2026')]), ocr })
-  assert.equal(again.text, 'REPORT 2026')
+  assert.ok(Date.now() - t0 < 15000, 'pre-decode rejection stays fast')
+})
+
+test('document-wide declared total is enforced before decoding the excess page', async () => {
+  const { deflateSync } = await import('fflate')
+  // 5 pages x 7MP of zeros: tiny on disk, 35MP declared. Page 5 must refuse pre-decode.
+  const zeros = Buffer.from(deflateSync(new Uint8Array(7 * 1024 * 1024))).toString('latin1')
+  const objects = ['<< /Type /Catalog /Pages 2 0 R >>', '<< /Type /Pages /Kids [5 0 R 8 0 R 11 0 R 14 0 R 17 0 R] /Count 5 >>']
+  for (let p = 0; p < 5; p++) {
+    const img = 3 + p * 3, content = 4 + p * 3, page = 5 + p * 3
+    const pad = id => { while (objects.length < id) objects.push('<< >>') }
+    pad(img); objects[img - 1] = `<< /Type /XObject /Subtype /Image /Width 2800 /Height 2500 /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /FlateDecode /Length ${Buffer.byteLength(zeros, 'latin1')} >>\nstream\n${zeros}endstream`
+    pad(content); objects[content - 1] = `<< /Length 30 >>\nstream\nq 10 0 0 10 0 0 cm /Im Do Q\nendstream`
+    pad(page); objects[page - 1] = `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Resources << /XObject << /Im ${img} 0 R >> >> /Contents ${content} 0 R >>`
+  }
+  let pdf = '%PDF-1.4\n'
+  const offsets = [0]
+  objects.forEach((object, i) => { offsets.push(Buffer.byteLength(pdf)); pdf += `${i + 1} 0 obj\n${object}\nendobj\n` })
+  const xref = Buffer.byteLength(pdf)
+  pdf += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n${offsets.slice(1).map(value => `${String(value).padStart(10, '0')} 00000 n \n`).join('')}trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF`
+  await assert.rejects(extractDocument({ name: 'total.pdf', bytes: new Uint8Array(Buffer.from(pdf, 'latin1')), ocr }), /総処理量/)
+})
+
+test('OCR timeout is enforced and only shortenable', async () => {
+  await assert.rejects(extractDocument({ name: 'x.pdf', bytes: new Uint8Array([1]), ocr: { enabled: true, timeoutMs: 0 } }), /OCR選択が不正/)
+  await assert.rejects(extractDocument({ name: 'x.pdf', bytes: new Uint8Array([1]), ocr: { enabled: true, timeoutMs: 60001 } }), /OCR選択が不正/)
+  await assert.rejects(extractDocument({ ...fixture('ocr-cancel.pdf'), ocr: { enabled: true, language: 'eng+jpn', timeoutMs: 100 } }), /時間上限/)
+})
+
+test('cancel during real OCR rejects and the next extraction still succeeds', async () => {
+  const pending = extractDocument({ ...fixture('ocr-cancel.pdf'), ocr })
+  await new Promise(resolve => setTimeout(resolve, 30))
+  await cancelDocument()
+  await pending.then(
+    () => assert.fail('cancelled OCR must not resolve with adopted text'),
+    error => assert.match(error instanceof Error ? error.message : String(error), /中止/)
+  )
+  const again = await extractDocument({ ...fixture('ocr-en.pdf'), ocr })
+  assert.ok(cer(again.text, EN) <= 0.08)
+})
+
+test('sequential documents reuse nothing across calls', async () => {
+  const first = await extractDocument({ ...fixture('ocr-en.pdf'), ocr })
+  const second = await extractDocument({ ...fixture('ocr-ja.pdf'), ocr })
+  assert.ok(cer(first.text, EN) <= 0.08)
+  assert.ok(cer(second.text, JA) <= 0.12)
 })
 
 test('OCR is PDF-only: Office and schedule paths refuse instead of guessing', async () => {

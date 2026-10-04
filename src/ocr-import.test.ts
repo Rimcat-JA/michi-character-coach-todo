@@ -18,12 +18,12 @@ const ocrDocument = (text: string): SnapshotDocument => {
     unread: [],
     notices: ['OCR（端末内・外部送信なし）: engine v1'],
     ocr: {
-      engine: 'michi-local-block-ocr',
-      version: '1.0.0',
+      engine: 'tesseract.js',
+      version: '6.0.1',
       languages: 'eng+jpn' as const,
-      license: 'repo-local',
+      license: 'Apache-2.0 (tesseract.js, tesseract.js-core, tessdata_fast eng+jpn)',
       assetHash: 'c'.repeat(64),
-      pages: [{ page: 1, status: 'ok', confidence: 0.99, chars: text.length, verified: true }],
+      pages: [{ page: 1, status: 'ok', confidence: 0.93, chars: text.length, verified: true, boxes: [[40, 40, 500, 110]] }],
     },
   }
 }
@@ -45,6 +45,13 @@ describe('OCR文書の取込と検証', () => {
     const badConfidence = ocrDocument('MEETING 1000')
     badConfidence.ocr = { ...badConfidence.ocr!, pages: [{ page: 1, status: 'ok', confidence: 2, chars: 1, verified: true }] }
     expect(() => validateDocumentMetadata(badConfidence, 1)).toThrow('OCR')
+    const badBox = ocrDocument('MEETING 1000')
+    badBox.ocr = { ...badBox.ocr!, pages: [{ page: 1, status: 'ok', confidence: 0.9, chars: 1, verified: true, boxes: [[0, 0, 1]] }] }
+    expect(() => validateDocumentMetadata(badBox, 1)).toThrow('OCR')
+    const boxed = ocrDocument('A\nB')
+    boxed.locations = ['ページ1・OCR行1', 'ページ1・OCR行2']
+    boxed.ocr = { ...boxed.ocr!, pages: [{ page: 1, status: 'ok', confidence: 0.9, chars: 3, verified: true, boxes: [[40, 40, 500, 110], [40, 130, 500, 200]] }] }
+    expect(() => validateDocumentMetadata(boxed, 2)).not.toThrow()
     const extraKey = ocrDocument('MEETING 1000') as unknown as Record<string, unknown>
     extraKey.ocr = { ...(extraKey.ocr as object), bbox: [] }
     expect(() => validateDocumentMetadata(extraKey, 1)).toThrow('OCR')
@@ -62,7 +69,7 @@ describe('OCR文書の取込と検証', () => {
       document: ocrDocument('MEETING 1000'), permissions: defaultSourcePermissions(), allowedModels: [], retentionUntil: null,
     })
     const { snapshot } = await readSource(id)
-    expect(snapshot.document?.ocr?.engine).toBe('michi-local-block-ocr')
+    expect(snapshot.document?.ocr?.engine).toBe('tesseract.js')
     expect(snapshot.document?.locations).toEqual(['ページ1・OCR行1'])
     expect((await searchSources('MEETING', '2026-10-04', '2026-10-04')).hits.length).toBe(1)
     expect(await db.tasks.count()).toBe(0)
