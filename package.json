@@ -12,7 +12,9 @@
     "test": "vitest run",
     "check:electron": "node scripts/electron-checks.mjs syntax",
     "test:electron": "node scripts/electron-checks.mjs test",
+    "test:ocr": "node --test electron/document-ocr.electron-tests.mjs",
     "check:pwa-offline": "node scripts/pwa-offline-check.mjs",
+    "check:ocr": "node scripts/check-ocr-assets.mjs",
     "check:device-data": "node scripts/device-data-check.mjs",
     "benchmark:retrieval": "node scripts/retrieval-benchmark.mjs",
     "mcp:stdio": "node scripts/michi-mcp.mjs",
@@ -27,7 +29,8 @@
     "lucide-react": "^1.48.0",
     "pdfjs-dist": "^6.3.289",
     "react": "^19.2.8",
-    "react-dom": "^19.2.8"
+    "react-dom": "^19.2.8",
+    "tesseract.js": "6.0.1"
   },
   "devDependencies": {
     "@types/node": "^24.19.0",

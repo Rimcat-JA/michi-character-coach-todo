@@ -12,6 +12,7 @@ dist
 dist-ssr
 release/
 qa-output/
+ocr-fixture-bmp/
 *.local
 .env
 .env.*
