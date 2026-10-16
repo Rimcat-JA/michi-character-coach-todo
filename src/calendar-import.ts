@@ -1,4 +1,5 @@
 import { canonicalJSON, contentDigest } from './canonical'
+import { expandRRule, parseRRule, type RRuleSpec } from './rrule'
 import { addDays, validateDate } from './domain'
 import { calendarDateAt, resolveLocalCalendarTime, type CalendarRulesState, type ICSComponentVersion, type ScheduleFact } from './calendar-resolver'
 import { loadCalendarRulesState, prepareCalendarConfiguration, type CalendarConfigurationProposal, type CalendarRulesConfiguration } from './calendar-rules-save'
@@ -6,7 +7,7 @@ import { validateCalendarRulesState } from './calendar-rules-validation'
 import { knownCalendarTimezone, separateICSAuxiliary, verifyICSTimezones, type ICSProperty } from './calendar-ics-timezones'
 
 export type ICSTime = { kind: 'date' | 'utc' | 'zoned' | 'floating'; date: string; time: string | null; timezone: string; at: string; key: string }
-export type ICSRecurrence = { frequency: 'DAILY' | 'WEEKLY' | 'MONTHLY'; interval: number; count: number | null; until: ICSTime | null; weekdays: number[] | null; monthDays: number[] | null }
+export type ICSRecurrence = { frequency: 'DAILY' | 'WEEKLY' | 'MONTHLY' | 'YEARLY'; spec?: RRuleSpec; interval: number; count: number | null; until: ICSTime | null; weekdays: number[] | null; monthDays: number[] | null }
 export type ICSComponent = {
   uid: string; recurrenceId: ICSTime | null; sequence: number; dtstamp: string; lastModified: string | null; title: string | null
   status: 'confirmed' | 'tentative' | 'cancelled'; start: ICSTime | null; end: ICSTime | null; durationSeconds: number | null; durationDays: number | null
@@ -108,19 +109,18 @@ function duration(value: string) {
 }
 function recurrence(property: ICSProperty, start: ICSTime, options: CalendarImportOptions): ICSRecurrence {
   assertParams(property, [])
-  const parts: Record<string, string> = {}
-  for (const pair of property.value.split(';')) { const [key, value, extra] = pair.split('='); if (!key || !value || extra || Object.hasOwn(parts, key) || !['FREQ', 'INTERVAL', 'COUNT', 'UNTIL', 'BYDAY', 'BYMONTHDAY', 'WKST'].includes(key)) error('RRULEの指定は未対応・重複です', property.line); parts[key] = value }
-  if (!['DAILY', 'WEEKLY', 'MONTHLY'].includes(parts.FREQ) || parts.COUNT && parts.UNTIL || parts.WKST && parts.WKST !== 'MO') error('このRRULEは未対応です。日・週・月の明示周期を確認してください', property.line)
-  const frequency = parts.FREQ as ICSRecurrence['frequency'], interval = parts.INTERVAL ? integer(parts.INTERVAL, 1000, 'INTERVAL') : 1, count = parts.COUNT ? integer(parts.COUNT, 10000, 'COUNT') : null
-  if (!interval || count === 0) error('INTERVAL/COUNTは1以上です', property.line)
-  const weekdays = parts.BYDAY ? parts.BYDAY.split(',').map(value => { if (!Object.hasOwn(dayNames, value)) error('ordinal BYDAYは未対応です', property.line); return dayNames[value] }) : null
-  const monthDays = parts.BYMONTHDAY ? parts.BYMONTHDAY.split(',').map(value => { if (!/^-?([1-9]|[12]\d|3[01])$/.test(value)) error('BYMONTHDAYが不正です', property.line); return Number(value) }) : null
-  if (weekdays && (frequency !== 'WEEKLY' || new Set(weekdays).size !== weekdays.length) || monthDays && (frequency !== 'MONTHLY' || new Set(monthDays).size !== monthDays.length)) error('RRULEの組み合わせは未対応です', property.line)
-  if (weekdays && !weekdays.includes(new Date(`${start.date}T12:00:00Z`).getUTCDay())) error('DTSTARTとBYDAYが一致していません', property.line)
-  if (monthDays) { const last = new Date(`${start.date.slice(0, 7)}-01T12:00:00Z`); last.setUTCMonth(last.getUTCMonth() + 1); last.setUTCDate(0); if (!monthDays.some(day => day > 0 ? day === Number(start.date.slice(8)) : last.getUTCDate() + day + 1 === Number(start.date.slice(8)))) error('DTSTARTとBYMONTHDAYが一致していません', property.line) }
-  const until = parts.UNTIL ? timeValue({ name: 'UNTIL', value: parts.UNTIL, params: start.kind === 'date' ? { VALUE: 'DATE' } : {}, line: property.line }, options) : null
+  let spec: RRuleSpec
+  try { spec = parseRRule(property.value) } catch (cause) { error(cause instanceof Error ? cause.message : 'RRULEが不正です', property.line) }
+  const until = spec.until ? timeValue({ name: 'UNTIL', value: spec.until, params: start.kind === 'date' ? { VALUE: 'DATE' } : {}, line: property.line }, options) : null
   if (until && (start.kind === 'date' ? until.kind !== 'date' : until.kind !== 'utc') || until && until.at < start.at) error('UNTILの型・順序を確認してください', property.line)
-  return { frequency, interval, count, until, weekdays, monthDays }
+  // Preserve the historical component representation (and its persisted version digest) for old supported rules.
+  const legacy = property.value === property.value.toUpperCase() && spec.freq !== 'YEARLY' && spec.wkst === 1 && !spec.byMonth.length && !spec.bySetPos.length && !spec.byDay.some(day => day.ordinal !== null) && (!spec.byDay.length || spec.freq === 'WEEKLY') && (!spec.byMonthDay.length || spec.freq === 'MONTHLY')
+  const parts = Object.fromEntries(property.value.split(';').map(pair => pair.split('=')))
+  const weekdays = legacy && parts.BYDAY ? parts.BYDAY.split(',').map((value: string) => dayNames[value]) : spec.byDay.length ? spec.byDay.map(day => day.weekday) : null
+  const monthDays = legacy && parts.BYMONTHDAY ? parts.BYMONTHDAY.split(',').map(Number) : spec.byMonthDay.length ? spec.byMonthDay : null
+  const local = `${start.date}T${start.time?.slice(0, 5) ?? '00:00'}`
+  if (!expandRRule({ dtstart: local, rrule: { ...spec, until: null }, from: start.date, to: start.date }).occurrences.includes(local)) error('DTSTARTとRRULEが一致していません', property.line)
+  return { frequency: spec.freq, interval: spec.interval, count: spec.count, until, weekdays, monthDays, ...(!legacy ? { spec } : {}) }
 }
 
 function parseComponent(rows: ICSProperty[], options: CalendarImportOptions, method: string | null): ICSComponent {
@@ -276,25 +276,18 @@ function endAt(component: ICSComponent, start: ICSTime, options: CalendarImportO
 function recurrenceStarts(component: ICSComponent, options: CalendarImportOptions) {
   const first = component.start!, rule = component.recurrence, result: ICSTime[] = [first]
   if (rule) {
-    const stop = addDays(options.toDate, 2), dayCount = daysBetween(first.date, stop)
+    const windowStop = addDays(options.toDate, 2), stop = rule.until && rule.until.date < windowStop ? addDays(rule.until.date, 2) : windowStop, dayCount = daysBetween(first.date, stop)
     if (dayCount > 10000) error('繰り返しの起点が27年以上前です。対象期間の具体的な予定を書き出してください')
-    let count = 0
-    const firstDay = new Date(`${first.date}T12:00:00Z`).getUTCDay(), firstMonday = addDays(first.date, -((firstDay + 6) % 7))
+    const spec: RRuleSpec = rule.spec ?? { freq: rule.frequency, interval: rule.interval, count: rule.count, until: null, byDay: (rule.weekdays ?? []).map(weekday => ({ weekday, ordinal: null })), byMonthDay: rule.monthDays ?? [], byMonth: [], bySetPos: [], wkst: 1 }
+    // The common engine selects wall dates and counts RRULE instances before EXDATE removal.
+    // ICS resolves the original seconds and UNTIL instant itself; truncating to minutes would admit a late instance.
+    const expansion = expandRRule({ dtstart: `${first.date}T${first.time?.slice(0, 5) ?? '00:00'}`, rrule: { ...spec, until: null }, from: first.date, to: stop < first.date ? first.date : stop, limit: 10001 })
+    if (expansion.truncated) error('繰り返しの展開上限を超えています')
     result.length = 0
-    for (let day = 0; day <= dayCount; day++) {
-      const date = addDays(first.date, day), weekday = new Date(`${date}T12:00:00Z`).getUTCDay()
-      let included = false
-      if (rule.frequency === 'DAILY') included = day % rule.interval === 0
-      if (rule.frequency === 'WEEKLY') included = Math.floor(daysBetween(firstMonday, date) / 7) % rule.interval === 0 && (rule.weekdays ?? [firstDay]).includes(weekday)
-      if (rule.frequency === 'MONTHLY') {
-        const months = (Number(date.slice(0, 4)) - Number(first.date.slice(0, 4))) * 12 + Number(date.slice(5, 7)) - Number(first.date.slice(5, 7)), last = new Date(`${date.slice(0, 7)}-01T12:00:00Z`)
-        last.setUTCMonth(last.getUTCMonth() + 1); last.setUTCDate(0)
-        included = months % rule.interval === 0 && (rule.monthDays ?? [Number(first.date.slice(8))]).some(day => (day > 0 ? day : last.getUTCDate() + day + 1) === Number(date.slice(8)))
-      }
-      if (!included) continue
-      const value = shifted(first, date, options)
-      if (rule.until && value.at > rule.until.at || rule.count !== null && count >= rule.count) break
-      result.push(value); count++
+    for (const local of expansion.occurrences) {
+      const value = shifted(first, local.slice(0, 10), options)
+      if (rule.until && value.at > rule.until.at) break
+      result.push(value)
       if (result.length > 10000) error('繰り返しの展開上限を超えています')
     }
   }

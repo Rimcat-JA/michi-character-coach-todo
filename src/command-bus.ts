@@ -14,10 +14,10 @@ export type CommandBasis = { kind: CommandBasisKind; note?: string }
 export type CommandEntrance = 'ui_human' | 'ui_coach' | 'file' | 'mcp' | 'api'
 export type CommandEnvelope = { schema_version: '1'; command_id: string; type: string; target_id: string | null; expected_revision: number | null; payload: Record<string, unknown>; basis: CommandBasis }
 /** The single snake_case (envelope) to camelCase (ChangeSet) field adapter. */
-export const commandFieldMap = { title: 'title', notes: 'notes', scheduled_date: 'scheduledDate', due_date: 'dueDate', due_at: 'dueAt', manual_points: 'manualPoints' } as const satisfies Record<string, TaskChangeField>
+export const commandFieldMap = { title: 'title', notes: 'notes', scheduled_date: 'scheduledDate', due_date: 'dueDate', due_at: 'dueAt', manual_points: 'manualPoints', labels: 'labels' } as const satisfies Record<string, TaskChangeField>
 export type CommandField = keyof typeof commandFieldMap
 export const commandFields = Object.keys(commandFieldMap) as CommandField[]
-export const protectedCommandFields: CommandField[] = ['title', 'due_date', 'due_at', 'manual_points']
+export const protectedCommandFields: CommandField[] = ['title', 'due_date', 'due_at', 'manual_points', 'labels']
 export type CommandGrant = Readonly<{ fields: CommandField[]; operations: string[]; mutationMode: 'require_approval' | 'auto_within_bounds'; maxScheduleShiftDays: number | null; autoMaxScheduleShiftDays?: number | null }>
 /** Built only by trusted entrance adapters below; a cloned or JSON actor is never accepted. */
 export type ActorContext = Readonly<{ entrance: CommandEntrance; principal: ChangePrincipal; ownerId: string; datasetId: string; grant: CommandGrant | null; sourceRevisions: SourceRevision[]; fieldOrigins?: Partial<Record<TaskChangeField, TaskFieldOrigin>>; label: string | null; creationContainerId?: string | null }>
@@ -153,6 +153,7 @@ function verifyBasis(envelope: CommandEnvelope, actor: ActorContext) {
   if (envelope.basis.kind !== allowed) fail('BASIS_UNVERIFIED', 'この入口からの根拠は確認できません。本人の確認で扱います')
 }
 export function validateTaskPayload(payload: Record<string, unknown>, allowed: readonly string[]) {
+  if (Object.hasOwn(payload, 'labels') && (!Array.isArray(payload.labels) || payload.labels.length > 30 || payload.labels.some(name => typeof name !== 'string' || !name.trim() || name.length > 100) || new Set(payload.labels).size !== payload.labels.length)) fail('INVALID_PAYLOAD','ラベルが不正です')
   const fields = Object.keys(payload)
   if (!fields.length || fields.some(field => !allowed.includes(field))) fail('UNSUPPORTED_FIELD', 'タイトル・メモ・予定日・期限・本人指定ポイント以外は変更できません。完了・配分・系列・権限には別の操作が必要です')
   if (Object.hasOwn(payload, 'title') && (typeof payload.title !== 'string' || !payload.title.trim() || payload.title.length > 300) || Object.hasOwn(payload, 'notes') && (typeof payload.notes !== 'string' || payload.notes.length > 50000) || ['scheduled_date', 'due_date'].some(field => Object.hasOwn(payload, field) && !date(payload[field])) || Object.hasOwn(payload, 'manual_points') && !integer(payload.manual_points, 0, 100000) || Object.hasOwn(payload, 'due_at') && payload.due_at !== null && !(record(payload.due_at) && exact(payload.due_at, ['at', 'timezone']) && typeof payload.due_at.at === 'string' && typeof payload.due_at.timezone === 'string')) fail('INVALID_PAYLOAD', '変更値が不正です')

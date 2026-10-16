@@ -10,7 +10,7 @@ import { today } from './domain'
 const issued=new Map<string,{instruction:VerifiedTaskInstruction;action:string;context:ExternalToolContext}>()
 export async function confirmExternalInstructionFromUI(request:ExternalChangeRequest,context:ExternalToolContext,event:Event){
  request=structuredClone(request);context=structuredClone(context)
- const changes=externalTaskChanges(request)
+ const changes=await externalTaskChanges(request,context.ownerId)
  for(const [id,value] of issued)if(Date.parse(value.instruction.expiresAt)<=Date.now())issued.delete(id)
  if(issued.size>=1000)throw Error('INSTRUCTION_LIMIT')
  const {registration}=await assertExternalToolAuthority(context),grant:CommandGrant={fields:registration.client.grant.fields as CommandField[],operations:['task.update'],mutationMode:'require_approval',maxScheduleShiftDays:registration.client.grant.max_schedule_shift_days}
@@ -28,7 +28,7 @@ export async function confirmExternalInstructionFromUI(request:ExternalChangeReq
 }
 /** Persisted metadata cannot recreate owner instruction authority after restart or backup restore. */
 export async function verifiedExternalInstruction(request:ExternalChangeRequest,context:ExternalToolContext):Promise<VerifiedTaskInstruction|null>{
- const changes=externalTaskChanges(request)
+ const changes=await externalTaskChanges(request,context.ownerId)
  if(request.basis.kind!=='app_instruction')return null
  const value=issued.get(request.basis.reference_id)
  if(!value||value.action!==externalActionJSON(request)||canonicalJSON(value.context)!==canonicalJSON(context))return null

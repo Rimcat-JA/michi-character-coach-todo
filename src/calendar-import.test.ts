@@ -3,6 +3,7 @@ import { canonicalJSON } from './canonical'
 import { calendarFixture } from './calendar-test-fixtures'
 import { buildCalendarChangePlan, resolveCalendarOccurrences, type CalendarRulesState } from './calendar-resolver'
 import { validateCalendarRulesState } from './calendar-rules-validation'
+import { addDays } from './domain'
 import { parseCalendarImport, prepareICSConfiguration, type CalendarImportOptions, type ICSImportTarget } from './calendar-import'
 
 const options: CalendarImportOptions = { timezone: 'Asia/Tokyo', fromDate: '2026-10-01', toDate: '2026-10-31' }
@@ -22,13 +23,42 @@ describe('ICSの厳密な読取', () => {
   it('weekly COUNT/EXDATE/RDATE を展開し、元RIDを維持する', () => { const raw = ics(event(['RRULE:FREQ=WEEKLY;BYDAY=FR;COUNT=3', 'EXDATE:20261009T000000Z', 'RDATE:20261012T000000Z'])); const result = parsed(raw); expect(result.occurrences.map(item => item.startAt.slice(0, 10))).toEqual(['2026-10-02', '2026-10-12', '2026-10-16']); expect(result.occurrences[0].recurrenceId).toBe('T:2026-10-02T00:00:00.000Z'); expect(result.exclusions[0].recurrenceId).toBe('T:2026-10-09T00:00:00.000Z') })
   it('動いた例外は元のRECURRENCE-IDで系列回を置換する', () => { const exception = event(['RECURRENCE-ID:20261009T000000Z']).replace('SEQUENCE:1', 'SEQUENCE:2').replace('DTSTART:20261002T000000Z', 'DTSTART:20261010T030000Z').replace('DTEND:20261002T010000Z', 'DTEND:20261010T040000Z'); const result = parsed(ics(`${event(['RRULE:FREQ=WEEKLY;COUNT=3'])}\r\n${exception}`)); expect(result.occurrences).toHaveLength(3); expect(result.occurrences[1].recurrenceId).toBe('T:2026-10-09T00:00:00.000Z'); expect(result.occurrences[1].startAt).toBe('2026-10-10T03:00:00.000Z') })
   it('month end の不存在日は創作せずnegative BYMONTHDAYを扱う', () => { const raw = ics(event(['RRULE:FREQ=MONTHLY;BYMONTHDAY=-1;COUNT=3']).replaceAll('20261002', '20260930')); const result = parsed(raw, { fromDate: '2026-09-01', toDate: '2026-11-30' }); expect(result.occurrences.map(item => item.startAt.slice(0, 10))).toEqual(['2026-09-30', '2026-10-31', '2026-11-30']) })
+  it.each([
+    ['yearly', '20261002', 'FREQ=YEARLY;COUNT=2', '2027-10-01', '2027-10-31', ['2027-10-02']],
+    ['last weekday', '20261030', 'FREQ=MONTHLY;BYDAY=MO,TU,WE,TH,FR;BYSETPOS=-1;COUNT=3', '2026-10-01', '2026-12-31', ['2026-10-30', '2026-11-30', '2026-12-31']],
+    ['ordinal weekday', '20261002', 'FREQ=MONTHLY;BYDAY=1FR;COUNT=3', '2026-10-01', '2026-12-31', ['2026-10-02', '2026-11-06', '2026-12-04']],
+    ['Sunday week start', '20261004', 'FREQ=WEEKLY;INTERVAL=2;BYDAY=SU,TU;WKST=SU;COUNT=4', '2026-10-01', '2026-10-31', ['2026-10-04', '2026-10-06', '2026-10-18', '2026-10-20']],
+  ])('%s は共通RRULEの選択・回数を使う', (_, start, rule, fromDate, toDate, dates) => {
+    const result = parsed(ics(event([`RRULE:${rule}`]).replaceAll('20261002', start)), { fromDate, toDate })
+    expect(result.occurrences.map(item => item.startAt.slice(0, 10))).toEqual(dates)
+  })
+  it('RRULEでも秒とUTC UNTIL境界を丸めない', () => {
+    const body = event(['RRULE:FREQ=DAILY;UNTIL=20261003T000014Z']).replace('20261002T000000Z', '20261002T000015Z').replace('20261002T010000Z', '20261002T010015Z')
+    expect(parsed(ics(body)).occurrences.map(row => row.startAt)).toEqual(['2026-10-02T00:00:15.000Z'])
+  })
+  it('終日YEARLYとEXDATE/RDATEの型・COUNTを維持する', () => {
+    const body = event(['RRULE:FREQ=YEARLY;COUNT=2', 'EXDATE;VALUE=DATE:20261002', 'RDATE;VALUE=DATE:20261012']).replace('DTSTART:20261002T000000Z', 'DTSTART;VALUE=DATE:20261002').replace('DTEND:20261002T010000Z', 'DTEND;VALUE=DATE:20261003')
+    const result = parsed(ics(body)); expect(result.occurrences.map(row => row.recurrenceId)).toEqual(['D:2026-10-12']); expect(result.occurrences[0].allDay).toBe(true)
+  })
+  it('旧対応RRULEの保存版digestに使う表現を変えない', () => {
+    expect(parsed(ics(event(['RRULE:FREQ=WEEKLY;BYDAY=FR,MO;COUNT=3']))).components[0].recurrence).toEqual({ frequency: 'WEEKLY', interval: 1, count: 3, until: null, weekdays: [5, 1], monthDays: null })
+  })
+  it('上限付近のUTC UNTILで、終了後の選択候補を実際の発生回に数えない', () => {
+    const last = addDays('2026-10-02', 9998)
+    const result = parsed(ics(event([`RRULE:FREQ=DAILY;UNTIL=${last.replaceAll('-','')}T000000Z`])), {fromDate:last,toDate:last})
+    expect(result.occurrences.map(row=>row.startAt)).toEqual([`${last}T00:00:00.000Z`])
+  })
+  it('将来回のDST不明時刻は選択や秒を推測せず取込を止める', () => {
+    const body = event(['RRULE:FREQ=DAILY;COUNT=3']).replace('DTSTART:20261002T000000Z', 'DTSTART;TZID=America/New_York:20260307T023015').replace('DTEND:20261002T010000Z', 'DURATION:PT1H')
+    expect(() => parsed(ics(body), { fromDate: '2026-03-07', toDate: '2026-03-09' })).toThrow()
+  })
   it('DURATIONは日をwall dateで先に進めDSTを保つ', () => { const raw = ics(event().replace('DTSTART:20261002T000000Z', 'DTSTART;TZID=America/New_York:20261101T003000').replace('DTEND:20261002T010000Z', 'DURATION:P1D')); const result = parsed(raw, { fromDate: '2026-11-01', toDate: '2026-11-02' }); expect(Date.parse(result.occurrences[0].endAt) - Date.parse(result.occurrences[0].startAt)).toBe(25 * 3600000) })
   it.each([
     ['UID欠落', event().replace('UID:meeting@example.test\r\n', '')], ['不正日', event().replace('20261002T000000Z', '20260230T000000Z')],
     ['夏時間gap', event().replace('DTSTART:20261002T000000Z', 'DTSTART;TZID=America/New_York:20260308T023000')], ['夏時間fold', event().replace('DTSTART:20261002T000000Z', 'DTSTART;TZID=America/New_York:20261101T013000')],
     ['UID重複', event(['UID:other'])], ['VTIMEZONE', 'BEGIN:VTIMEZONE\r\nEND:VTIMEZONE'],
     ['無終了', event().replace('DTEND:20261002T010000Z\r\n', '')], ['未知zone', event().replace('DTSTART:20261002T000000Z', 'DTSTART;TZID=Unknown/Zone:20261002T090000')],
-    ['complex RRULE', event(['RRULE:FREQ=YEARLY'])], ['ordinal BYDAY', event(['RRULE:FREQ=WEEKLY;BYDAY=1FR'])], ['COUNT/UNTIL', event(['RRULE:FREQ=DAILY;COUNT=2;UNTIL=20261020T000000Z'])],
+    ['unsupported RRULE', event(['RRULE:FREQ=HOURLY'])], ['ordinal BYDAY', event(['RRULE:FREQ=WEEKLY;BYDAY=1FR'])], ['COUNT/UNTIL', event(['RRULE:FREQ=DAILY;COUNT=2;UNTIL=20261020T000000Z'])],
     ['PERIOD RDATE', event(['RDATE;VALUE=PERIOD:20261003T000000Z/20261003T010000Z'])], ['RANGE exception', event(['RECURRENCE-ID;RANGE=THISANDFUTURE:20261002T000000Z'])],
     ['attachment', event(['ATTACH:https://example.test/a'])], ['escape', event().replace('SUMMARY:会議', 'SUMMARY:bad\\x')], ['transparent', event(['TRANSP:TRANSPARENT'])], ['終了前', event().replace('DTEND:20261002T010000Z', 'DTEND:20261001T010000Z')],
   ])('%s はfail closedでpreviewを返さない', (_, body) => expect(() => parsed(ics(body))).toThrow())

@@ -6,7 +6,7 @@ import { ChangeSetError, changePolicyFor } from './change-set'
 import { operationMode } from './automation-policy'
 import { calendarRuleEditorDefinition } from './calendar-rule-editor'
 import { loadCalendarRulesState } from './calendar-rules-save'
-import { validateRoutineAssistCandidate, type RoutineAssistCandidate } from './routine-assist'
+import { routineAssistPrevious, routineAssistTrigger, routineTriggerTime, validateRoutineAssistCandidate, type RoutineAssistCandidate, type RoutineAssistPrevious, type RoutineAssistSelection } from './routine-assist'
 import { confirmExternalRoutineInstructionFromUI, nativeRoutineEvent } from './routine-instruction'
 import { applyRoutineAssistConfigurationFromUI, cancelRoutineAssistance, prepareExternalRoutineConfiguration, type PreparedRoutineAssistance } from './routine-assist-save'
 import { assertPendingCommand, commandOutcome, registerCommandType, reprepareCommand, type CommandEnvelope, type CommandPreparation, type PreparedCommand } from './command-bus'
@@ -17,17 +17,19 @@ import type { FileBridgeScope, FileBridgeTrigger } from './file-bridge-types'
 export type RoutineCommandBody = { stage: 'owner_values'; candidate: RoutineAssistCandidate; ruleTitle: string; ruleRevision: number } | { stage: 'review'; assistance: PreparedRoutineAssistance; ruleTitle: string }
 export const routineBody = (prepared: PreparedCommand) => prepared.body as RoutineCommandBody
 function fail(code: string, message: string): never { throw new ChangeSetError(code, message) }
-export function triggerFromCommand(trigger: FileBridgeTrigger): CalendarRule['trigger'] {
+export function triggerFromCommand(trigger: FileBridgeTrigger, selection: RoutineAssistSelection, previous: RoutineAssistPrevious): CalendarRule['trigger'] {
   if (trigger.kind === 'weekly') return { kind: 'weekly', weekdays: [...trigger.weekdays], time: trigger.time }
   if (trigger.kind === 'monthly_business') return { kind: 'monthly_business', ordinal: trigger.ordinal, from: trigger.from, time: trigger.time }
-  return { kind: 'activity_relative', activityId: trigger.activity_id, edge: trigger.edge, offsetDays: trigger.offset_days, offsetMinutes: trigger.offset_minutes }
+  if (trigger.kind === 'activity_relative') return { kind: 'activity_relative', activityId: trigger.activity_id, edge: trigger.edge, offsetDays: trigger.offset_days, offsetMinutes: trigger.offset_minutes }
+  return routineAssistTrigger(trigger.kind === 'rrule' ? { kind: 'rrule', rrule: trigger.rrule } : { kind: 'completion_relative', afterDays: trigger.after_days }, selection, previous)
 }
-/** RRULE and completion-relative series (N05) are not offered to external agents in this version. */
-export const externallyEditableTrigger = (trigger: CalendarRule['trigger']) => trigger.kind === 'weekly' || trigger.kind === 'monthly_business' || trigger.kind === 'activity_relative'
+export const externallyEditableTrigger = (trigger: CalendarRule['trigger']) => ['weekly', 'monthly_business', 'activity_relative', 'rrule', 'completion_relative'].includes(trigger.kind)
 export function triggerForCommand(trigger: CalendarRule['trigger']): FileBridgeTrigger | null {
   if (trigger.kind === 'activity_relative') return { kind: 'activity_relative', activity_id: trigger.activityId, edge: trigger.edge, offset_days: trigger.offsetDays, offset_minutes: trigger.offsetMinutes }
   if (trigger.kind === 'weekly') return { kind: 'weekly', weekdays: [...trigger.weekdays], time: trigger.time }
   if (trigger.kind === 'monthly_business') return { kind: 'monthly_business', ordinal: trigger.ordinal, from: trigger.from, time: trigger.time }
+  if (trigger.kind === 'rrule') return { kind: 'rrule', rrule: trigger.rrule }
+  if (trigger.kind === 'completion_relative') return { kind: 'completion_relative', after_days: trigger.afterDays }
   return null
 }
 function scopeFromCommand(scope: FileBridgeScope): CalendarChangeScope {
@@ -39,13 +41,16 @@ export function externalRoutineCandidate(envelope: CommandEnvelope, state: Calen
   const rule = state.rules.find(value => value.id === envelope.target_id)
   if (!rule) fail('UNAUTHORIZED', '選択していない系列は変更できません')
   if (rule.revision !== envelope.expected_revision) fail('CONFLICT', '系列が更新されています。新しい版で依頼し直してください')
-  const payload = envelope.payload as { scope: FileBridgeScope; definition: { trigger: FileBridgeTrigger } }, previous = calendarRuleEditorDefinition(rule), trigger = triggerFromCommand(payload.definition.trigger)
+  const payload = envelope.payload as { scope: FileBridgeScope; definition: { trigger: FileBridgeTrigger } }, previous = calendarRuleEditorDefinition(rule)
   const context = state.contexts.find(value => value.id === rule.contextId), step = previous.steps[0]
   if (!context || !step) fail('ROUTINE_INVALID', '系列の対象を確認できません')
-  if (!externallyEditableTrigger(previous.trigger)) fail('ROUTINE_INVALID', 'RRULE・完了起点の系列は外部からは変更できません。アプリの繰り返し画面で本人が変更してください')
-  const time = trigger.kind === 'weekly' || trigger.kind === 'monthly_business' ? trigger.time : 'time' in previous.trigger ? previous.trigger.time : '00:00'
+  const requested = payload.definition.trigger, scope = scopeFromCommand(payload.scope)
+  const time = requested.kind === 'weekly' || requested.kind === 'monthly_business' ? requested.time : routineTriggerTime(previous.trigger) ?? '00:00'
+  const selection: RoutineAssistSelection = { contextId: rule.contextId, bindingId: rule.bindingId, calendarId: rule.calendarId, activityId: requested.kind === 'activity_relative' ? requested.activity_id : null, timezone: context.timezone, validFrom: rule.validFrom, validTo: rule.validTo, time, stepKind: step.kind, durationMinutes: step.durationMinutes, scheduledOffsetDays: step.scheduledOffsetDays, dueOffsetDays: step.dueOffsetDays }
+  let trigger: CalendarRule['trigger']
+  try { trigger = triggerFromCommand(requested, selection, routineAssistPrevious({ targetRuleId: rule.id, scope }, state)) } catch (error) { fail('ROUTINE_INVALID', error instanceof Error ? error.message : '周期の指定が不正です') }
   const candidate: RoutineAssistCandidate = {
-    input: { message: `外部エージェント ${actorId} からの周期変更依頼（コマンド ${envelope.command_id}）`, referenceDate: today(), targetRuleId: rule.id, expectedRuleRevision: rule.revision, selection: { contextId: rule.contextId, bindingId: rule.bindingId, calendarId: rule.calendarId, activityId: trigger.kind === 'activity_relative' ? trigger.activityId : null, timezone: context.timezone, validFrom: rule.validFrom, validTo: rule.validTo, time, stepKind: step.kind, durationMinutes: step.durationMinutes, scheduledOffsetDays: step.scheduledOffsetDays, dueOffsetDays: step.dueOffsetDays }, scope: scopeFromCommand(payload.scope) },
+    input: { message: `外部エージェント ${actorId} からの周期変更依頼（コマンド ${envelope.command_id}）`, referenceDate: today(), targetRuleId: rule.id, expectedRuleRevision: rule.revision, selection, scope },
     definition: { title: previous.title, enabled: previous.enabled, trigger, steps: structuredClone(previous.steps) },
     notices: ['外部エージェントの依頼です。名称・点数・手順・有効期間は変更しません。次の回を確認して設定を承認し、発生回の反映は別に承認します。'],
   }

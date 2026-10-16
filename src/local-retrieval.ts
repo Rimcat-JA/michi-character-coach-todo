@@ -20,7 +20,7 @@ export async function searchLocalContext(query: string, fromDate: string, toDate
   return refreshLocalRetrieval(result)
 }
 
-export async function refreshLocalRetrieval(result: LocalRetrievalResult): Promise<LocalRetrievalResult | null> {
+export async function refreshLocalRetrieval(result: LocalRetrievalResult, order: 'date' | 'input' = 'date'): Promise<LocalRetrievalResult | null> {
   let settings = await db.settings.get('main'); if (!settings || settings.profileId !== result.ownerId || settings.datasetId !== result.datasetId) return null
   settings = await db.settings.get('main'); if (!settings || settings.profileId !== result.ownerId || settings.datasetId !== result.datasetId) return null
   const accepted: LocalRetrievalHit[] = []
@@ -43,5 +43,5 @@ export async function refreshLocalRetrieval(result: LocalRetrievalResult): Promi
   }
   const latest = await db.settings.get('main')
   if (!latest || latest.profileId !== result.ownerId || latest.datasetId !== result.datasetId || changePolicyFor(latest).epoch !== changePolicyFor(settings).epoch) return null
-  return { ...result, hits: accepted.sort((a, b) => b.date.localeCompare(a.date)).slice(0, 200), coverage }
+  return { ...result, hits: (order === 'date' ? accepted.sort((a, b) => b.date.localeCompare(a.date)) : accepted).slice(0, 200), coverage }
 }
