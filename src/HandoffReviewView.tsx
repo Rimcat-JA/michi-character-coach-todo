@@ -6,7 +6,7 @@ import './HandoffSharing.css'
 
 const STATE_LABEL: Record<HandoffTaskState, string> = { identical: '同じ', incoming_only: '取込ファイルだけ変更', local_only: 'この端末だけ変更', both_changed: '両方で変更', created_local: 'この端末だけにある', created_incoming: '取込ファイルだけにある', deleted: '片方で削除', needs_review: '要確認（基準が不明）' }
 const FIELD_LABEL: Record<HandoffField, string> = { title: 'タイトル', notes: 'メモ', project: 'プロジェクト', labels: 'ラベル', scoreMode: 'ポイント方式', manualPoints: '手動ポイント', scheduledDate: '予定日', dueDate: '締め切り', dueAt: '締め切り時刻', status: '状態', completed: '完了', completionNetPoints: '完了の実績pt', deletedAt: '削除' }
-const ROW_LABEL: Record<string, string> = { assessments: '評価履歴', completions: '完了記録', ledger: 'ポイント台帳', sessions: '作業時間', routines: 'ルーティン', containers: 'カテゴリ・プロジェクト', checklistItems: 'チェック項目', taskNotes: 'ノート', taskComments: 'コメント', taskAttachments: '添付', taskDependencies: '依存関係', rollovers: '繰越履歴', habits: '習慣', habitLogs: '習慣の記録', goals: '目標', goalCheckIns: '目標の振り返り', trackerEntries: '記録値', dayNotes: '日記', pomodoroCycles: 'ポモドーロ', reviewRecords: '振り返り' }
+const ROW_LABEL: Record<string, string> = { tasks: 'タスクの詳細', assessments: '評価履歴', completions: '完了記録', ledger: 'ポイント台帳', sessions: '作業時間', routines: 'ルーティン', containers: 'カテゴリ・プロジェクト', checklistItems: 'チェック項目', taskNotes: 'ノート', taskComments: 'コメント', taskAttachments: '添付', taskDependencies: '依存関係', rollovers: '繰越履歴', habits: '習慣', habitLogs: '習慣の記録', goals: '目標', goalCheckIns: '目標の振り返り', trackerEntries: '記録値', dayNotes: '日記', pomodoroCycles: 'ポモドーロ', reviewRecords: '振り返り', labelGroups: 'ラベルグループ', labelDefinitions: 'ラベル定義', savedTemplates: 'テンプレート', planningBuckets: '計画期間', timeBlocks: '時間枠', calendarEvents: '予定', themeRules: '重点テーマ', smartLists: '保存した検索条件', focusSelections: '集中するプロジェクト', trackerDefinitions: '記録項目', tripBundles: '外出のまとまり', calendarRules: '予定資料の規則', achievementPolicies: '実績公開の規則', achievementEvidence: '実績の証拠', achievementExports: '実績の公開記録', taskSourceEvidence: 'タスクの出典' }
 const ADOPT: Partial<Record<HandoffField, AdoptableField>> = { title: 'title', notes: 'notes', scoreMode: 'score', manualPoints: 'score', scheduledDate: 'scheduledDate', dueDate: 'dueDate', dueAt: 'dueDate' }
 const MANUAL_ONLY: HandoffField[] = ['status', 'completed', 'completionNetPoints', 'deletedAt']
 const show = (value: unknown) => value === null || value === undefined || value === '' ? '—' : Array.isArray(value) ? value.join(', ') || '—' : typeof value === 'boolean' ? value ? 'はい' : 'いいえ' : String(value).length > 80 ? `${String(value).slice(0, 80)}…` : String(value)
@@ -32,8 +32,13 @@ export function HandoffReviewTable({ preview, selected, onToggle, onAdopt, onAdo
 }
 export function LocalOnlyRows({ preview }: { preview: HandoffPreview }) {
   const entries = Object.entries(preview.comparison.localOnlyRows)
-  if (!entries.length) return null
-  return <p className="handoff-attention">この端末だけにある記録: {entries.map(([table, count]) => `${ROW_LABEL[table] ?? table}${count}件`).join('、')}。置き換えると失われるため、直接の置き換えはできません。</p>
+  const conflicts = preview.comparison.rowConflicts ?? []
+  const changed = Object.entries(conflicts.reduce<Record<string, number>>((counts, row) => { counts[row.table] = (counts[row.table] ?? 0) + 1; return counts }, {}))
+  if (!entries.length && !changed.length) return null
+  return <div className="handoff-attention">
+    {entries.length > 0 && <p>この端末だけにある記録: {entries.map(([table, count]) => `${ROW_LABEL[table] ?? table}${count}件`).join('、')}。置き換えると失われるため、直接の置き換えはできません。</p>}
+    {changed.length > 0 && <p>内容の変更・削除に確認が必要な記録: {changed.map(([table, count]) => `${ROW_LABEL[table] ?? table}${count}件`).join('、')}。この端末を維持するか、先に書き出してから置き換えてください。</p>}
+  </div>
 }
 
 type Props = { snapshot: Snapshot; password: string; onClose: () => void; onDone: (message: string) => void; onError: (error: unknown) => void }
