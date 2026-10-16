@@ -70,3 +70,12 @@ Native grant/privacy consent was not automated. The computer-use skill's `docs/g
 Real hosts/authentication, Japanese embeddings and model detection/independent judging, human blind holdout, personal-PC/hosted/server synchronization, physical offline/other-user access, real mobile, licensed Live2D/ASR and provider accounts remain unverified. Synthetic load does not remove these limitations. Messenger scope remains mock-only; Gmail mbox stays deferred. Do not invent a deployment version or authorize real account sends implicitly.
 
 Requirements remain **121 = 93 accepted / 19 partial / 9 unconfirmed**. Prior 18/10 was a footer miscount; no individual status was promoted.
+
+## Merge decision (2026-10-16)
+
+The owner decided to merge PR 64 **without** the deferred native checks above. Those checks remain **not performed**; nothing in this section is native Windows acceptance, and no requirement status is promoted. The open checks are listed in "Deferred native checks" and still apply to the merged code.
+
+Pre-merge validation on a second Windows 11 PC (no Computer Use; isolated checkout, synthetic data only), at the top of the stacked series (`96bd494`, which contains this head):
+
+- Vitest 202 files / 2,036 tests pass; OCR 16/16; lint, CJS syntax, TypeScript/build, `check:device-data` and PWA offline 10/10 pass.
+- `test:electron` fails 2 Windows named-pipe tests (`PIPE_UNAVAILABLE:SCRIPT_POLICY`) when the PowerShell execution policy is Undefined (effective Restricted, the Windows 11 default), because `electron/mcp-pipe-server.cjs` launches `mcp-pipe-relay.ps1` via `-File` without an execution-policy argument. With `PSExecutionPolicyPreference=Bypass` set only for the test process, 294 pass / 1 existing platform skip / 0 fail. The code came from PR 61 (already on main), not this PR; GitHub's Windows runners do not reproduce it. Tracked as a separate fix.
