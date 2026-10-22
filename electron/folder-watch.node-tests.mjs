@@ -1,12 +1,24 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs/promises'
+import os from 'node:os'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { createFolderWatch } from './folder-watch.cjs'
-const fixtureBase = path.resolve('qa-output', 'folder-watch')
-async function temporary(prefix) { await fs.mkdir(fixtureBase, { recursive: true }); return fs.mkdtemp(path.join(fixtureBase, prefix)) }
+// The service refuses roots below AppData, .claude, .codex, Default and similar folders, so a checkout there (profile folders, agent worktrees) cannot hold the fixtures.
+async function acceptedBase(candidates) {
+  for (const candidate of candidates.filter(Boolean).map(directory => path.resolve(directory))) {
+    await fs.mkdir(candidate, { recursive: true })
+    const probe = await fs.mkdtemp(path.join(candidate, 'probe-')), service = createFolderWatch()
+    try { await service.start(probe); return candidate } catch (error) { if (!/専用/.test(error.message)) throw error } finally { service.close(); await fs.rm(probe, { recursive: true, force: true }) }
+  }
+  return null
+}
+const fixtureBase = await acceptedBase([process.env.MICHI_TEST_FIXTURE_DIR, fileURLToPath(new URL('../qa-output/folder-watch', import.meta.url)), path.join(os.tmpdir(), 'michi-folder-watch')])
+const skip = fixtureBase ? false : 'checkout and temp folders are both inside folders the service refuses; set MICHI_TEST_FIXTURE_DIR to a plain folder'
+async function temporary(prefix) { return fs.mkdtemp(path.join(fixtureBase, prefix)) }
 async function cleanup(directory) { if (!directory.startsWith(fixtureBase + path.sep)) throw new Error('fixture path escaped'); await fs.rm(directory, { recursive: true, force: true }) }
-test('selected-root changes wait for owner acceptance, missing files never cancel, frozen scans stop', async () => {
+test('selected-root changes wait for owner acceptance, missing files never cancel, frozen scans stop', { skip }, async () => {
   const root = await temporary('michi-watch-'); let active = true
   const service = createFolderWatch({ active: async () => active })
   try {
@@ -24,7 +36,7 @@ test('selected-root changes wait for owner acceptance, missing files never cance
     assert.equal(await service.start(root), id)
   } finally { service.close(); await cleanup(root) }
 })
-test('root escape, junctions, stale file contents and system roots are refused', async () => {
+test('root escape, junctions, stale file contents and system roots are refused', { skip }, async () => {
   const root = await temporary('michi-watch-'), outside = await temporary('michi-watch-outside-'), service = createFolderWatch()
   try {
     await fs.writeFile(path.join(outside, 'secret.txt'), 'outside'); await fs.symlink(outside, path.join(root, 'link'), 'junction')
