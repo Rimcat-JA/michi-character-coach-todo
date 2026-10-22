@@ -7,7 +7,8 @@ async function createMCPPipeServer({handle}){
  // Windows 11 leaves the script policy Undefined (= Restricted). -ExecutionPolicy sets only this helper's Process scope; a Group Policy setting still takes precedence, and a blocked script still fails closed as SCRIPT_POLICY.
  const child=spawn(path.join(process.env.SystemRoot??'C:\\Windows','System32','WindowsPowerShell','v1.0','powershell.exe'),['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',path.join(__dirname,'mcp-pipe-relay.ps1'),'-PipeName',pipeName],{shell:false,windowsHide:true,stdio:['pipe','pipe','pipe']})
  let closed=false,exited=false,buffer=Buffer.alloc(0),readyResolve,readyReject,stderrBytes=0,diagnostic='',startupFailure=''
- const ready=new Promise((resolve,reject)=>{readyResolve=resolve;readyReject=reject}),timer=setTimeout(()=>{readyReject(Error('PIPE_START_TIMEOUT'));child.kill()},15000)
+ // PowerShell start plus the Add-Type compile takes ~0.4 s idle but 6-7 s on two busy cores (CI saw >15 s once), so allow 30 s.
+ const ready=new Promise((resolve,reject)=>{readyResolve=resolve;readyReject=reject}),timer=setTimeout(()=>{readyReject(Error('PIPE_START_TIMEOUT'));child.kill()},30000)
  const write=packet=>{if(closed)return;const line=JSON.stringify(packet)+'\n';if(Buffer.byteLength(line)+child.stdin.writableLength>2*1024*1024)throw Error('PIPE_OUTPUT_LIMIT');child.stdin.write(line)}
  const send=(sessionId,value)=>{if(value!==null)write({sessionId,line:JSON.stringify(value)})}
  const closeSession=sessionId=>{clearTimeout(sessions.get(sessionId)?.timer);sessions.delete(sessionId);write({sessionId,close:true})}
