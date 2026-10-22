@@ -4,7 +4,8 @@ const path=require('node:path'),crypto=require('node:crypto')
 async function createMCPPipeServer({handle}){
  if(process.platform!=='win32')throw Object.assign(Error('WINDOWS_PIPE_ONLY'),{code:'WINDOWS_PIPE_ONLY'})
  const pipeName='michi-'+crypto.randomBytes(16).toString('hex'),sessions=new Map()
- const child=spawn(path.join(process.env.SystemRoot??'C:\\Windows','System32','WindowsPowerShell','v1.0','powershell.exe'),['-NoProfile','-NonInteractive','-File',path.join(__dirname,'mcp-pipe-relay.ps1'),'-PipeName',pipeName],{shell:false,windowsHide:true,stdio:['pipe','pipe','pipe']})
+ // Windows 11 leaves the script policy Undefined (= Restricted). -ExecutionPolicy sets only this helper's Process scope; a Group Policy setting still takes precedence, and a blocked script still fails closed as SCRIPT_POLICY.
+ const child=spawn(path.join(process.env.SystemRoot??'C:\\Windows','System32','WindowsPowerShell','v1.0','powershell.exe'),['-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',path.join(__dirname,'mcp-pipe-relay.ps1'),'-PipeName',pipeName],{shell:false,windowsHide:true,stdio:['pipe','pipe','pipe']})
  let closed=false,exited=false,buffer=Buffer.alloc(0),readyResolve,readyReject,stderrBytes=0,diagnostic='',startupFailure=''
  const ready=new Promise((resolve,reject)=>{readyResolve=resolve;readyReject=reject}),timer=setTimeout(()=>{readyReject(Error('PIPE_START_TIMEOUT'));child.kill()},15000)
  const write=packet=>{if(closed)return;const line=JSON.stringify(packet)+'\n';if(Buffer.byteLength(line)+child.stdin.writableLength>2*1024*1024)throw Error('PIPE_OUTPUT_LIMIT');child.stdin.write(line)}
