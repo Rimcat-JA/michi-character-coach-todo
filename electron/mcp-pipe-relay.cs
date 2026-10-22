@@ -41,6 +41,16 @@ public static class MichiPipeRelay {
     } finally { Marshal.FreeHGlobal(descriptor); }
     lock (SessionLock) Pipes.Add(pipe); return pipe;
   }
+  // A disposed instance still counts toward the 8-instance limit until its client closes its handle,
+  // so CreateNamedPipe can report ERROR_PIPE_BUSY (231) for a while. Wait for the slot instead of stopping every listener.
+  private static NamedPipeServerStream Recreate(string name, PipeSecurity security) {
+    for (int delay = 20; !Closed; delay = Math.Min(delay * 2, 1000)) {
+      try { return Create(name, security); }
+      catch (Win32Exception error) { if (error.NativeErrorCode != 231) throw; }
+      Thread.Sleep(delay);
+    }
+    return null;
+  }
   private static void Listen(string name, PipeSecurity security, NamedPipeServerStream initial) {
     var pipe = initial;
     while (!Closed) {
@@ -54,7 +64,7 @@ public static class MichiPipeRelay {
         string line; while (!Closed && (line = Line(reader, 262144)) != null) Emit(new { kind = "request", sessionId = session, line = line });
       } catch { /* No raw protocol text or credential enters diagnostics. */ }
       finally { lock (SessionLock) { Writers.Remove(session); SessionPipes.Remove(session); Pipes.Remove(pipe); } pipe.Dispose(); Emit(new { kind = "closed", sessionId = session }); }
-      if (!Closed) { try { pipe = Create(name, security); } catch { Closed = true; } }
+      if (!Closed) { try { pipe = Recreate(name, security); if (pipe == null) return; } catch { Closed = true; } }
     }
   }
   public static void Run(string name) {

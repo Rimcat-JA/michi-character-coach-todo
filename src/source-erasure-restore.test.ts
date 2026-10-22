@@ -15,6 +15,8 @@ import { quoteDigest } from './task-source-evidence'
 import { adoptDetectedTask, enableSyntheticAI, importWorkSlack, quoteModel, secretQuote } from './source-quote-fixtures'
 
 // Synthetic fake-indexeddb regressions only: no real device, account, network or model.
+// The max-selection cases import 20 sources and back up/restore; ~0.6 s alone but >5 s beside routine-catchup on a loaded runner.
+vi.setConfig({ testTimeout: 30000 })
 const failures = vi.hoisted(() => ({ memoryPurge: 0 }))
 vi.mock('./coach-memory', async original => {
   const actual = await original<typeof import('./coach-memory')>()

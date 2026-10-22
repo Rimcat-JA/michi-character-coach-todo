@@ -29,6 +29,13 @@ test('Windows owner-only ACL pipe authenticates independent sessions and closes 
  await server.close()
  await assert.rejects(new Promise((resolve,reject)=>{const socket=net.connect(server.endpoint);socket.once('error',reject);socket.once('connect',()=>{socket.destroy();resolve()})}))
 })
+test('Windows owner pipe helper starts under the stock Restricted script policy', {skip:process.platform!=='win32'}, async t=>{
+ // PSExecutionPolicyPreference is the Process scope the helper inherits; it outranks LocalMachine/CurrentUser, so CI runners that allow scripts there still reproduce a stock Windows 11 PC.
+ const previous=process.env.PSExecutionPolicyPreference;process.env.PSExecutionPolicyPreference='Restricted'
+ let server;try{server=await createMCPPipeServer({handle:async(identity,message)=>({jsonrpc:'2.0',id:message.id,result:{}})})}finally{if(previous===undefined)delete process.env.PSExecutionPolicyPreference;else process.env.PSExecutionPolicyPreference=previous}
+ t.after(()=>server.close())
+ assert.equal(server.acl.protectedDacl,true);assert.equal(server.acl.ownerOnly,true);assert.equal(server.acl.rejectRemoteClients,true)
+})
 test('other platforms do not silently replace owner-only Windows pipe with an unprotected endpoint',{skip:process.platform==='win32'},async()=>{
  await assert.rejects(createMCPPipeServer({handle:()=>{}}),error=>error.code==='WINDOWS_PIPE_ONLY')
 })
